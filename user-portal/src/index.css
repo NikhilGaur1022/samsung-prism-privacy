@@ -1,0 +1,45 @@
+@import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap");
+@import "tailwindcss";
+
+@theme {
+  --color-canvas: #F2F4F7;
+  --color-surface: #FFFFFF;
+  --color-ink: #1B1B1B;
+  --color-ink-muted: #414755;
+  --color-ink-faint: #9AA1AC;
+
+  --color-brand: #0058BC;
+  --color-brand-dark: #00489A;
+  --color-brand-soft: #EAF2FC;
+
+  --color-success: #1E8E3E;
+  --color-success-soft: #E5F5EA;
+
+  --color-warning: #B26A00;
+  --color-warning-soft: #FFF4E1;
+
+  --color-danger: #D93025;
+  --color-danger-soft: #FCEAE9;
+
+  --font-sans: "Manrope", "Segoe UI", system-ui, -apple-system, sans-serif;
+
+  --radius-card: 28px;
+  --radius-chip: 18px;
+  --radius-pill: 999px;
+
+  --shadow-card: 0 4px 12px 0 rgba(16, 24, 40, 0.04);
+  --shadow-float: 0 8px 24px 0 rgba(16, 24, 40, 0.08);
+}
+
+body {
+  margin: 0;
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#root {
+  min-height: 100svh;
+}
