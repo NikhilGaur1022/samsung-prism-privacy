@@ -24,7 +24,11 @@ export default function Profile() {
 
         <div className="mt-6 space-y-2.5">
           {LINKS.map(({ label, to, icon: Icon }) => (
-            <Link key={label} to={to} className="block">
+            <Link
+              key={label}
+              to={to}
+              className="block rounded-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+            >
               <Card className="flex items-center gap-3 py-3.5">
                 <IconChip icon={Icon} tone="brand" size="sm" />
                 <span className="flex-1 text-sm font-semibold text-ink">{label}</span>
@@ -34,7 +38,7 @@ export default function Profile() {
           ))}
         </div>
 
-        <button className="mt-6 flex w-full items-center justify-center gap-2 rounded-card bg-danger-soft py-3.5 text-sm font-bold text-danger">
+        <button className="mt-6 flex w-full items-center justify-center gap-2 rounded-card bg-danger-soft py-3.5 text-sm font-bold text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger">
           <LogOut size={16} strokeWidth={1.75} />
           Sign Out
         </button>

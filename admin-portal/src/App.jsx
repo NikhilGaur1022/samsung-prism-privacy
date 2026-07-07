@@ -1,7 +1,58 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { AuthProvider, RequireRole } from './auth'
+import { ROLES } from './roles'
 import Login from './pages/Login'
 import Dashboard from './pages/Dashboard'
+import Placeholder from './pages/Placeholder'
+import ProjectApprovals from './pages/dpo/ProjectApprovals'
+import ConsentTemplates from './pages/dpo/ConsentTemplates'
+import RequestOversight from './pages/dpo/RequestOversight'
+import SlaMonitoring from './pages/dpo/SlaMonitoring'
+import ComplianceReports from './pages/dpo/ComplianceReports'
+import DsarQueue from './pages/dataAdmin/DsarQueue'
+import DiscoveryWorkspace from './pages/dataAdmin/DiscoveryWorkspace'
+import DataLineage from './pages/dataAdmin/DataLineage'
+import PurgeExport from './pages/dataAdmin/PurgeExport'
+import EvidenceVault from './pages/dataAdmin/EvidenceVault'
+import AuditLogs from './pages/dataAdmin/AuditLogs'
+import MyProjects from './pages/dataOwner/MyProjects'
+import CreateProject from './pages/dataOwner/CreateProject'
+import DataRequirements from './pages/dataOwner/DataRequirements'
+import CollectionProgress from './pages/dataOwner/CollectionProgress'
+import ProcessedData from './pages/dataOwner/ProcessedData'
+import ProjectReports from './pages/dataOwner/ProjectReports'
+import Assignments from './pages/collectionAgent/Assignments'
+import NewSession from './pages/collectionAgent/NewSession'
+import SubjectVerification from './pages/collectionAgent/SubjectVerification'
+import ConsentCheck from './pages/collectionAgent/ConsentCheck'
+import CaptureUpload from './pages/collectionAgent/CaptureUpload'
+import UploadQueue from './pages/collectionAgent/UploadQueue'
+
+const PAGE_COMPONENTS = {
+  '/project-approvals': ProjectApprovals,
+  '/consent-templates': ConsentTemplates,
+  '/request-oversight': RequestOversight,
+  '/sla-monitoring': SlaMonitoring,
+  '/compliance-reports': ComplianceReports,
+  '/dsar-queue': DsarQueue,
+  '/discovery-workspace': DiscoveryWorkspace,
+  '/data-lineage': DataLineage,
+  '/purge-export': PurgeExport,
+  '/evidence-vault': EvidenceVault,
+  '/audit-logs': AuditLogs,
+  '/my-projects': MyProjects,
+  '/create-project': CreateProject,
+  '/data-requirements': DataRequirements,
+  '/collection-progress': CollectionProgress,
+  '/processed-data': ProcessedData,
+  '/project-reports': ProjectReports,
+  '/assignments': Assignments,
+  '/new-session': NewSession,
+  '/subject-verification': SubjectVerification,
+  '/consent-check': ConsentCheck,
+  '/capture-upload': CaptureUpload,
+  '/upload-queue': UploadQueue,
+}
 
 export default function App() {
   return (
@@ -17,6 +68,22 @@ export default function App() {
               </RequireRole>
             }
           />
+          {Object.values(ROLES).flatMap((role) =>
+            role.nav.map(({ label, path }) => {
+              const Page = PAGE_COMPONENTS[path]
+              return (
+                <Route
+                  key={path}
+                  path={path}
+                  element={
+                    <RequireRole allow={[role.key]}>
+                      {Page ? <Page /> : <Placeholder label={label} />}
+                    </RequireRole>
+                  }
+                />
+              )
+            }),
+          )}
           <Route path="/" element={<Navigate to="/login" replace />} />
           <Route path="*" element={<Navigate to="/login" replace />} />
         </Routes>

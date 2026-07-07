@@ -10,7 +10,7 @@ export default function BottomNav() {
             <NavLink
               to={to}
               className={({ isActive }) =>
-                `flex flex-col items-center gap-1 py-2.5 text-[11px] font-semibold transition-colors ${
+                `flex flex-col items-center gap-1 py-2.5 text-[11px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand ${
                   isActive ? 'text-brand' : 'text-ink-faint'
                 }`
               }

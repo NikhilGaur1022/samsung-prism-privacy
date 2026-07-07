@@ -2,19 +2,25 @@ import { useAuth } from '../auth'
 import { ROLES } from '../roles'
 import Sidebar from '../components/Sidebar'
 import StatCard from '../components/StatCard'
-import { ChevronRight, ShieldCheck } from 'lucide-react'
+import PageHeader from '../components/PageHeader'
+import ListPanel from '../components/ListPanel'
+import { ShieldCheck } from 'lucide-react'
 
 export default function Dashboard() {
   const { roleKey } = useAuth()
   const role = ROLES[roleKey]
 
+  const rows = role.queue.map(({ title }) => ({
+    title,
+    subtitle: 'Open details and continue the next permitted action',
+  }))
+
   return (
     <div className="flex min-h-svh bg-canvas">
-      <Sidebar activeLabel={role.nav[0].label} />
+      <Sidebar />
 
       <main className="flex-1 px-10 py-8">
-        <h1 className="text-2xl font-extrabold tracking-tight text-ink">{role.dashboardTitle}</h1>
-        <p className="mt-1 text-sm font-medium text-ink-muted">{role.subtitle}</p>
+        <PageHeader title={role.dashboardTitle} subtitle={role.subtitle} />
 
         <div className="mt-6 grid grid-cols-3 gap-4">
           {role.stats.map((s) => (
@@ -22,21 +28,8 @@ export default function Dashboard() {
           ))}
         </div>
 
-        <div className="mt-6 rounded-card bg-surface p-6 shadow-card">
-          <h2 className="text-base font-bold text-ink">Current Work Queue</h2>
-          <ul className="mt-4 divide-y divide-border">
-            {role.queue.map(({ title }) => (
-              <li key={title} className="flex items-center justify-between py-4 first:pt-0 last:pb-0">
-                <div>
-                  <p className="text-sm font-semibold text-ink">{title}</p>
-                  <p className="mt-0.5 text-xs font-medium text-ink-faint">
-                    Open details and continue the next permitted action
-                  </p>
-                </div>
-                <ChevronRight size={16} className="shrink-0 text-ink-faint" />
-              </li>
-            ))}
-          </ul>
+        <div className="mt-6">
+          <ListPanel title="Current Work Queue" rows={rows} />
         </div>
 
         <div className="mt-6 flex gap-3 rounded-card bg-surface p-5 shadow-card">

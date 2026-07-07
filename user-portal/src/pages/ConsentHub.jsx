@@ -55,7 +55,7 @@ export default function ConsentHub() {
               role="switch"
               aria-checked={revoked}
               onClick={() => setRevoked((v) => !v)}
-              className={`relative h-6 w-11 shrink-0 rounded-pill transition-colors ${
+              className={`relative h-6 w-11 shrink-0 rounded-pill transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger ${
                 revoked ? 'bg-danger' : 'bg-black/15'
               }`}
             >
@@ -70,7 +70,9 @@ export default function ConsentHub() {
 
         <div className="mt-6 flex items-center justify-between">
           <h2 className="text-base font-bold text-ink">Recent Requests</h2>
-          <button className="text-sm font-semibold text-brand">View All</button>
+          <button className="rounded text-sm font-semibold text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
+            View All
+          </button>
         </div>
 
         <div className="mt-3 space-y-3 md:grid md:grid-cols-2 md:gap-3 md:space-y-0">
@@ -86,7 +88,9 @@ export default function ConsentHub() {
                   <p className="text-xs font-medium text-ink-muted">{purpose}</p>
                   <div className="mt-1 flex items-center justify-between">
                     <p className="text-[11px] font-medium text-ink-faint">Request ID: #{id}</p>
-                    <button className="text-xs font-semibold text-brand">View Report</button>
+                    <button className="rounded text-xs font-semibold text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
+                      View Report
+                    </button>
                   </div>
                 </div>
               </div>
@@ -104,7 +108,7 @@ export default function ConsentHub() {
           </Card>
           <Link
             to="/rights"
-            className="flex items-center justify-center rounded-card bg-brand text-sm font-bold text-white shadow-card"
+            className="flex items-center justify-center rounded-card bg-brand text-sm font-bold text-white shadow-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-dark"
           >
             Data Request
           </Link>

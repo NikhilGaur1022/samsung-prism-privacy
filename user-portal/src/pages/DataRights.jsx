@@ -64,7 +64,9 @@ export default function DataRights() {
             </div>
             <div className="mt-2 flex items-center justify-between">
               <span className="text-xs font-medium text-ink-muted">65% complete</span>
-              <button className="text-xs font-semibold text-danger">Cancel Request</button>
+              <button className="rounded text-xs font-semibold text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger">
+                Cancel Request
+              </button>
             </div>
           </Card>
 
@@ -80,7 +82,9 @@ export default function DataRights() {
 
         <div className="mt-6 flex items-center justify-between">
           <p className="text-xs font-bold uppercase tracking-wide text-ink-faint">Audit Log</p>
-          <button className="text-xs font-semibold text-brand">Filter</button>
+          <button className="rounded text-xs font-semibold text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
+            Filter
+          </button>
         </div>
 
         <div className="mt-3 divide-y divide-black/5 rounded-card bg-surface px-4 shadow-card">
@@ -103,7 +107,7 @@ export default function DataRights() {
           ))}
         </div>
 
-        <button className="mt-3 mb-6 w-full text-center text-sm font-semibold text-brand">
+        <button className="mt-3 mb-6 w-full rounded text-center text-sm font-semibold text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
           View Full Audit History
         </button>
       </div>

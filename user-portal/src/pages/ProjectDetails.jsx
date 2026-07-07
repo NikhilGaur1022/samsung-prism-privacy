@@ -66,10 +66,10 @@ export default function ProjectDetails() {
           </div>
 
           <div className="mt-6 space-y-3 pb-6">
-            <button className="w-full rounded-card bg-brand py-3.5 text-sm font-bold text-white shadow-card">
+            <button className="w-full rounded-card bg-brand py-3.5 text-sm font-bold text-white shadow-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-dark">
               Manage Consent
             </button>
-            <button className="flex w-full items-center justify-center gap-2 rounded-card bg-danger-soft py-3.5 text-sm font-bold text-danger">
+            <button className="flex w-full items-center justify-center gap-2 rounded-card bg-danger-soft py-3.5 text-sm font-bold text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger">
               <ShieldOff size={16} strokeWidth={1.75} />
               Revoke Access
             </button>

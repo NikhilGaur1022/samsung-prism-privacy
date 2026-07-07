@@ -28,8 +28,9 @@ export function useAuth() {
   return useContext(AuthContext)
 }
 
-export function RequireRole({ children }) {
+export function RequireRole({ children, allow }) {
   const { roleKey } = useAuth()
   if (!roleKey) return <Navigate to="/login" replace />
+  if (allow && !allow.includes(roleKey)) return <Navigate to="/dashboard" replace />
   return children
 }

@@ -20,7 +20,11 @@ export default function Projects() {
 
         <div className="mt-5 space-y-3 md:grid md:grid-cols-2 md:gap-3 md:space-y-0">
           {PROJECTS.map(({ id, name, detail, icon: Icon, tone, status }) => (
-            <Link key={id} to={`/consent/${id}`} className="block">
+            <Link
+              key={id}
+              to={`/consent/${id}`}
+              className="block rounded-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+            >
               <Card className="flex items-center gap-3">
                 <IconChip icon={Icon} tone="brand" />
                 <div className="min-w-0 flex-1">

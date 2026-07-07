@@ -49,7 +49,10 @@ export default function Dashboard() {
           </div>
         </div>
 
-        <Link to="/rights" className="mt-4 block">
+        <Link
+          to="/rights"
+          className="mt-4 block rounded-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+        >
           <Card className="flex items-center gap-3 bg-warning-soft">
             <IconChip icon={Bell} tone="warning" size="sm" />
             <div className="flex-1">
@@ -69,7 +72,11 @@ export default function Dashboard() {
 
         <div className="mt-3 space-y-3 md:grid md:grid-cols-2 md:gap-3 md:space-y-0">
           {PROJECTS.map(({ id, name, detail, icon: Icon }) => (
-            <Link key={id} to={`/consent/${id}`} className="block">
+            <Link
+              key={id}
+              to={`/consent/${id}`}
+              className="block rounded-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+            >
               <Card className="flex items-center gap-3">
                 <IconChip icon={Icon} tone="brand" />
                 <div className="min-w-0 flex-1">

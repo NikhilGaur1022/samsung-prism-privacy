@@ -18,7 +18,7 @@ export default function SidebarNav() {
               <NavLink
                 to={to}
                 className={({ isActive }) =>
-                  `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold transition-colors ${
+                  `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand ${
                     isActive
                       ? 'bg-brand-soft text-brand'
                       : 'text-ink-muted hover:bg-canvas'
