@@ -1,0 +1,48 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap");
+@import "tailwindcss";
+
+@theme {
+  --color-canvas: #F5F7FB;
+  --color-surface: #FFFFFF;
+  --color-sidebar: #172033;
+  --color-sidebar-muted: #8B96AB;
+
+  --color-ink: #0F172A;
+  --color-ink-muted: #64748B;
+  --color-ink-faint: #94A3B8;
+  --color-border: #E2E8F0;
+
+  --color-brand: #0058BC;
+  --color-brand-dark: #00489A;
+  --color-brand-soft: #E8F0FB;
+
+  --color-success: #15803D;
+  --color-success-soft: #DCFCE7;
+
+  --color-warning: #B45309;
+  --color-warning-soft: #FEF3C7;
+
+  --color-danger: #B91C1C;
+  --color-danger-soft: #FEE2E2;
+
+  --font-sans: "Inter", system-ui, -apple-system, sans-serif;
+
+  --radius-card: 14px;
+  --radius-pill: 999px;
+
+  --shadow-card: 0 1px 2px 0 rgba(16, 24, 40, 0.04), 0 1px 3px 0 rgba(16, 24, 40, 0.05);
+  --shadow-float: 0 12px 32px 0 rgba(15, 23, 42, 0.12);
+}
+
+body {
+  margin: 0;
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#root {
+  min-height: 100svh;
+}
