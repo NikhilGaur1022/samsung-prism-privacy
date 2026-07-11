@@ -1,0 +1,76 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  directUrl  = env("DIRECT_URL")
+  extensions = [citext]
+}
+
+enum SubjectGroup {
+  SAMSUNG_EMPLOYEE
+  EX_SAMSUNG_EMPLOYEE
+  SEED_LAB_EMPLOYEE
+  EX_SEED_LAB_EMPLOYEE
+  VOLUNTEER
+}
+
+enum SubjectStatus {
+  PENDING
+  ACTIVE
+  INACTIVE
+  REJECTED
+}
+
+enum RegistrationChannel {
+  SELF
+  AGENT
+}
+
+model Subject {
+  masterUserId String @id @default(uuid()) @db.Uuid @map("master_user_id")
+
+  group  SubjectGroup
+  status SubjectStatus @default(PENDING)
+
+  fullName    String
+  email       String? @unique @db.Citext
+  phone       String?
+  employeeRef String? @unique
+
+  registrationChannel RegistrationChannel
+  registeredByUserId  String?             @db.Uuid
+
+  otpVerifiedAt DateTime?
+
+  // Intake-time UX defaults ONLY. Once project_consent_matrix exists (backend-plan.md
+  // Phase 2), THAT table is the sole authority for any gating/consent-check logic.
+  // These three fields must never be read by media-intake, purge, or DSAR logic.
+  generalTerms   Boolean @default(false)
+  piiProcessing  Boolean @default(false)
+  biometricMatch Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([group, status])
+  @@index([employeeRef])
+  @@map("data_subjects")
+}
+
+model AuditLog {
+  id          String   @id @default(uuid()) @db.Uuid
+  entityType  String
+  entityId    String   @db.Uuid
+  action      String
+  actorId     String?  @db.Uuid
+  payloadHash String
+  prevHash    String?
+  createdAt   DateTime @default(now())
+
+  @@index([entityType, entityId, createdAt])
+  @@map("audit_log")
+}

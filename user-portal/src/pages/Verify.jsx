@@ -1,13 +1,18 @@
 import { useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { ArrowLeft, RefreshCw, ShieldCheck } from 'lucide-react'
 import IconChip from '../components/IconChip'
+import { verifyOtp } from '../lib/api'
 
 const LENGTH = 6
 
 export default function Verify() {
   const navigate = useNavigate()
+  const location = useLocation()
+  const masterUserId = location.state?.masterUserId
   const [digits, setDigits] = useState(Array(LENGTH).fill(''))
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState(null)
   const inputs = useRef([])
 
   const setDigit = (i, value) => {
@@ -25,6 +30,27 @@ export default function Verify() {
   }
 
   const complete = digits.every(Boolean)
+
+  const handleVerify = async () => {
+    if (!complete || submitting) return
+
+    if (!masterUserId) {
+      setError('Missing registration reference — please register again.')
+      return
+    }
+
+    setSubmitting(true)
+    setError(null)
+
+    try {
+      await verifyOtp(masterUserId, digits.join(''))
+      navigate('/dashboard')
+    } catch (err) {
+      setError(err.message ?? 'Verification failed. Please try again.')
+    } finally {
+      setSubmitting(false)
+    }
+  }
 
   return (
     <div className="mx-auto flex min-h-svh w-full max-w-md flex-col bg-surface px-5 pt-4 md:max-w-sm md:min-h-0 md:my-10 md:rounded-card md:shadow-float md:pb-8">
@@ -58,15 +84,17 @@ export default function Verify() {
         ))}
       </div>
 
+      {error && <p className="mt-4 text-sm font-semibold text-danger">{error}</p>}
+
       <button
-        disabled={!complete}
-        onClick={() => navigate('/dashboard')}
-        className="mt-8 w-full rounded-card bg-brand py-3.5 text-base font-bold text-white shadow-card transition-opacity disabled:opacity-40"
+        disabled={!complete || submitting}
+        onClick={handleVerify}
+        className="mt-8 w-full rounded-card bg-brand py-3.5 text-base font-bold text-white shadow-card transition-opacity disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-dark"
       >
-        Verify &amp; Continue
+        {submitting ? 'Verifying…' : 'Verify & Continue'}
       </button>
 
-      <button className="mt-4 flex items-center justify-center gap-1.5 text-sm font-semibold text-brand">
+      <button className="mt-4 flex items-center justify-center gap-1.5 text-sm font-semibold text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
         <RefreshCw size={14} strokeWidth={2} />
         Resend Code
       </button>

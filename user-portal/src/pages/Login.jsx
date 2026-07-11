@@ -97,7 +97,7 @@ export default function Login() {
 
       <p className="mt-auto pt-8 pb-4 text-center text-xs font-medium text-ink-faint">
         New to Prism?{' '}
-        <Link to="/verify" className="font-semibold text-brand">
+        <Link to="/register" className="font-semibold text-brand">
           Create an account
         </Link>
       </p>

@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import AppLayout from './components/AppLayout'
 import Login from './pages/Login'
+import Register from './pages/Register'
 import Verify from './pages/Verify'
 import Dashboard from './pages/Dashboard'
 import ConsentHub from './pages/ConsentHub'
@@ -14,6 +15,7 @@ export default function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/login" element={<Login />} />
+        <Route path="/register" element={<Register />} />
         <Route path="/verify" element={<Verify />} />
         <Route path="/" element={<Navigate to="/login" replace />} />
         <Route element={<AppLayout />}>
