@@ -7,7 +7,7 @@ datasource db {
   provider   = "postgresql"
   url        = env("DATABASE_URL")
   directUrl  = env("DIRECT_URL")
-  extensions = [citext]
+  extensions = [citext, uuidOssp(map: "uuid-ossp")]
 }
 
 enum SubjectGroup {
@@ -31,13 +31,13 @@ enum RegistrationChannel {
 }
 
 model Subject {
-  masterUserId String @id @default(uuid()) @db.Uuid @map("master_user_id")
+  masterUserId String @id @default(uuid()) @map("master_user_id") @db.Uuid
 
   group  SubjectGroup
   status SubjectStatus @default(PENDING)
 
   fullName    String
-  email       String? @unique @db.Citext
+  email       String  @unique @db.Citext
   phone       String?
   employeeRef String? @unique
 
@@ -45,6 +45,14 @@ model Subject {
   registeredByUserId  String?             @db.Uuid
 
   otpVerifiedAt DateTime?
+
+  refreshTokens RefreshToken[]
+
+  projectConsents     ProjectConsent[]
+  sessionParticipants SessionParticipant[]
+  taggedFaces         FaceDetection[]
+  suggestedClusters   FaceCluster[]
+  photoLinks          PhotoSubject[]
 
   // Intake-time UX defaults ONLY. Once project_consent_matrix exists (backend-plan.md
   // Phase 2), THAT table is the sole authority for any gating/consent-check logic.
@@ -73,4 +81,346 @@ model AuditLog {
 
   @@index([entityType, entityId, createdAt])
   @@map("audit_log")
+}
+
+model AdminUser {
+  id                  String      @id @default(uuid()) @db.Uuid
+  email               String      @unique @db.Citext
+  passwordHash        String?
+  role                AdminRole
+  status              AdminStatus @default(INVITED)
+  invitedByAdminId    String?     @db.Uuid
+  failedLoginAttempts Int         @default(0)
+  lockedUntil         DateTime?
+  lastLoginAt         DateTime?
+  createdAt           DateTime    @default(now())
+  updatedAt           DateTime    @updatedAt
+
+  authTokens    AuthToken[]
+  refreshTokens RefreshToken[]
+
+  ownedProjects      Project[]
+  projectAssignments ProjectAssignment[]
+  sessions           Session[]
+
+  @@index([role, status])
+  @@map("admin_users")
+}
+
+enum AdminRole {
+  super_admin
+  dpo
+  dataOwner
+  collectionAgent
+  dataAdmin
+}
+
+enum AdminStatus {
+  INVITED
+  ACTIVE
+  DISABLED
+}
+
+model OtpCode {
+  id          String     @id @default(uuid()) @db.Uuid
+  email       String     @db.Citext
+  purpose     OtpPurpose
+  codeHash    String
+  attempts    Int        @default(0)
+  maxAttempts Int        @default(5)
+  expiresAt   DateTime
+  consumedAt  DateTime?
+  createdAt   DateTime   @default(now())
+
+  @@index([email, purpose, consumedAt])
+  @@map("otp_codes")
+}
+
+enum OtpPurpose {
+  SUBJECT_LOGIN
+}
+
+model AuthToken {
+  id          String           @id @default(uuid()) @db.Uuid
+  adminUserId String           @db.Uuid
+  purpose     AuthTokenPurpose
+  tokenHash   String           @unique
+  expiresAt   DateTime
+  consumedAt  DateTime?
+  createdAt   DateTime         @default(now())
+
+  admin AdminUser @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+
+  @@map("auth_tokens")
+}
+
+enum AuthTokenPurpose {
+  ADMIN_INVITE
+  ADMIN_PASSWORD_RESET
+}
+
+// (v2, changed — gap #4): two nullable FK columns + CHECK constraint, replacing the
+// no-FK principalType/principalId design from v1. Chosen specifically because this
+// platform's core purpose is rigorous data lifecycle management (purge/DSAR) — cascade
+// delete on refresh tokens when a subject or admin is deleted actually matters here,
+// not just referential-integrity hygiene for its own sake.
+model RefreshToken {
+  id          String    @id @default(uuid()) @db.Uuid
+  subjectId   String?   @db.Uuid
+  adminUserId String?   @db.Uuid
+  familyId    String    @db.Uuid
+  tokenHash   String    @unique
+  expiresAt   DateTime
+  revokedAt   DateTime?
+  createdAt   DateTime  @default(now())
+
+  subject   Subject?   @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
+  adminUser AdminUser? @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+
+  @@index([subjectId])
+  @@index([adminUserId])
+  @@map("refresh_tokens")
+}
+
+// ---------------------------------------------------------------------------
+// Collection sessions & face tagging (collection-agent workflow)
+// ---------------------------------------------------------------------------
+
+enum ProjectStatus {
+  DRAFT
+  ACTIVE
+  CLOSED
+}
+
+model Project {
+  id            String        @id @default(uuid()) @db.Uuid
+  name          String
+  purpose       String
+  policyVersion String        @default("v1")
+  status        ProjectStatus @default(ACTIVE)
+  ownerAdminId  String?       @db.Uuid
+  retention     String?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  owner       AdminUser?          @relation(fields: [ownerAdminId], references: [id], onDelete: SetNull)
+  assignments ProjectAssignment[]
+  consents    ProjectConsent[]
+  sessions    Session[]
+
+  @@map("projects")
+}
+
+// Scopes a collection agent to the projects they may run sessions for. Every
+// agent-facing query filters through this — an unassigned project 403s.
+model ProjectAssignment {
+  id         String   @id @default(uuid()) @db.Uuid
+  projectId  String   @db.Uuid
+  adminId    String   @db.Uuid
+  assignedAt DateTime @default(now())
+
+  project Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  admin   AdminUser @relation(fields: [adminId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, adminId])
+  @@index([adminId])
+  @@map("project_assignments")
+}
+
+enum ConsentStatus {
+  ACTIVE
+  REVOKED
+  PURGED
+}
+
+// The sole authority for consent gating. Project-wide, all-or-nothing: a subject
+// either consents to the project (and everything it collects, faces included) or
+// they don't. The three booleans on Subject are intake-time UX defaults and are
+// never read here.
+model ProjectConsent {
+  consentId     String        @id @default(uuid()) @db.Uuid
+  subjectId     String        @db.Uuid
+  projectId     String        @db.Uuid
+  status        ConsentStatus @default(ACTIVE)
+  policyVersion String
+  signatureHash String
+  consentedAt   DateTime      @default(now())
+  revokedAt     DateTime?
+
+  subject             Subject              @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
+  project             Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sessionParticipants SessionParticipant[]
+  photos              PhotoSubject[]
+
+  @@unique([subjectId, projectId])
+  @@index([projectId, status])
+  @@map("project_consent_matrix")
+}
+
+enum SessionStatus {
+  ACTIVE
+  PROCESSING
+  TAGGING
+  ARCHIVED
+  FAILED
+}
+
+model Session {
+  id         String        @id @default(uuid()) @db.Uuid
+  code       String        @unique
+  projectId  String        @db.Uuid
+  agentId    String        @db.Uuid
+  status     SessionStatus @default(ACTIVE)
+  location   String?
+  createdAt  DateTime      @default(now())
+  endedAt    DateTime?
+  archivedAt DateTime?
+
+  project      Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  agent        AdminUser            @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  participants SessionParticipant[]
+  photos       Photo[]
+  clusters     FaceCluster[]
+  jobs         RecognitionJob[]
+
+  @@index([agentId, status])
+  @@index([projectId])
+  @@map("sessions")
+}
+
+model SessionParticipant {
+  id        String   @id @default(uuid()) @db.Uuid
+  sessionId String   @db.Uuid
+  subjectId String   @db.Uuid
+  consentId String   @db.Uuid
+  addedAt   DateTime @default(now())
+
+  session Session        @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  subject Subject        @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
+  consent ProjectConsent @relation(fields: [consentId], references: [consentId], onDelete: Cascade)
+
+  @@unique([sessionId, subjectId])
+  @@map("session_participants")
+}
+
+enum CameraSource {
+  IPHONE_LIVE
+  IPHONE_UPLOAD
+  DSLR
+  XR
+}
+
+model Photo {
+  id           String       @id @default(uuid()) @db.Uuid
+  sessionId    String       @db.Uuid
+  storagePath  String
+  cameraSource CameraSource
+  sha256       String
+  mimeType     String
+  sizeBytes    Int
+  width        Int?
+  height       Int?
+  takenAt      DateTime?
+  createdAt    DateTime     @default(now())
+
+  session  Session         @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  faces    FaceDetection[]
+  subjects PhotoSubject[]
+
+  @@unique([sessionId, sha256])
+  @@index([sessionId])
+  @@map("photos")
+}
+
+enum FaceTagStatus {
+  PENDING
+  TAGGED
+  UNKNOWN
+  SKIPPED
+  NOT_A_FACE
+}
+
+// Face embeddings are NEVER persisted here or in Qdrant. The worker computes them
+// in memory, clusters within the session, writes the cluster assignment, and drops
+// the vectors. Only the bbox, the crop, and (once tagged) the subject link survive.
+model FaceDetection {
+  id              String        @id @default(uuid()) @db.Uuid
+  photoId         String        @db.Uuid
+  clusterId       String?       @db.Uuid
+  bbox            Json
+  detScore        Float?
+  cropPath        String?
+  taggedSubjectId String?       @db.Uuid
+  tagStatus       FaceTagStatus @default(PENDING)
+  createdAt       DateTime      @default(now())
+
+  photo         Photo        @relation(fields: [photoId], references: [id], onDelete: Cascade)
+  cluster       FaceCluster? @relation(fields: [clusterId], references: [id], onDelete: SetNull)
+  taggedSubject Subject?     @relation(fields: [taggedSubjectId], references: [masterUserId], onDelete: SetNull)
+
+  @@index([photoId])
+  @@index([clusterId])
+  @@map("face_detections")
+}
+
+// One tagging card in the UI: the same person seen across N photos of a session.
+model FaceCluster {
+  id                 String        @id @default(uuid()) @db.Uuid
+  sessionId          String        @db.Uuid
+  repFaceId          String?       @db.Uuid
+  faceCount          Int           @default(0)
+  suggestedSubjectId String?       @db.Uuid
+  tagStatus          FaceTagStatus @default(PENDING)
+  taggedSubjectId    String?       @db.Uuid
+  createdAt          DateTime      @default(now())
+
+  session          Session         @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  faces            FaceDetection[]
+  suggestedSubject Subject?        @relation(fields: [suggestedSubjectId], references: [masterUserId], onDelete: SetNull)
+
+  @@index([sessionId, tagStatus])
+  @@map("face_clusters")
+}
+
+// Written at finalize. This is what links a photo to a person AND to the consent
+// that permits holding it — purge/DSAR walks consentId, exactly like media_assets.
+model PhotoSubject {
+  id        String   @id @default(uuid()) @db.Uuid
+  photoId   String   @db.Uuid
+  subjectId String   @db.Uuid
+  consentId String   @db.Uuid
+  createdAt DateTime @default(now())
+
+  photo   Photo          @relation(fields: [photoId], references: [id], onDelete: Cascade)
+  subject Subject        @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
+  consent ProjectConsent @relation(fields: [consentId], references: [consentId], onDelete: Cascade)
+
+  @@unique([photoId, subjectId])
+  @@index([consentId])
+  @@map("photo_subjects")
+}
+
+enum JobStatus {
+  QUEUED
+  RUNNING
+  DONE
+  FAILED
+}
+
+model RecognitionJob {
+  id          String    @id @default(uuid()) @db.Uuid
+  sessionId   String    @db.Uuid
+  status      JobStatus @default(QUEUED)
+  photosTotal Int       @default(0)
+  photosDone  Int       @default(0)
+  facesFound  Int       @default(0)
+  error       String?
+  startedAt   DateTime?
+  finishedAt  DateTime?
+  createdAt   DateTime  @default(now())
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@map("recognition_jobs")
 }

@@ -5,7 +5,6 @@ import {
   updateConsentSchema,
   updateStatusSchema,
   updateGroupSchema,
-  verifyOtpSchema,
 } from './subject.validation.js'
 
 export async function register(req, res, next) {
@@ -61,16 +60,6 @@ export async function updateGroup(req, res, next) {
   try {
     const { group } = updateGroupSchema.parse(req.body)
     const subject = await subjectService.updateGroup(req.params.id, group, req.user.id)
-    res.json(subject)
-  } catch (err) {
-    next(err)
-  }
-}
-
-export async function verifyOtp(req, res, next) {
-  try {
-    verifyOtpSchema.parse(req.body)
-    const subject = await subjectService.verifyOtp(req.params.id, req.user.id)
     res.json(subject)
   } catch (err) {
     next(err)

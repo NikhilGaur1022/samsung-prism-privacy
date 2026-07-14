@@ -1,17 +1,55 @@
+import { useEffect, useState } from 'react'
+import { ShieldCheck, ShieldOff } from 'lucide-react'
 import Sidebar from '../../components/Sidebar'
 import PageHeader from '../../components/PageHeader'
 import ListPanel from '../../components/ListPanel'
 import StatusPill from '../../components/StatusPill'
-import { useMockStore } from '../../lib/mockStore'
-import { CONSENT_CHECKS } from '../../data/collectionAgent'
-import { ShieldCheck } from 'lucide-react'
+import { listProjects, searchProjectSubjects } from '../../lib/api'
 
+const FIELD_CLASS =
+  'w-full rounded-lg border border-border bg-canvas px-3 py-2 text-sm text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand'
+
+const VERDICT = {
+  ELIGIBLE: { tone: 'success', label: 'Consent given', icon: ShieldCheck },
+  NO_CONSENT: { tone: 'danger', label: 'Consent not given', icon: ShieldOff },
+  REVOKED: { tone: 'danger', label: 'Consent revoked', icon: ShieldOff },
+  SUBJECT_INACTIVE: { tone: 'neutral', label: 'Subject not active', icon: ShieldOff },
+}
+
+// Read-only. Consent is granted by the subject in their own portal — an agent can
+// never grant it on someone's behalf, only look up where a person stands.
 export default function ConsentCheck() {
-  const [checks, setChecks] = useMockStore('collection-agent-consent-checks', CONSENT_CHECKS)
+  const [projects, setProjects] = useState([])
+  const [projectId, setProjectId] = useState('')
+  const [query, setQuery] = useState('')
+  const [people, setPeople] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
 
-  const markSigned = (id) => {
-    setChecks((prev) => prev.map((c) => (c.id === id ? { ...c, signed: true } : c)))
-  }
+  useEffect(() => {
+    listProjects()
+      .then((res) => {
+        setProjects(res.items)
+        setProjectId(res.items[0]?.id ?? '')
+        if (res.items.length === 0) setLoading(false)
+      })
+      .catch((err) => {
+        setError(err)
+        setLoading(false)
+      })
+  }, [])
+
+  useEffect(() => {
+    if (!projectId) return
+    setLoading(true)
+    const handle = setTimeout(() => {
+      searchProjectSubjects(projectId, query.trim())
+        .then((res) => setPeople(res.items))
+        .catch(setError)
+        .finally(() => setLoading(false))
+    }, 250)
+    return () => clearTimeout(handle)
+  }, [projectId, query])
 
   return (
     <div className="flex min-h-svh bg-canvas">
@@ -20,34 +58,55 @@ export default function ConsentCheck() {
       <main className="flex-1 px-10 py-8">
         <PageHeader
           title="Consent Check"
-          subtitle="Confirm consent is signed under the correct template before capture begins."
+          subtitle="Look up whether a person has consented to a project before you plan a session."
         />
+
+        <div className="mt-6 grid max-w-2xl gap-3 sm:grid-cols-2">
+          <select
+            className={FIELD_CLASS}
+            value={projectId}
+            onChange={(e) => setProjectId(e.target.value)}
+          >
+            {projects.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+          <input
+            className={FIELD_CLASS}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search by name, email or employee ID"
+          />
+        </div>
 
         <div className="mt-6">
           <ListPanel
-            title="Sessions"
-            rows={checks}
-            emptyTitle="No sessions awaiting consent check"
-            renderRow={(c) => (
-              <div className="flex items-center justify-between gap-4 py-4 first:pt-0 last:pb-0">
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-semibold text-ink">{c.session}</p>
-                  <p className="mt-0.5 truncate text-xs font-medium text-ink-faint">
-                    {c.subject} · {c.templateVersion}
-                  </p>
+            title="People"
+            rows={people}
+            loading={loading}
+            error={error}
+            emptyIcon={ShieldOff}
+            emptyTitle="No people found"
+            emptyMessage="Search for someone registered as a data subject."
+            renderRow={(person) => {
+              const verdict = VERDICT[person.verdict]
+              const Icon = verdict.icon
+              return (
+                <div className="flex items-center justify-between gap-4 py-4 first:pt-0 last:pb-0">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold text-ink">{person.fullName}</p>
+                    <p className="mt-0.5 truncate text-xs font-medium text-ink-faint">
+                      {person.email} · {person.group}
+                    </p>
+                  </div>
+                  <StatusPill tone={verdict.tone} className="gap-1.5">
+                    <Icon size={13} strokeWidth={2} /> {verdict.label}
+                  </StatusPill>
                 </div>
-                {c.signed ? (
-                  <StatusPill tone="success">Signed</StatusPill>
-                ) : (
-                  <button
-                    onClick={() => markSigned(c.id)}
-                    className="flex items-center gap-1.5 rounded-lg bg-brand-soft px-3 py-1.5 text-xs font-semibold text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
-                  >
-                    <ShieldCheck size={14} strokeWidth={2} /> Confirm signed
-                  </button>
-                )}
-              </div>
-            )}
+              )
+            }}
           />
         </div>
       </main>

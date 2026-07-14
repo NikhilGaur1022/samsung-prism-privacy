@@ -2,18 +2,22 @@ import { useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { ArrowLeft, RefreshCw, ShieldCheck } from 'lucide-react'
 import IconChip from '../components/IconChip'
-import { verifyOtp } from '../lib/api'
+import { verifyLoginOtp, requestLoginOtp } from '../lib/api'
 
 const LENGTH = 6
+const RESEND_COOLDOWN_SECONDS = 60
 
 export default function Verify() {
   const navigate = useNavigate()
   const location = useLocation()
-  const masterUserId = location.state?.masterUserId
+  const email = location.state?.email
   const [digits, setDigits] = useState(Array(LENGTH).fill(''))
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState(null)
+  const [resendCooldown, setResendCooldown] = useState(0)
+  const [resending, setResending] = useState(false)
   const inputs = useRef([])
+  const cooldownTimer = useRef(null)
 
   const setDigit = (i, value) => {
     const clean = value.replace(/\D/g, '').slice(-1)
@@ -31,11 +35,25 @@ export default function Verify() {
 
   const complete = digits.every(Boolean)
 
+  const startCooldown = () => {
+    setResendCooldown(RESEND_COOLDOWN_SECONDS)
+    clearInterval(cooldownTimer.current)
+    cooldownTimer.current = setInterval(() => {
+      setResendCooldown((s) => {
+        if (s <= 1) {
+          clearInterval(cooldownTimer.current)
+          return 0
+        }
+        return s - 1
+      })
+    }, 1000)
+  }
+
   const handleVerify = async () => {
     if (!complete || submitting) return
 
-    if (!masterUserId) {
-      setError('Missing registration reference — please register again.')
+    if (!email) {
+      setError('Missing email — please sign in or register again.')
       return
     }
 
@@ -43,12 +61,28 @@ export default function Verify() {
     setError(null)
 
     try {
-      await verifyOtp(masterUserId, digits.join(''))
+      await verifyLoginOtp(email, digits.join(''))
       navigate('/dashboard')
     } catch (err) {
       setError(err.message ?? 'Verification failed. Please try again.')
     } finally {
       setSubmitting(false)
+    }
+  }
+
+  const handleResend = async () => {
+    if (!email || resending || resendCooldown > 0) return
+
+    setResending(true)
+    setError(null)
+
+    try {
+      await requestLoginOtp(email)
+      startCooldown()
+    } catch (err) {
+      setError(err.message ?? 'Could not resend code. Please try again.')
+    } finally {
+      setResending(false)
     }
   }
 
@@ -65,7 +99,7 @@ export default function Verify() {
       <div className="mt-6">
         <h1 className="text-2xl font-extrabold tracking-tight text-ink">Verify</h1>
         <p className="mt-1 text-sm font-medium text-ink-muted">
-          Enter the 6-digit code sent to your registered device.
+          Enter the 6-digit code sent to {email ?? 'your email'}.
         </p>
       </div>
 
@@ -94,9 +128,13 @@ export default function Verify() {
         {submitting ? 'Verifying…' : 'Verify & Continue'}
       </button>
 
-      <button className="mt-4 flex items-center justify-center gap-1.5 text-sm font-semibold text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
+      <button
+        onClick={handleResend}
+        disabled={resending || resendCooldown > 0}
+        className="mt-4 flex items-center justify-center gap-1.5 text-sm font-semibold text-brand disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+      >
         <RefreshCw size={14} strokeWidth={2} />
-        Resend Code
+        {resendCooldown > 0 ? `Resend Code (${resendCooldown}s)` : 'Resend Code'}
       </button>
 
       <div className="mt-8 flex gap-3 rounded-card bg-canvas p-4">

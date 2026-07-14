@@ -1,19 +1,32 @@
 import { useState } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
-import { ShieldCheck, Mail, Lock, Eye, EyeOff, Smartphone } from 'lucide-react'
+import { ShieldCheck, Mail } from 'lucide-react'
 import IconChip from '../components/IconChip'
+import { requestLoginOtp } from '../lib/api'
 
 export default function Login() {
   const navigate = useNavigate()
-  const [showPassword, setShowPassword] = useState(false)
   const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState(null)
 
-  const canSubmit = email.trim().length > 3 && password.length >= 4
+  const canSubmit = email.trim().length > 3 && !submitting
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault()
-    if (canSubmit) navigate('/verify')
+    if (!canSubmit) return
+
+    setSubmitting(true)
+    setError(null)
+
+    try {
+      await requestLoginOtp(email.trim())
+      navigate('/verify', { state: { email: email.trim() } })
+    } catch (err) {
+      setError(err.message ?? 'Could not send a code. Please try again.')
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   return (
@@ -41,59 +54,21 @@ export default function Login() {
               className="w-full bg-transparent text-sm font-semibold text-ink outline-none placeholder:font-medium placeholder:text-ink-faint"
             />
           </div>
+          <p className="mt-1.5 text-xs font-medium text-ink-faint">
+            We'll send a 6-digit verification code to this address.
+          </p>
         </div>
 
-        <div>
-          <div className="mb-1.5 flex items-center justify-between">
-            <label className="block text-xs font-bold uppercase tracking-wide text-ink-faint">
-              Password
-            </label>
-            <button type="button" className="text-xs font-semibold text-brand">
-              Forgot?
-            </button>
-          </div>
-          <div className="flex items-center gap-2.5 rounded-2xl border border-black/10 bg-canvas px-4 py-3 focus-within:border-brand focus-within:bg-surface focus-within:ring-2 focus-within:ring-brand/20">
-            <Lock size={18} strokeWidth={1.75} className="shrink-0 text-ink-faint" />
-            <input
-              type={showPassword ? 'text' : 'password'}
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="••••••••"
-              className="w-full bg-transparent text-sm font-semibold text-ink outline-none placeholder:font-medium placeholder:text-ink-faint"
-            />
-            <button
-              type="button"
-              onClick={() => setShowPassword((v) => !v)}
-              className="shrink-0 text-ink-faint"
-              aria-label={showPassword ? 'Hide password' : 'Show password'}
-            >
-              {showPassword ? <EyeOff size={18} strokeWidth={1.75} /> : <Eye size={18} strokeWidth={1.75} />}
-            </button>
-          </div>
-        </div>
+        {error && <p className="text-sm font-semibold text-danger">{error}</p>}
 
         <button
           type="submit"
           disabled={!canSubmit}
           className="w-full rounded-card bg-brand py-3.5 text-base font-bold text-white shadow-card transition-opacity disabled:opacity-40"
         >
-          Sign In
+          {submitting ? 'Sending code…' : 'Send verification code'}
         </button>
       </form>
-
-      <div className="mt-6 flex items-center gap-3">
-        <div className="h-px flex-1 bg-black/10" />
-        <span className="text-xs font-semibold text-ink-faint">OR</span>
-        <div className="h-px flex-1 bg-black/10" />
-      </div>
-
-      <button
-        onClick={() => navigate('/verify')}
-        className="mt-6 flex w-full items-center justify-center gap-2 rounded-card border border-black/10 bg-surface py-3.5 text-sm font-bold text-ink"
-      >
-        <Smartphone size={18} strokeWidth={1.75} />
-        Continue with OTP
-      </button>
 
       <p className="mt-auto pt-8 pb-4 text-center text-xs font-medium text-ink-faint">
         New to Prism?{' '}

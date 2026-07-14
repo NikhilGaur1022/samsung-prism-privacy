@@ -13,7 +13,7 @@ const SUBJECT_STATUSES = ['PENDING', 'ACTIVE', 'INACTIVE', 'REJECTED']
 export const registerSubjectSchema = z.object({
   group: z.enum(SUBJECT_GROUPS),
   fullName: z.string().min(1).max(200),
-  email: z.string().email().optional(),
+  email: z.string().email(),
   phone: z.string().min(6).max(20).optional(),
   employeeRef: z.string().min(1).max(64).optional(),
   registrationChannel: z.enum(['SELF', 'AGENT']),
@@ -39,10 +39,6 @@ export const updateStatusSchema = z.object({
 
 export const updateGroupSchema = z.object({
   group: z.enum(SUBJECT_GROUPS),
-})
-
-export const verifyOtpSchema = z.object({
-  otp: z.string().min(4).max(10),
 })
 
 export const subjectIdParamSchema = z.string().uuid()

@@ -14,7 +14,6 @@ import {
   UserCheck,
   ShieldCheck,
   Camera,
-  UploadCloud,
   Inbox,
   SearchCode,
   Share2,
@@ -90,10 +89,9 @@ export const ROLES = {
     nav: [
       { label: 'Assignments', icon: ListChecks, path: '/assignments' },
       { label: 'New Session', icon: PlayCircle, path: '/new-session' },
+      { label: 'Sessions', icon: Camera, path: '/sessions' },
       { label: 'Subject Verification', icon: UserCheck, path: '/subject-verification' },
       { label: 'Consent Check', icon: ShieldCheck, path: '/consent-check' },
-      { label: 'Capture & Upload', icon: Camera, path: '/capture-upload' },
-      { label: 'Upload Queue', icon: UploadCloud, path: '/upload-queue' },
     ],
     stats: [
       { label: 'Assigned Today', value: '14' },

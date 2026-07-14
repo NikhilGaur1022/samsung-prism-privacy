@@ -24,7 +24,7 @@ export default function Register() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState(null)
 
-  const canSubmit = fullName.trim().length > 1 && !submitting
+  const canSubmit = fullName.trim().length > 1 && email.trim().length > 3 && !submitting
 
   const handleSubmit = async (e) => {
     e.preventDefault()
@@ -34,17 +34,17 @@ export default function Register() {
     setError(null)
 
     try {
-      const subject = await registerSubject({
+      await registerSubject({
         group,
         fullName: fullName.trim(),
-        email: email.trim() || undefined,
+        email: email.trim(),
         phone: phone.trim() || undefined,
         registrationChannel: 'SELF',
       })
-      navigate('/verify', { state: { masterUserId: subject.masterUserId } })
+      navigate('/verify', { state: { email: email.trim() } })
     } catch (err) {
-      if (err.status === 409 && err.masterUserId) {
-        navigate('/verify', { state: { masterUserId: err.masterUserId } })
+      if (err.status === 409 && email.trim()) {
+        navigate('/verify', { state: { email: email.trim() } })
         return
       }
       setError(err.message ?? 'Registration failed. Please try again.')

@@ -1,6 +1,8 @@
 import { prisma } from '../../config/prisma.js'
 import { writeAuditLog } from '../../lib/auditLog.js'
 import { ApiError } from '../../middleware/errorHandler.js'
+import { assertResendCooldown, createOtp } from '../../lib/otp.js'
+import { sendOtpEmail } from '../../lib/resend.js'
 
 // employeeRef is the primary dedupe key for the 4 employee groups (deterministic,
 // doesn't rot like shared/reassigned corporate email aliases). Email (citext,
@@ -32,6 +34,12 @@ export async function registerSubject(input, actorId) {
     actorId,
     payload: { group: subject.group, registrationChannel: subject.registrationChannel },
   })
+
+  // Registration immediately triggers the same OTP the subject will later use to
+  // verify — no separate "confirm your email" step before verification can start.
+  await assertResendCooldown(subject.email, 'SUBJECT_LOGIN')
+  const { code } = await createOtp(subject.email, 'SUBJECT_LOGIN')
+  await sendOtpEmail(subject.email, code)
 
   return subject
 }
@@ -105,28 +113,6 @@ export async function updateGroup(masterUserId, group, actorId) {
     action: 'GROUP_CHANGE',
     actorId,
     payload: { group },
-  })
-
-  return updated
-}
-
-// Stubbed: accepts any OTP for now (real OTP provider is a separate future decision).
-// Transitions PENDING -> ACTIVE directly, no DPO-approval step (confirmed against the
-// DSAR flow diagrams — DPO approves the project/consent-template once, not per subject).
-export async function verifyOtp(masterUserId, actorId) {
-  await getSubject(masterUserId)
-
-  const updated = await prisma.subject.update({
-    where: { masterUserId },
-    data: { otpVerifiedAt: new Date(), status: 'ACTIVE' },
-  })
-
-  await writeAuditLog({
-    entityType: 'Subject',
-    entityId: masterUserId,
-    action: 'STATUS_CHANGE',
-    actorId,
-    payload: { status: 'ACTIVE', reason: 'otp_verified' },
   })
 
   return updated

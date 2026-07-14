@@ -2,6 +2,9 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { AuthProvider, RequireRole } from './auth'
 import { ROLES } from './roles'
 import Login from './pages/Login'
+import AcceptInvite from './pages/AcceptInvite'
+import ForgotPassword from './pages/ForgotPassword'
+import ResetPassword from './pages/ResetPassword'
 import Dashboard from './pages/Dashboard'
 import Placeholder from './pages/Placeholder'
 import ProjectApprovals from './pages/dpo/ProjectApprovals'
@@ -25,8 +28,9 @@ import Assignments from './pages/collectionAgent/Assignments'
 import NewSession from './pages/collectionAgent/NewSession'
 import SubjectVerification from './pages/collectionAgent/SubjectVerification'
 import ConsentCheck from './pages/collectionAgent/ConsentCheck'
-import CaptureUpload from './pages/collectionAgent/CaptureUpload'
-import UploadQueue from './pages/collectionAgent/UploadQueue'
+import Sessions from './pages/collectionAgent/Sessions'
+import SessionDetail from './pages/collectionAgent/SessionDetail'
+import Tagging from './pages/collectionAgent/Tagging'
 
 const PAGE_COMPONENTS = {
   '/project-approvals': ProjectApprovals,
@@ -50,8 +54,7 @@ const PAGE_COMPONENTS = {
   '/new-session': NewSession,
   '/subject-verification': SubjectVerification,
   '/consent-check': ConsentCheck,
-  '/capture-upload': CaptureUpload,
-  '/upload-queue': UploadQueue,
+  '/sessions': Sessions,
 }
 
 export default function App() {
@@ -60,6 +63,25 @@ export default function App() {
       <BrowserRouter>
         <Routes>
           <Route path="/login" element={<Login />} />
+          <Route path="/accept-invite" element={<AcceptInvite />} />
+          <Route path="/forgot-password" element={<ForgotPassword />} />
+          <Route path="/reset-password" element={<ResetPassword />} />
+          <Route
+            path="/sessions/:sessionId"
+            element={
+              <RequireRole allow={['collectionAgent']}>
+                <SessionDetail />
+              </RequireRole>
+            }
+          />
+          <Route
+            path="/sessions/:sessionId/tagging"
+            element={
+              <RequireRole allow={['collectionAgent']}>
+                <Tagging />
+              </RequireRole>
+            }
+          />
           <Route
             path="/dashboard"
             element={

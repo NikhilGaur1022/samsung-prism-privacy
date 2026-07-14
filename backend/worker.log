@@ -1,0 +1,20 @@
+
+> prism-backend@0.1.0 worker
+> node --watch src/workers/recognition.worker.js
+
+It is highly recommended to use a minimum Redis version of 6.2.0
+             Current: 5.0.14.1
+It is highly recommended to use a minimum Redis version of 6.2.0
+             Current: 5.0.14.1
+It is highly recommended to use a minimum Redis version of 6.2.0
+             Current: 5.0.14.1
+[00:23:42.848] [32mINFO[39m (4640): [36mRecognition worker listening on queue "face-recognition"[39m
+Restarting 'src/workers/recognition.worker.js'
+It is highly recommended to use a minimum Redis version of 6.2.0
+             Current: 5.0.14.1
+It is highly recommended to use a minimum Redis version of 6.2.0
+             Current: 5.0.14.1
+It is highly recommended to use a minimum Redis version of 6.2.0
+             Current: 5.0.14.1
+[00:25:29.298] [32mINFO[39m (25704): [36mRecognition worker listening on queue "face-recognition"[39m
+Failed running 'src/workers/recognition.worker.js'. Waiting for file changes before restarting...

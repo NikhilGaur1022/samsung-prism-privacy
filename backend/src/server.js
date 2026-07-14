@@ -1,12 +1,18 @@
 import 'dotenv/config'
 import express from 'express'
 import cors from 'cors'
+import cookieParser from 'cookie-parser'
 import { prisma } from './config/prisma.js'
 import { qdrant } from './config/qdrant.js'
 import { logger } from './lib/logger.js'
 import { requestLogger } from './middleware/requestLogger.js'
 import { errorHandler } from './middleware/errorHandler.js'
 import { subjectRoutes } from './modules/subjects/subject.routes.js'
+import { authSubjectRoutes } from './modules/auth-subject/auth-subject.routes.js'
+import { authAdminRoutes } from './modules/auth-admin/auth-admin.routes.js'
+import { projectRoutes } from './modules/projects/project.routes.js'
+import { sessionRoutes } from './modules/sessions/session.routes.js'
+import { consentRoutes } from './modules/consent/consent.routes.js'
 
 // Boot guard: refuse to start in production without real auth wired in.
 // requireAuth.js is a dev-stub only — this stops it from silently shipping.
@@ -20,6 +26,7 @@ const corsOrigins = (process.env.CORS_ORIGINS ?? '').split(',').map((s) => s.tri
 
 app.use(cors({ origin: corsOrigins, credentials: true }))
 app.use(express.json())
+app.use(cookieParser())
 app.use(requestLogger)
 
 app.get('/health', (_req, res) => {
@@ -48,6 +55,11 @@ app.get('/health/deep', async (_req, res) => {
 })
 
 app.use('/api/v1/subjects', subjectRoutes)
+app.use('/api/v1/projects', projectRoutes)
+app.use('/api/v1/sessions', sessionRoutes)
+app.use('/api/v1/consent', consentRoutes)
+app.use('/auth/subject', authSubjectRoutes)
+app.use('/auth/admin', authAdminRoutes)
 
 app.use(errorHandler)
 

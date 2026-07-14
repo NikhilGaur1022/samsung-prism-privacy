@@ -9,5 +9,25 @@ services:
       - qdrant_storage:/qdrant/storage
     restart: unless-stopped
 
+  redis:
+    image: redis:7.4-alpine
+    container_name: prism-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  face-worker:
+    build: ../face-worker
+    container_name: prism-face-worker
+    ports:
+      - "8001:8001"
+    volumes:
+      - face_models:/models
+    restart: unless-stopped
+
 volumes:
   qdrant_storage:
+  redis_data:
+  face_models:

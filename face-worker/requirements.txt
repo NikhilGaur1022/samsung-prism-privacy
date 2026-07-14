@@ -1,0 +1,9 @@
+# Unpinned on purpose for the ML stack: the pinned insightface 0.7.3 has no wheel
+# for Python 3.13+ and would need a C++ toolchain to build from source.
+fastapi
+uvicorn[standard]
+python-multipart
+insightface>=1.0.1
+onnxruntime
+numpy
+pillow
