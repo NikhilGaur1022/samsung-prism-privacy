@@ -1,0 +1,23 @@
+[project]
+name = "audio-services"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.139.0",
+    "faster-whisper>=1.2.1",
+    "ffmpeg>=1.4",
+    "numpy>=2.5.1",
+    "opencv-python-headless>=5.0.0.93",
+    "presidio-analyzer>=2.2.362",
+    "psycopg2-binary>=2.9.12",
+    "pyannote-audio>=4.0.7",
+    "pydantic-settings>=2.14.2",
+    "python-multipart>=0.0.32",
+    "qdrant-client>=1.18.0",
+    "speechbrain>=1.1.0",
+    "torch>=2.13.0",
+    "torchaudio>=2.11.0",
+    "uvicorn>=0.51.0",
+]
