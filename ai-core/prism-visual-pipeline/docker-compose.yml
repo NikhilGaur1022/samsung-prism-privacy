@@ -1,0 +1,17 @@
+services:
+  visual-pipeline:
+    build: .
+    container_name: prism_visual_pipeline
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount current directory for hot-reloading in dev
+      - .:/app
+      # Create an anonymous volume for staging to persist temporary uploads
+      - staging_data:/app/staging
+    environment:
+      - "PRISM_MATCH_THRESHOLD=0.60"
+      - "PRISM_QDRANT_HOST=:memory:"
+
+volumes:
+  staging_data:

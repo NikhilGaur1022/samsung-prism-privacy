@@ -1,0 +1,47 @@
+[project]
+name = "prism-visual-pipeline"
+version = "0.1.0"
+description = "PRISM Visual Pipeline — Face detection, consent-aware tagging, and surgical redaction engine"
+requires-python = ">=3.9"
+dependencies = [
+    # ML / Face Recognition
+    "insightface>=0.7.3",
+    "onnxruntime>=1.16.0",           # CPU inference (swap to onnxruntime-gpu if GPU available)
+    "opencv-python>=4.8.0",
+    "numpy>=1.24.0",
+    "Pillow>=10.0.0",
+
+    # Vector Search
+    "qdrant-client>=1.7.0",
+
+    # API Layer
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "python-multipart>=0.0.6",       # for file uploads
+
+    # Data Validation
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",      # for config from env vars
+    "eval_type_backport",
+]
+
+[project.optional-dependencies]
+gpu = [
+    "onnxruntime-gpu>=1.16.0",       # replace onnxruntime with this for GPU
+]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "httpx>=0.25.0",                 # for testing FastAPI endpoints
+]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

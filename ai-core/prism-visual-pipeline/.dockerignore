@@ -1,0 +1,14 @@
+venv/
+env/
+.env
+__pycache__/
+*.egg-info/
+staging/
+.git/
+.DS_Store
+*.jpg
+*.jpeg
+*.png
+*.webp
+diagnose.py
+check_similarity.py

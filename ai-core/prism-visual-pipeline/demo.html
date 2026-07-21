@@ -1,0 +1,1499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PRISM Visual Pipeline Demo</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Outfit:wght@500;600;700&display=swap" rel="stylesheet">
+    <style>
+        /* ── CSS Variables ────────────────────────────────────────────── */
+        :root {
+            --bg-dark: #090a0f;
+            --bg-card: rgba(17, 19, 31, 0.65);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --accent-primary: #5c6bc0;
+            --accent-glow: rgba(92, 107, 192, 0.35);
+            --text-main: #f5f6fa;
+            --text-muted: #8a8f9f;
+            --color-success: #10b981;
+            --color-warning: #f59e0b;
+            --color-danger: #ef4444;
+            --radius: 12px;
+            --radius-sm: 8px;
+        }
+
+        /* ── Reset & Base ─────────────────────────────────────────────── */
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: var(--bg-dark);
+            color: var(--text-main);
+            min-height: 100vh;
+            line-height: 1.6;
+        }
+
+        h1, h2, h3, h4 { font-family: 'Outfit', sans-serif; }
+
+        /* ── Glassmorphism Panels ──────────────────────────────────────── */
+        .glass-panel {
+            background: var(--bg-card);
+            backdrop-filter: blur(18px);
+            -webkit-backdrop-filter: blur(18px);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius);
+        }
+
+        /* ── Header ───────────────────────────────────────────────────── */
+        .header {
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            padding: 12px 28px;
+            background: rgba(9, 10, 15, 0.82);
+            backdrop-filter: blur(24px);
+            -webkit-backdrop-filter: blur(24px);
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .logo-badge {
+            width: 38px;
+            height: 38px;
+            border-radius: 10px;
+            background: linear-gradient(135deg, var(--accent-primary), #7e57c2);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-family: 'Outfit', sans-serif;
+            font-weight: 700;
+            font-size: 18px;
+            color: #fff;
+            flex-shrink: 0;
+        }
+
+        .header-title {
+            font-size: 17px;
+            font-weight: 600;
+            flex: 1;
+        }
+
+        .connection-badge {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            padding: 5px 14px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 500;
+            border: 1px solid var(--border-color);
+            background: rgba(255, 255, 255, 0.04);
+        }
+
+        .connection-badge .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--text-muted);
+            transition: background 0.3s;
+        }
+
+        .connection-badge.connected .dot { background: var(--color-success); box-shadow: 0 0 6px var(--color-success); }
+        .connection-badge.disconnected .dot { background: var(--color-danger); }
+
+        /* ── Main Layout ──────────────────────────────────────────────── */
+        .main-layout {
+            display: grid;
+            grid-template-columns: 350px 1fr;
+            gap: 22px;
+            padding: 22px 28px;
+            max-width: 1600px;
+            margin: 0 auto;
+            min-height: calc(100vh - 64px);
+        }
+
+        /* ── Sidebar ──────────────────────────────────────────────────── */
+        .sidebar { display: flex; flex-direction: column; gap: 18px; }
+
+        .panel-heading {
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1.2px;
+            color: var(--text-muted);
+            margin-bottom: 12px;
+        }
+
+        .sidebar-panel { padding: 20px; }
+
+        .input-group { margin-bottom: 12px; }
+
+        .input-group label {
+            display: block;
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-bottom: 5px;
+            font-weight: 500;
+        }
+
+        input[type="text"],
+        input[type="file"] {
+            width: 100%;
+            padding: 9px 12px;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-sm);
+            color: var(--text-main);
+            font-family: 'Inter', sans-serif;
+            font-size: 13px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        input[type="text"]:focus { border-color: var(--accent-primary); }
+
+        .btn-row { display: flex; gap: 8px; }
+
+        /* ── Buttons ──────────────────────────────────────────────────── */
+        .btn {
+            padding: 8px 16px;
+            border-radius: var(--radius-sm);
+            border: none;
+            font-family: 'Inter', sans-serif;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: transform 0.15s, box-shadow 0.2s, opacity 0.2s;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .btn:hover { transform: translateY(-1px); }
+        .btn:active { transform: translateY(0); }
+        .btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+
+        .btn-primary {
+            background: linear-gradient(135deg, var(--accent-primary), #7e57c2);
+            color: #fff;
+            box-shadow: 0 2px 12px var(--accent-glow);
+        }
+        .btn-primary:hover { box-shadow: 0 4px 20px var(--accent-glow); }
+
+        .btn-danger {
+            background: linear-gradient(135deg, var(--color-danger), #dc2626);
+            color: #fff;
+        }
+
+        .btn-outline {
+            background: transparent;
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+        }
+        .btn-outline:hover { background: rgba(255, 255, 255, 0.05); }
+
+        .btn-sm { padding: 5px 10px; font-size: 11px; }
+
+        .btn-block { width: 100%; justify-content: center; }
+
+        /* ── Step Navigation ───────────────────────────────────────────── */
+        .step-nav { list-style: none; }
+
+        .step-nav-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 14px;
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+            transition: background 0.2s;
+            margin-bottom: 4px;
+        }
+
+        .step-nav-item:hover { background: rgba(255, 255, 255, 0.04); }
+
+        .step-nav-item.active {
+            background: rgba(92, 107, 192, 0.12);
+            border: 1px solid rgba(92, 107, 192, 0.25);
+        }
+
+        .step-num {
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.06);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 13px;
+            font-weight: 600;
+            flex-shrink: 0;
+            transition: background 0.2s;
+        }
+
+        .step-nav-item.active .step-num {
+            background: linear-gradient(135deg, var(--accent-primary), #7e57c2);
+            color: #fff;
+        }
+
+        .step-label { font-size: 13px; font-weight: 500; }
+        .step-sublabel { font-size: 11px; color: var(--text-muted); }
+
+        /* ── Content Area ──────────────────────────────────────────────── */
+        .content-area { min-width: 0; }
+
+        .step-panel {
+            display: none;
+            animation: fadeIn 0.35s ease;
+        }
+
+        .step-panel.active { display: block; }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .step-title {
+            font-size: 22px;
+            font-weight: 600;
+            margin-bottom: 18px;
+        }
+
+        /* ── Step 1: Registration ──────────────────────────────────────── */
+        .registration-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 22px;
+        }
+
+        .form-section { padding: 22px; }
+
+        .selfie-toggle {
+            display: flex;
+            border-radius: var(--radius-sm);
+            overflow: hidden;
+            border: 1px solid var(--border-color);
+            margin-bottom: 14px;
+        }
+
+        .selfie-toggle-btn {
+            flex: 1;
+            padding: 8px;
+            text-align: center;
+            font-size: 12px;
+            font-weight: 500;
+            background: transparent;
+            color: var(--text-muted);
+            border: none;
+            cursor: pointer;
+            font-family: 'Inter', sans-serif;
+            transition: background 0.2s, color 0.2s;
+        }
+
+        .selfie-toggle-btn.active {
+            background: var(--accent-primary);
+            color: #fff;
+        }
+
+        .webcam-container {
+            position: relative;
+            border-radius: var(--radius-sm);
+            overflow: hidden;
+            background: #000;
+            aspect-ratio: 4/3;
+            margin-bottom: 10px;
+        }
+
+        .webcam-container video,
+        .webcam-container canvas {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: block;
+        }
+
+        .webcam-container canvas { position: absolute; top: 0; left: 0; }
+
+        .webcam-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+
+        .subject-card {
+            padding: 14px;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .subject-info { font-size: 13px; }
+        .subject-info .name { font-weight: 600; margin-bottom: 2px; }
+        .subject-info .consent { color: var(--text-muted); font-size: 11px; font-family: monospace; }
+
+        .enrolled-badge {
+            font-size: 10px;
+            padding: 3px 10px;
+            border-radius: 12px;
+            background: rgba(16, 185, 129, 0.15);
+            color: var(--color-success);
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .subjects-list-heading {
+            font-size: 15px;
+            font-weight: 600;
+            margin-bottom: 14px;
+        }
+
+        .subjects-empty {
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 13px;
+            padding: 30px 0;
+        }
+
+        /* ── Step 2: DSLR Upload ───────────────────────────────────────── */
+        .dropzone {
+            border: 2px dashed rgba(255, 255, 255, 0.12);
+            border-radius: var(--radius);
+            padding: 50px 30px;
+            text-align: center;
+            cursor: pointer;
+            transition: border-color 0.2s, background 0.2s;
+            margin-bottom: 20px;
+        }
+
+        .dropzone:hover,
+        .dropzone.drag-over {
+            border-color: var(--accent-primary);
+            background: rgba(92, 107, 192, 0.06);
+        }
+
+        .dropzone-icon {
+            font-size: 48px;
+            margin-bottom: 12px;
+            opacity: 0.5;
+        }
+
+        .dropzone-text { font-size: 14px; color: var(--text-muted); }
+        .dropzone-text strong { color: var(--text-main); }
+
+        .dropzone input[type="file"] { display: none; }
+
+        .queue-list { margin-bottom: 18px; }
+
+        .queue-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 14px;
+            margin-bottom: 6px;
+            font-size: 13px;
+        }
+
+        .queue-item .file-info { display: flex; align-items: center; gap: 8px; }
+        .queue-item .file-size { color: var(--text-muted); font-size: 11px; }
+
+        .queue-item .remove-btn {
+            background: none;
+            border: none;
+            color: var(--color-danger);
+            cursor: pointer;
+            font-size: 16px;
+            padding: 2px 6px;
+            border-radius: 4px;
+            transition: background 0.15s;
+        }
+        .queue-item .remove-btn:hover { background: rgba(239, 68, 68, 0.15); }
+
+        .progress-bar-wrapper {
+            height: 6px;
+            background: rgba(255, 255, 255, 0.06);
+            border-radius: 3px;
+            overflow: hidden;
+            margin: 16px 0;
+            display: none;
+        }
+
+        .progress-bar-wrapper.visible { display: block; }
+
+        .progress-bar-fill {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, var(--accent-primary), #7e57c2);
+            border-radius: 3px;
+            transition: width 0.3s;
+        }
+
+        .batch-results {
+            padding: 20px;
+            display: none;
+        }
+
+        .batch-results.visible { display: block; }
+
+        .batch-stats {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 12px;
+            margin-top: 14px;
+        }
+
+        .stat-box {
+            text-align: center;
+            padding: 14px 8px;
+            border-radius: var(--radius-sm);
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border-color);
+        }
+
+        .stat-value {
+            font-family: 'Outfit', sans-serif;
+            font-size: 26px;
+            font-weight: 700;
+        }
+
+        .stat-label { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+
+        /* ── Step 3: Visual Analyzer ──────────────────────────────────── */
+        .analyzer-layout {
+            display: grid;
+            grid-template-columns: 180px 1fr 280px;
+            gap: 18px;
+        }
+
+        .thumb-grid {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            max-height: 600px;
+            overflow-y: auto;
+        }
+
+        .thumb-item {
+            border-radius: var(--radius-sm);
+            overflow: hidden;
+            cursor: pointer;
+            border: 2px solid transparent;
+            transition: border-color 0.2s;
+        }
+
+        .thumb-item:hover { border-color: rgba(255, 255, 255, 0.15); }
+        .thumb-item.active { border-color: var(--accent-primary); box-shadow: 0 0 10px var(--accent-glow); }
+
+        .thumb-item img {
+            width: 100%;
+            display: block;
+            aspect-ratio: 4/3;
+            object-fit: cover;
+        }
+
+        .workspace-panel { padding: 16px; min-width: 0; }
+
+        .view-toggle {
+            display: flex;
+            gap: 6px;
+            margin-bottom: 12px;
+        }
+
+        .view-toggle .btn.active {
+            background: var(--accent-primary);
+            color: #fff;
+        }
+
+        .canvas-wrapper {
+            position: relative;
+            width: 100%;
+            border-radius: var(--radius-sm);
+            overflow: hidden;
+            background: #000;
+        }
+
+        .canvas-wrapper canvas {
+            width: 100%;
+            display: block;
+        }
+
+        .canvas-placeholder {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            aspect-ratio: 16/10;
+            color: var(--text-muted);
+            font-size: 14px;
+        }
+
+        .inspector-panel {
+            padding: 16px;
+            max-height: 600px;
+            overflow-y: auto;
+        }
+
+        .face-card {
+            padding: 12px;
+            margin-bottom: 8px;
+            font-size: 12px;
+        }
+
+        .face-card-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 6px;
+        }
+
+        .face-card-header .face-index {
+            font-weight: 600;
+            font-size: 13px;
+        }
+
+        .match-badge {
+            font-size: 10px;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .match-badge.matched { background: rgba(16, 185, 129, 0.15); color: var(--color-success); }
+        .match-badge.stranger { background: rgba(245, 158, 11, 0.15); color: var(--color-warning); }
+
+        .face-detail { color: var(--text-muted); margin-bottom: 2px; }
+        .face-detail span { color: var(--text-main); font-family: monospace; font-size: 11px; }
+
+        .json-toggle {
+            margin-top: 14px;
+            cursor: pointer;
+            font-size: 12px;
+            color: var(--accent-primary);
+            user-select: none;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .json-content {
+            display: none;
+            margin-top: 8px;
+            padding: 12px;
+            border-radius: var(--radius-sm);
+            background: rgba(0, 0, 0, 0.4);
+            font-family: monospace;
+            font-size: 11px;
+            white-space: pre-wrap;
+            word-break: break-all;
+            max-height: 300px;
+            overflow-y: auto;
+            color: var(--text-muted);
+        }
+
+        .json-content.visible { display: block; }
+
+        .no-image-selected {
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 13px;
+            padding: 30px 0;
+        }
+
+        /* ── Notification System ───────────────────────────────────────── */
+        .notification-stack {
+            position: fixed;
+            bottom: 22px;
+            right: 22px;
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            max-width: 380px;
+        }
+
+        .notification {
+            padding: 12px 18px;
+            border-radius: var(--radius-sm);
+            background: rgba(17, 19, 31, 0.92);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid var(--border-color);
+            font-size: 13px;
+            animation: slideIn 0.3s ease;
+            border-left: 3px solid var(--accent-primary);
+        }
+
+        .notification.success { border-left-color: var(--color-success); }
+        .notification.error { border-left-color: var(--color-danger); }
+        .notification.info { border-left-color: var(--accent-primary); }
+
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateX(40px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+
+        /* ── Scrollbar ────────────────────────────────────────────────── */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.1); border-radius: 3px; }
+
+        /* ── Responsive ───────────────────────────────────────────────── */
+        @media (max-width: 1100px) {
+            .main-layout { grid-template-columns: 1fr; }
+            .registration-grid { grid-template-columns: 1fr; }
+            .analyzer-layout { grid-template-columns: 1fr; }
+            .batch-stats { grid-template-columns: repeat(2, 1fr); }
+        }
+    </style>
+</head>
+<body>
+
+<!-- ═══ Header ═══════════════════════════════════════════════════════ -->
+<header class="header">
+    <div class="logo-badge">P</div>
+    <h1 class="header-title">PRISM Visual Pipeline Demo</h1>
+    <div id="connectionBadge" class="connection-badge disconnected">
+        <span class="dot"></span>
+        <span id="connectionLabel">Disconnected</span>
+    </div>
+</header>
+
+<!-- ═══ Main Layout ══════════════════════════════════════════════════ -->
+<div class="main-layout">
+
+    <!-- ─── Sidebar ──────────────────────────────────────────────── -->
+    <aside class="sidebar">
+
+        <!-- Session Management -->
+        <div class="glass-panel sidebar-panel">
+            <div class="panel-heading">Session Management</div>
+            <div class="input-group">
+                <label for="sessionIdInput">Session ID</label>
+                <input type="text" id="sessionIdInput" value="session_demo_001" placeholder="Enter session ID">
+            </div>
+            <div class="btn-row">
+                <button class="btn btn-primary btn-sm" onclick="createSession()">Create</button>
+                <button class="btn btn-danger btn-sm" onclick="deleteSession()">Reset</button>
+            </div>
+        </div>
+
+        <!-- Demo Pipeline Flow -->
+        <div class="glass-panel sidebar-panel">
+            <div class="panel-heading">Demo Pipeline Flow</div>
+            <ul class="step-nav">
+                <li class="step-nav-item active" onclick="navigateToStep(1)" id="stepNav1">
+                    <div class="step-num">1</div>
+                    <div>
+                        <div class="step-label">Subject Registration</div>
+                        <div class="step-sublabel">Enroll faces with consent</div>
+                    </div>
+                </li>
+                <li class="step-nav-item" onclick="navigateToStep(2)" id="stepNav2">
+                    <div class="step-num">2</div>
+                    <div>
+                        <div class="step-label">Upload DSLR Images</div>
+                        <div class="step-sublabel">Batch upload &amp; process</div>
+                    </div>
+                </li>
+                <li class="step-nav-item" onclick="navigateToStep(3)" id="stepNav3">
+                    <div class="step-num">3</div>
+                    <div>
+                        <div class="step-label">Visual Analyzer</div>
+                        <div class="step-sublabel">Inspect detected faces</div>
+                    </div>
+                </li>
+            </ul>
+        </div>
+    </aside>
+
+    <!-- ─── Content Area ─────────────────────────────────────────── -->
+    <main class="content-area">
+
+        <!-- ══ Step 1: Subject Registration ═══════════════════════ -->
+        <section id="stepPanel1" class="step-panel active">
+            <h2 class="step-title">Subject Registration</h2>
+            <div class="registration-grid">
+
+                <!-- Enrollment Form -->
+                <div class="glass-panel form-section">
+                    <div class="panel-heading">Enrollment Form</div>
+                    <form id="enrollForm" onsubmit="enrollSubject(event)">
+                        <div class="input-group">
+                            <label for="subjectName">Subject Name</label>
+                            <input type="text" id="subjectName" placeholder="e.g. Alice Johnson" required>
+                        </div>
+                        <div class="input-group">
+                            <label for="consentId">Consent ID</label>
+                            <input type="text" id="consentId" readonly>
+                        </div>
+
+                        <label style="font-size:12px;color:var(--text-muted);font-weight:500;margin-bottom:6px;display:block;">Selfie Source</label>
+                        <div class="selfie-toggle">
+                            <button type="button" class="selfie-toggle-btn active" onclick="setSelfieSource('file')">Upload File</button>
+                            <button type="button" class="selfie-toggle-btn" onclick="setSelfieSource('camera')">Take Photo</button>
+                        </div>
+
+                        <!-- File Upload Mode -->
+                        <div id="selfieFileMode" class="input-group">
+                            <input type="file" id="selfieFileInput" accept="image/*">
+                        </div>
+
+                        <!-- Camera Mode -->
+                        <div id="selfieCameraMode" style="display:none;">
+                            <div class="webcam-container">
+                                <video id="webcamVideo" autoplay playsinline muted></video>
+                                <canvas id="webcamSnapshotCanvas" style="display:none;"></canvas>
+                                <img id="webcamSnapshot" style="display:none;width:100%;height:100%;object-fit:cover;">
+                            </div>
+                            <div class="webcam-actions">
+                                <button type="button" class="btn btn-outline btn-sm" id="btnStartCamera" onclick="startCamera()">Start Camera</button>
+                                <button type="button" class="btn btn-primary btn-sm" id="btnCapture" onclick="capturePhoto()" style="display:none;">Capture</button>
+                                <button type="button" class="btn btn-outline btn-sm" id="btnRetake" onclick="retakePhoto()" style="display:none;">Retake</button>
+                            </div>
+                        </div>
+
+                        <button type="submit" id="btnEnrollSubmit" class="btn btn-primary btn-block" style="margin-top:16px;">Enroll Subject</button>
+                    </form>
+                </div>
+
+                <!-- Enrolled Subjects -->
+                <div>
+                    <h3 class="subjects-list-heading">Enrolled Subjects</h3>
+                    <div id="enrolledSubjectsList">
+                        <div class="subjects-empty">No subjects enrolled yet.</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ══ Step 2: Upload DSLR Images ═════════════════════════ -->
+        <section id="stepPanel2" class="step-panel">
+            <h2 class="step-title">Upload DSLR Images</h2>
+
+            <div class="dropzone" id="dropzone"
+                 ondragover="event.preventDefault(); this.classList.add('drag-over')"
+                 ondragleave="this.classList.remove('drag-over')"
+                 ondrop="handleDrop(event)">
+                <div class="dropzone-icon">📷</div>
+                <div class="dropzone-text"><strong>Drag &amp; drop images here</strong><br>or click to browse files</div>
+                <input type="file" id="dslrFileInput" multiple accept="image/*" onchange="addFilesToQueue(this.files)">
+            </div>
+
+            <div id="queueSection" style="display:none;">
+                <div class="panel-heading">Upload Queue</div>
+                <div id="queueList" class="queue-list"></div>
+                <button class="btn btn-primary" id="processQueueBtn" onclick="uploadDSLRQueue()">Process 0 Images</button>
+            </div>
+
+            <div class="progress-bar-wrapper" id="uploadProgress">
+                <div class="progress-bar-fill" id="uploadProgressFill"></div>
+            </div>
+
+            <div class="batch-results glass-panel" id="batchResults">
+                <div class="panel-heading">Batch Results</div>
+                <div class="batch-stats" id="batchStats"></div>
+            </div>
+        </section>
+
+        <!-- ══ Step 3: Visual Analyzer ════════════════════════════ -->
+        <section id="stepPanel3" class="step-panel">
+            <h2 class="step-title">Visual Analyzer</h2>
+            <div class="analyzer-layout">
+
+                <!-- Thumbnail Grid -->
+                <div>
+                    <div class="panel-heading">Processed Images</div>
+                    <div id="thumbGrid" class="thumb-grid">
+                        <div class="subjects-empty" style="font-size:12px;">No images processed yet.</div>
+                    </div>
+                </div>
+
+                <!-- Canvas Workspace -->
+                <div class="workspace-panel glass-panel">
+                    <div class="view-toggle">
+                        <button class="btn btn-outline btn-sm active" id="btnViewOriginal" onclick="toggleImageView('original')">Original Overlay</button>
+                        <button class="btn btn-outline btn-sm" id="btnViewRedacted" onclick="toggleImageView('redacted')">Redacted</button>
+                    </div>
+                    <div class="canvas-wrapper" id="canvasWrapper">
+                        <div class="canvas-placeholder" id="canvasPlaceholder">Select an image to analyze</div>
+                        <canvas id="analyzerCanvas" style="display:none;"></canvas>
+                    </div>
+                </div>
+
+                <!-- Inspector Panel -->
+                <div class="inspector-panel glass-panel">
+                    <div class="panel-heading">Face Inspector</div>
+                    <div id="inspectorContent">
+                        <div class="no-image-selected">Select an image to view face data.</div>
+                    </div>
+                    <div class="json-toggle" onclick="toggleJsonContent()">
+                        <span id="jsonArrow">▶</span> Raw JSON Response
+                    </div>
+                    <div class="json-content" id="jsonContent"></div>
+                </div>
+            </div>
+        </section>
+
+    </main>
+</div>
+
+<!-- ═══ Notification Stack ═══════════════════════════════════════════ -->
+<div class="notification-stack" id="notificationStack"></div>
+
+<!-- ═══ JavaScript ═══════════════════════════════════════════════════ -->
+<script>
+/* ────────────────────────────────────────────────────────────────────
+ *  APPLICATION STATE
+ * ──────────────────────────────────────────────────────────────────── */
+const state = {
+    apiBaseUrl: window.location.origin,
+    activeSessionId: '',
+    enrolledSubjects: [],
+    currentStep: 1,
+    currentBatchId: '',
+    batchImages: [],
+    selectedImage: null,
+    viewMode: 'original',
+    canvasScale: 1,
+    selfieSource: 'file',
+    webcamStream: null,
+    webcamBlob: null,
+    dslrQueue: []
+};
+
+/* ────────────────────────────────────────────────────────────────────
+ *  UTILITY HELPERS
+ * ──────────────────────────────────────────────────────────────────── */
+function generateUUID() {
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+        const r = Math.random() * 16 | 0;
+        return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+    });
+}
+
+function escapeHTML(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+}
+
+function formatBytes(bytes) {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
+/* ────────────────────────────────────────────────────────────────────
+ *  NOTIFICATION SYSTEM
+ * ──────────────────────────────────────────────────────────────────── */
+function showNotification(message, type = 'info') {
+    const stack = document.getElementById('notificationStack');
+    const el = document.createElement('div');
+    el.className = `notification ${type}`;
+    el.textContent = message;
+    stack.appendChild(el);
+    setTimeout(() => {
+        el.style.opacity = '0';
+        el.style.transform = 'translateX(40px)';
+        el.style.transition = 'opacity 0.3s, transform 0.3s';
+        setTimeout(() => el.remove(), 300);
+    }, 5000);
+}
+
+/* ────────────────────────────────────────────────────────────────────
+ *  BACKEND CONNECTION
+ * ──────────────────────────────────────────────────────────────────── */
+async function checkBackendConnection() {
+    const badge = document.getElementById('connectionBadge');
+    const label = document.getElementById('connectionLabel');
+
+    // If opened as a local file, default to localhost
+    if (window.location.protocol === 'file:') {
+        state.apiBaseUrl = 'http://localhost:8000';
+    }
+
+    async function tryUrl(url) {
+        try {
+            const resp = await fetch(`${url}/health`, { signal: AbortSignal.timeout(3000) });
+            return resp.ok;
+        } catch {
+            return false;
+        }
+    }
+
+    if (await tryUrl(state.apiBaseUrl)) {
+        badge.className = 'connection-badge connected';
+        label.textContent = 'Connected';
+        showNotification('Backend connected at ' + state.apiBaseUrl, 'success');
+        return;
+    }
+
+    // Fallback to localhost:8000
+    if (state.apiBaseUrl !== 'http://localhost:8000') {
+        state.apiBaseUrl = 'http://localhost:8000';
+        if (await tryUrl(state.apiBaseUrl)) {
+            badge.className = 'connection-badge connected';
+            label.textContent = 'Connected';
+            showNotification('Backend connected at ' + state.apiBaseUrl, 'success');
+            return;
+        }
+    }
+
+    badge.className = 'connection-badge disconnected';
+    label.textContent = 'Disconnected';
+    showNotification('Backend not reachable. Start the server and reload.', 'error');
+}
+
+/* ────────────────────────────────────────────────────────────────────
+ *  SESSION MANAGEMENT
+ * ──────────────────────────────────────────────────────────────────── */
+async function createSession() {
+    const sid = document.getElementById('sessionIdInput').value.trim();
+    if (!sid) { showNotification('Please enter a session ID.', 'error'); return; }
+
+    try {
+        const resp = await fetch(`${state.apiBaseUrl}/api/sessions/${encodeURIComponent(sid)}/create`, { method: 'POST' });
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            throw new Error(err.detail || resp.statusText);
+        }
+        state.activeSessionId = sid;
+        showNotification(`Session "${sid}" created.`, 'success');
+        loadEnrolledSubjects();
+    } catch (e) {
+        showNotification('Failed to create session: ' + e.message, 'error');
+    }
+}
+
+async function deleteSession() {
+    const sid = state.activeSessionId || document.getElementById('sessionIdInput').value.trim();
+    if (!sid) { showNotification('No active session to reset.', 'error'); return; }
+
+    try {
+        const resp = await fetch(`${state.apiBaseUrl}/api/sessions/${encodeURIComponent(sid)}`, { method: 'DELETE' });
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            throw new Error(err.detail || resp.statusText);
+        }
+        state.activeSessionId = '';
+        state.enrolledSubjects = [];
+        state.batchImages = [];
+        state.currentBatchId = '';
+        state.selectedImage = null;
+        state.dslrQueue = [];
+        renderEnrolledSubjects();
+        renderProcessedImagesGrid();
+        renderQueue();
+        showNotification(`Session "${sid}" deleted.`, 'success');
+    } catch (e) {
+        showNotification('Failed to delete session: ' + e.message, 'error');
+    }
+}
+
+async function loadEnrolledSubjects() {
+    if (!state.activeSessionId) return;
+    try {
+        const resp = await fetch(`${state.apiBaseUrl}/api/sessions/${encodeURIComponent(state.activeSessionId)}/subjects`);
+        if (!resp.ok) throw new Error(resp.statusText);
+        const data = await resp.json();
+        state.enrolledSubjects = Array.isArray(data) ? data : (data.subjects || []);
+        renderEnrolledSubjects();
+    } catch (e) {
+        showNotification('Could not load subjects: ' + e.message, 'error');
+    }
+}
+
+function renderEnrolledSubjects() {
+    const container = document.getElementById('enrolledSubjectsList');
+    if (state.enrolledSubjects.length === 0) {
+        container.innerHTML = '<div class="subjects-empty">No subjects enrolled yet.</div>';
+        return;
+    }
+    container.innerHTML = state.enrolledSubjects.map(s => `
+        <div class="glass-panel subject-card">
+            <div class="subject-info">
+                <div class="name">${escapeHTML(s.subject_name || s.name || 'Unknown')}</div>
+                <div class="consent">${escapeHTML((s.consent_id || '').substring(0, 13))}…</div>
+            </div>
+            <span class="enrolled-badge">Enrolled</span>
+        </div>
+    `).join('');
+}
+
+/* ────────────────────────────────────────────────────────────────────
+ *  SUBJECT ENROLLMENT
+ * ──────────────────────────────────────────────────────────────────── */
+async function enrollSubject(event) {
+    event.preventDefault();
+    const sid = state.activeSessionId;
+    if (!sid) { showNotification('Create a session first.', 'error'); return; }
+
+    const name = document.getElementById('subjectName').value.trim();
+    const consentId = document.getElementById('consentId').value.trim();
+    if (!name) { showNotification('Subject name is required.', 'error'); return; }
+
+    let selfieFile = null;
+
+    if (state.selfieSource === 'file') {
+        const fileInput = document.getElementById('selfieFileInput');
+        if (!fileInput.files.length) { showNotification('Please select a selfie image.', 'error'); return; }
+        selfieFile = fileInput.files[0];
+    } else {
+        if (!state.webcamBlob) { showNotification('Please capture a photo first.', 'error'); return; }
+        selfieFile = new File([state.webcamBlob], 'selfie.jpg', { type: 'image/jpeg' });
+    }
+
+    const formData = new FormData();
+    formData.append('selfie', selfieFile);
+    formData.append('consent_id', consentId);
+    formData.append('master_user_id', 'demo_user');
+    formData.append('project_id', 'prism_demo');
+    formData.append('subject_name', name);
+
+    const btnSubmit = document.getElementById('btnEnrollSubmit');
+    btnSubmit.disabled = true;
+    btnSubmit.textContent = 'Registering (Downloading ML model if first time)...';
+
+    try {
+        const resp = await fetch(`${state.apiBaseUrl}/api/sessions/${encodeURIComponent(sid)}/enroll`, {
+            method: 'POST',
+            body: formData
+        });
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            throw new Error(err.detail || resp.statusText);
+        }
+        showNotification(`"${name}" enrolled successfully!`, 'success');
+
+        // Reset form
+        document.getElementById('subjectName').value = '';
+        document.getElementById('selfieFileInput').value = '';
+        document.getElementById('consentId').value = generateUUID();
+        state.webcamBlob = null;
+        retakePhoto();
+
+        loadEnrolledSubjects();
+    } catch (e) {
+        showNotification('Enrollment failed: ' + e.message, 'error');
+    } finally {
+        btnSubmit.disabled = false;
+        btnSubmit.textContent = 'Enroll Subject';
+    }
+}
+
+/* ────────────────────────────────────────────────────────────────────
+ *  SELFIE SOURCE TOGGLE & WEBCAM
+ * ──────────────────────────────────────────────────────────────────── */
+function setSelfieSource(source) {
+    state.selfieSource = source;
+    document.querySelectorAll('.selfie-toggle-btn').forEach(btn => btn.classList.remove('active'));
+    if (source === 'file') {
+        document.querySelectorAll('.selfie-toggle-btn')[0].classList.add('active');
+        document.getElementById('selfieFileMode').style.display = '';
+        document.getElementById('selfieCameraMode').style.display = 'none';
+        stopCamera();
+    } else {
+        document.querySelectorAll('.selfie-toggle-btn')[1].classList.add('active');
+        document.getElementById('selfieFileMode').style.display = 'none';
+        document.getElementById('selfieCameraMode').style.display = '';
+    }
+}
+
+async function startCamera() {
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: 640, height: 480 } });
+        state.webcamStream = stream;
+        const video = document.getElementById('webcamVideo');
+        video.srcObject = stream;
+        video.style.display = '';
+        document.getElementById('webcamSnapshot').style.display = 'none';
+        document.getElementById('btnStartCamera').style.display = 'none';
+        document.getElementById('btnCapture').style.display = '';
+        document.getElementById('btnRetake').style.display = 'none';
+    } catch (e) {
+        showNotification('Camera access denied: ' + e.message, 'error');
+    }
+}
+
+function capturePhoto() {
+    const video = document.getElementById('webcamVideo');
+    const canvas = document.getElementById('webcamSnapshotCanvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(video, 0, 0);
+
+    canvas.toBlob(blob => {
+        state.webcamBlob = blob;
+        const url = URL.createObjectURL(blob);
+        const img = document.getElementById('webcamSnapshot');
+        img.src = url;
+        img.style.display = '';
+        video.style.display = 'none';
+        document.getElementById('btnCapture').style.display = 'none';
+        document.getElementById('btnRetake').style.display = '';
+        stopCamera();
+    }, 'image/jpeg', 0.92);
+}
+
+function retakePhoto() {
+    state.webcamBlob = null;
+    document.getElementById('webcamSnapshot').style.display = 'none';
+    document.getElementById('webcamVideo').style.display = '';
+    document.getElementById('btnRetake').style.display = 'none';
+    document.getElementById('btnCapture').style.display = 'none';
+    document.getElementById('btnStartCamera').style.display = '';
+    stopCamera();
+}
+
+function stopCamera() {
+    if (state.webcamStream) {
+        state.webcamStream.getTracks().forEach(t => t.stop());
+        state.webcamStream = null;
+    }
+}
+
+/* ────────────────────────────────────────────────────────────────────
+ *  DSLR UPLOAD – QUEUE MANAGEMENT
+ * ──────────────────────────────────────────────────────────────────── */
+function handleDrop(event) {
+    event.preventDefault();
+    event.currentTarget.classList.remove('drag-over');
+    if (event.dataTransfer.files.length) {
+        addFilesToQueue(event.dataTransfer.files);
+    }
+}
+
+// Make the dropzone clickable
+document.addEventListener('DOMContentLoaded', () => {
+    const dz = document.getElementById('dropzone');
+    dz.addEventListener('click', () => document.getElementById('dslrFileInput').click());
+});
+
+function addFilesToQueue(files) {
+    for (const f of files) {
+        if (f.type.startsWith('image/')) {
+            state.dslrQueue.push(f);
+        }
+    }
+    // Reset file input so re-selecting the same files works
+    document.getElementById('dslrFileInput').value = '';
+    renderQueue();
+}
+
+function removeFileFromQueue(index) {
+    state.dslrQueue.splice(index, 1);
+    renderQueue();
+}
+
+function renderQueue() {
+    const section = document.getElementById('queueSection');
+    const list = document.getElementById('queueList');
+    const btn = document.getElementById('processQueueBtn');
+
+    if (state.dslrQueue.length === 0) {
+        section.style.display = 'none';
+        return;
+    }
+
+    section.style.display = '';
+    btn.textContent = `Process ${state.dslrQueue.length} Image${state.dslrQueue.length > 1 ? 's' : ''}`;
+
+    list.innerHTML = state.dslrQueue.map((f, i) => `
+        <div class="glass-panel queue-item">
+            <div class="file-info">
+                <span>📄</span>
+                <span>${escapeHTML(f.name)}</span>
+                <span class="file-size">${formatBytes(f.size)}</span>
+            </div>
+            <button class="remove-btn" onclick="removeFileFromQueue(${i})" title="Remove">✕</button>
+        </div>
+    `).join('');
+}
+
+async function uploadDSLRQueue() {
+    if (state.dslrQueue.length === 0) { showNotification('Queue is empty.', 'error'); return; }
+    if (!state.activeSessionId) { showNotification('Create a session first.', 'error'); return; }
+
+    const files = [...state.dslrQueue];
+    state.dslrQueue = [];
+    renderQueue();
+    await _uploadDSLRFiles(files);
+}
+
+async function _uploadDSLRFiles(files) {
+    const progressWrapper = document.getElementById('uploadProgress');
+    const progressFill = document.getElementById('uploadProgressFill');
+    const processBtn = document.getElementById('processQueueBtn');
+
+    progressWrapper.classList.add('visible');
+    progressFill.style.width = '0%';
+    processBtn.disabled = true;
+
+    const formData = new FormData();
+    files.forEach(f => formData.append('images', f));
+
+    try {
+        // Simulate progress since fetch doesn't support upload progress natively
+        let progress = 0;
+        const progressInterval = setInterval(() => {
+            progress = Math.min(progress + Math.random() * 15, 90);
+            progressFill.style.width = progress + '%';
+        }, 300);
+
+        const resp = await fetch(`${state.apiBaseUrl}/api/upload/${encodeURIComponent(state.activeSessionId)}`, {
+            method: 'POST',
+            body: formData
+        });
+
+        clearInterval(progressInterval);
+        progressFill.style.width = '100%';
+
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            throw new Error(err.detail || resp.statusText);
+        }
+
+        const data = await resp.json();
+        state.currentBatchId = data.batch_id || '';
+        state.batchImages = data.images || [];
+
+        showNotification(`Batch processed: ${data.total_images || 0} images, ${data.total_faces_detected || 0} faces detected.`, 'success');
+        renderBatchResults(data);
+        renderProcessedImagesGrid();
+    } catch (e) {
+        showNotification('Upload failed: ' + e.message, 'error');
+    } finally {
+        processBtn.disabled = false;
+        setTimeout(() => {
+            progressWrapper.classList.remove('visible');
+            progressFill.style.width = '0%';
+        }, 1200);
+    }
+}
+
+function renderBatchResults(data) {
+    const container = document.getElementById('batchResults');
+    const statsEl = document.getElementById('batchStats');
+    container.classList.add('visible');
+    statsEl.innerHTML = `
+        <div class="stat-box">
+            <div class="stat-value">${data.total_images || 0}</div>
+            <div class="stat-label">Images</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-value">${data.total_faces_detected || 0}</div>
+            <div class="stat-label">Faces Detected</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-value" style="color:var(--color-success)">${data.total_faces_matched || 0}</div>
+            <div class="stat-label">Matched</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-value" style="color:var(--color-warning)">${data.total_strangers_blurred || 0}</div>
+            <div class="stat-label">Strangers Blurred</div>
+        </div>
+    `;
+}
+
+/* ────────────────────────────────────────────────────────────────────
+ *  STEP 3 – VISUAL ANALYZER
+ * ──────────────────────────────────────────────────────────────────── */
+function renderProcessedImagesGrid() {
+    const grid = document.getElementById('thumbGrid');
+    if (state.batchImages.length === 0) {
+        grid.innerHTML = '<div class="subjects-empty" style="font-size:12px;">No images processed yet.</div>';
+        return;
+    }
+    grid.innerHTML = state.batchImages.map((img, i) => {
+        const src = `${state.apiBaseUrl}/api/upload/${encodeURIComponent(state.activeSessionId)}/${encodeURIComponent(state.currentBatchId)}/${encodeURIComponent(img.image_file)}/original`;
+        return `
+            <div class="thumb-item ${state.selectedImage === i ? 'active' : ''}" onclick="selectImageForAnalysis(${i})">
+                <img src="${src}" alt="${escapeHTML(img.image_file)}" loading="lazy">
+            </div>
+        `;
+    }).join('');
+}
+
+function selectImageForAnalysis(index) {
+    state.selectedImage = index;
+    state.viewMode = 'original';
+    document.getElementById('btnViewOriginal').classList.add('active');
+    document.getElementById('btnViewRedacted').classList.remove('active');
+    renderProcessedImagesGrid();
+    renderCanvas();
+    renderFaceInspector();
+}
+
+function toggleImageView(mode) {
+    state.viewMode = mode;
+    document.getElementById('btnViewOriginal').classList.toggle('active', mode === 'original');
+    document.getElementById('btnViewRedacted').classList.toggle('active', mode === 'redacted');
+    renderCanvas();
+}
+
+function renderCanvas() {
+    const canvas = document.getElementById('analyzerCanvas');
+    const placeholder = document.getElementById('canvasPlaceholder');
+
+    if (state.selectedImage === null || !state.batchImages[state.selectedImage]) {
+        canvas.style.display = 'none';
+        placeholder.style.display = '';
+        return;
+    }
+
+    placeholder.style.display = 'none';
+    canvas.style.display = '';
+
+    const imgData = state.batchImages[state.selectedImage];
+    const suffix = state.viewMode === 'redacted' ? 'redacted' : 'original';
+    const src = `${state.apiBaseUrl}/api/upload/${encodeURIComponent(state.activeSessionId)}/${encodeURIComponent(state.currentBatchId)}/${encodeURIComponent(imgData.image_file)}/${suffix}`;
+
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0);
+
+        // Draw bounding boxes only on original mode
+        if (state.viewMode === 'original' && imgData.faces) {
+            const lineWidth = Math.max(2, Math.round(img.naturalWidth / 400));
+            const fontSize = Math.max(12, Math.round(img.naturalWidth / 60));
+
+            imgData.faces.forEach(face => {
+                const { x1, y1, x2, y2 } = face.bbox;
+                const isMatched = face.match_status === 'MATCHED';
+                const color = isMatched ? '#10b981' : '#f59e0b';
+
+                // Bounding box
+                ctx.strokeStyle = color;
+                ctx.lineWidth = lineWidth;
+                ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+
+                // Label
+                const label = isMatched
+                    ? `${face.subject_name || 'Known'} ${Math.round((face.match_score || 0) * 100)}%`
+                    : 'STRANGER';
+
+                ctx.font = `bold ${fontSize}px Inter, sans-serif`;
+                const textMetrics = ctx.measureText(label);
+                const textHeight = fontSize + 4;
+                const padding = 6;
+                const labelWidth = textMetrics.width + padding * 2;
+                const labelHeight = textHeight + padding;
+
+                // Position label above the face, or inside if too close to top
+                let labelY = y1 - labelHeight - 4;
+                if (labelY < 0) {
+                    labelY = y1 + 4;
+                }
+
+                // Label background
+                ctx.fillStyle = color;
+                ctx.globalAlpha = 0.85;
+                ctx.fillRect(x1, labelY, labelWidth, labelHeight);
+                ctx.globalAlpha = 1.0;
+
+                // Label text
+                ctx.fillStyle = '#fff';
+                ctx.fillText(label, x1 + padding, labelY + fontSize + padding / 2 - 1);
+            });
+        }
+
+        state.canvasScale = canvas.clientWidth / canvas.width;
+    };
+    img.onerror = () => {
+        showNotification('Failed to load image: ' + imgData.image_file, 'error');
+    };
+    img.src = src;
+}
+
+function renderFaceInspector() {
+    const container = document.getElementById('inspectorContent');
+    const jsonEl = document.getElementById('jsonContent');
+
+    if (state.selectedImage === null || !state.batchImages[state.selectedImage]) {
+        container.innerHTML = '<div class="no-image-selected">Select an image to view face data.</div>';
+        jsonEl.textContent = '';
+        return;
+    }
+
+    const imgData = state.batchImages[state.selectedImage];
+    const faces = imgData.faces || [];
+
+    if (faces.length === 0) {
+        container.innerHTML = '<div class="no-image-selected">No faces detected in this image.</div>';
+    } else {
+        container.innerHTML = faces.map(face => {
+            const isMatched = face.match_status === 'MATCHED';
+            return `
+                <div class="glass-panel face-card">
+                    <div class="face-card-header">
+                        <span class="face-index">Face #${face.face_index}</span>
+                        <span class="match-badge ${isMatched ? 'matched' : 'stranger'}">${isMatched ? 'Matched' : 'Stranger'}</span>
+                    </div>
+                    <div class="face-detail">BBox: <span>[${face.bbox.x1}, ${face.bbox.y1}, ${face.bbox.x2}, ${face.bbox.y2}]</span></div>
+                    <div class="face-detail">Score: <span>${face.match_score !== null && face.match_score !== undefined ? (face.match_score * 100).toFixed(1) + '%' : 'N/A'}</span></div>
+                    ${isMatched ? `<div class="face-detail">Name: <span>${escapeHTML(face.subject_name || '')}</span></div>` : ''}
+                    ${face.consent_id ? `<div class="face-detail">Consent: <span>${escapeHTML(face.consent_id.substring(0, 13))}…</span></div>` : ''}
+                </div>
+            `;
+        }).join('');
+    }
+
+    jsonEl.textContent = JSON.stringify(imgData, null, 2);
+}
+
+function toggleJsonContent() {
+    const el = document.getElementById('jsonContent');
+    const arrow = document.getElementById('jsonArrow');
+    el.classList.toggle('visible');
+    arrow.textContent = el.classList.contains('visible') ? '▼' : '▶';
+}
+
+/* ────────────────────────────────────────────────────────────────────
+ *  STEP NAVIGATION
+ * ──────────────────────────────────────────────────────────────────── */
+function navigateToStep(stepNum) {
+    state.currentStep = stepNum;
+
+    // Update nav items
+    document.querySelectorAll('.step-nav-item').forEach((el, i) => {
+        el.classList.toggle('active', i + 1 === stepNum);
+    });
+
+    // Update panels
+    document.querySelectorAll('.step-panel').forEach((el, i) => {
+        el.classList.toggle('active', i + 1 === stepNum);
+    });
+
+    // Render canvas when switching to step 3
+    if (stepNum === 3) {
+        renderProcessedImagesGrid();
+        if (state.selectedImage !== null) {
+            renderCanvas();
+            renderFaceInspector();
+        }
+    }
+}
+
+/* ────────────────────────────────────────────────────────────────────
+ *  INITIALIZATION
+ * ──────────────────────────────────────────────────────────────────── */
+document.addEventListener('DOMContentLoaded', () => {
+    // Set initial consent UUID
+    document.getElementById('consentId').value = generateUUID();
+
+    // Check backend connection
+    checkBackendConnection();
+});
+</script>
+
+</body>
+</html>
