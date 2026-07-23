@@ -1,9 +1,23 @@
 import { Resend } from 'resend'
+import nodemailer from 'nodemailer'
 import { ApiError } from '../middleware/errorHandler.js'
 import { logger } from './logger.js'
 
 const resend = new Resend(process.env.RESEND_API_KEY)
-const FROM = process.env.RESEND_FROM_EMAIL ?? 'Prism <onboarding@resend.dev>'
+const FROM = process.env.MAIL_FROM ?? process.env.RESEND_FROM_EMAIL ?? 'Prism <onboarding@resend.dev>'
+
+// SMTP (Mailjet) is preferred when configured — unlike the Resend shared sandbox
+// sender it delivers to any recipient, so real signups can be tested locally.
+// Falls back to Resend when the SMTP vars are absent.
+const smtp =
+  process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS
+    ? nodemailer.createTransport({
+        host: process.env.SMTP_HOST,
+        port: Number(process.env.SMTP_PORT ?? 587),
+        secure: Number(process.env.SMTP_PORT ?? 587) === 465,
+        auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+      })
+    : null
 
 // A Resend trial key can only deliver to the account owner's own address, so any
 // test subject with a made-up email would never receive a code. Outside production
@@ -17,7 +31,18 @@ const LOG_OTP = process.env.NODE_ENV !== 'production'
 // a 502 that errorHandler.js logs at `error` level with the request's correlation
 // id; the client's only retry path is the existing "Resend Code" UI action.
 async function send({ to, subject, html }) {
-  const { error } = await resend.emails.send({ from: FROM, to, subject, html })
+  let error = null
+
+  if (smtp) {
+    try {
+      await smtp.sendMail({ from: FROM, to, subject, html })
+      return
+    } catch (err) {
+      error = err
+    }
+  } else {
+    ;({ error } = await resend.emails.send({ from: FROM, to, subject, html }))
+  }
   if (!error) return
 
   // In dev a rejected send (trial key, unverified test address) must not fail the

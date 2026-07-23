@@ -1,11 +1,20 @@
-import { useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import Sidebar from '../../components/Sidebar'
 import PageHeader from '../../components/PageHeader'
 import ListPanel from '../../components/ListPanel'
 import StatusPill from '../../components/StatusPill'
+import SelfieCapture from '../../components/SelfieCapture'
 import { useMockQuery } from '../../lib/useMockQuery'
-import { listSubjects, registerSubject, verifySubjectOtp } from '../../lib/api'
-import { UserCheck, UserPlus } from 'lucide-react'
+import {
+  addEnrollment,
+  deleteEnrollment,
+  enrollmentImageUrl,
+  listEnrollments,
+  listSubjects,
+  registerSubject,
+  verifySubjectOtp,
+} from '../../lib/api'
+import { ScanFace, Trash2, UserCheck, UserPlus, X } from 'lucide-react'
 
 const GROUPS = [
   { value: 'SAMSUNG_EMPLOYEE', label: 'Samsung Employee' },
@@ -17,6 +26,118 @@ const GROUPS = [
 
 const FIELD_CLASS =
   'mt-1.5 w-full rounded-lg border border-border bg-canvas px-3 py-2 text-sm text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand'
+
+// Without an enrolled photo a subject can never be auto-matched — every one of
+// their faces lands in the agent's manual queue instead.
+const POSES = ['FRONT', 'LEFT', 'RIGHT', 'UP', 'DOWN']
+
+function EnrollmentPanel({ subject, onClose, onCountChange }) {
+  const [data, setData] = useState(null)
+  const [error, setError] = useState(null)
+  const [busy, setBusy] = useState(false)
+  // Free-form by design — the agent tags the angle they actually got rather than
+  // being marched through five of them with a subject waiting.
+  const [pose, setPose] = useState('FRONT')
+
+  const reload = useCallback(
+    () =>
+      listEnrollments(subject.masterUserId)
+        .then((res) => {
+          setData(res)
+          onCountChange(subject.masterUserId, res.items.length)
+        })
+        .catch(setError),
+    [subject.masterUserId, onCountChange],
+  )
+
+  useEffect(() => {
+    reload()
+  }, [reload])
+
+  const run = async (fn) => {
+    setBusy(true)
+    setError(null)
+    try {
+      await fn()
+      await reload()
+    } catch (err) {
+      setError(err)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="mt-6 max-w-xl rounded-card bg-surface p-6 shadow-card">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-bold text-ink">Face enrollment — {subject.fullName}</h2>
+          <p className="mt-0.5 text-xs font-medium text-ink-faint">
+            The photo and the face measurements taken from it are stored encrypted, used only to
+            match this person to their own pictures, and deleted when consent is withdrawn.
+          </p>
+        </div>
+        <button
+          onClick={onClose}
+          className="rounded-md p-1.5 text-ink-faint hover:bg-canvas hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+          aria-label="Close"
+        >
+          <X size={15} strokeWidth={2} />
+        </button>
+      </div>
+
+      {data && data.items.length > 0 && (
+        <div className="mt-4 flex flex-wrap gap-3">
+          {data.items.map((enrollment) => (
+            <div key={enrollment.id} className="relative">
+              <img
+                src={enrollmentImageUrl(subject.masterUserId, enrollment.id)}
+                alt=""
+                className="h-24 w-24 rounded-lg object-cover"
+              />
+              <button
+                onClick={() => run(() => deleteEnrollment(subject.masterUserId, enrollment.id))}
+                disabled={busy}
+                className="absolute right-1 top-1 rounded-md bg-surface/90 p-1 text-ink-faint hover:text-danger disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger"
+                aria-label="Delete photo"
+              >
+                <Trash2 size={13} strokeWidth={2} />
+              </button>
+              <p className="mt-1 text-center text-[11px] font-semibold text-ink-faint">
+                {enrollment.pose ?? '—'} · {enrollment.detScore.toFixed(2)}
+              </p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="mt-4">
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <span className="text-xs font-bold uppercase tracking-wide text-ink-faint">Angle</span>
+          {POSES.map((p) => (
+            <button
+              key={p}
+              onClick={() => setPose(p)}
+              className={`rounded-pill px-2.5 py-1 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand ${
+                pose === p ? 'bg-brand text-white' : 'bg-canvas text-ink-muted'
+              } ${data?.items.some((i) => i.pose === p) ? 'ring-1 ring-brand/40' : ''}`}
+            >
+              {p}
+            </button>
+          ))}
+        </div>
+
+        <SelfieCapture
+          onCapture={(blob) => run(() => addEnrollment(subject.masterUserId, blob, pose))}
+          busy={busy}
+          error={error?.message}
+          count={data?.items.length ?? 0}
+          max={data?.max ?? 3}
+        />
+      </div>
+    </div>
+  )
+}
 
 export default function SubjectVerification() {
   const [refreshKey, setRefreshKey] = useState(0)
@@ -31,8 +152,15 @@ export default function SubjectVerification() {
   const [verifyingId, setVerifyingId] = useState(null)
   const [otpInputs, setOtpInputs] = useState({})
   const [verifyError, setVerifyError] = useState(null)
+  const [enrolling, setEnrolling] = useState(null)
+  const [enrollCounts, setEnrollCounts] = useState({})
 
   const subjects = data?.items ?? []
+
+  const handleCountChange = useCallback(
+    (subjectId, count) => setEnrollCounts((prev) => ({ ...prev, [subjectId]: count })),
+    [],
+  )
 
   const handleAddSubject = async (e) => {
     e.preventDefault()
@@ -147,6 +275,14 @@ export default function SubjectVerification() {
           </form>
         </div>
 
+        {enrolling && (
+          <EnrollmentPanel
+            subject={enrolling}
+            onClose={() => setEnrolling(null)}
+            onCountChange={handleCountChange}
+          />
+        )}
+
         <div className="mt-6">
           {verifyError && <p className="mb-3 text-sm font-semibold text-danger">{verifyError}</p>}
           <ListPanel
@@ -164,7 +300,18 @@ export default function SubjectVerification() {
                   </p>
                 </div>
                 {s.status === 'ACTIVE' ? (
-                  <StatusPill tone="success">Verified</StatusPill>
+                  <div className="flex shrink-0 items-center gap-2">
+                    {enrollCounts[s.masterUserId] === 0 && (
+                      <StatusPill tone="warning">Not enrolled — no auto-match</StatusPill>
+                    )}
+                    <StatusPill tone="success">Verified</StatusPill>
+                    <button
+                      onClick={() => setEnrolling(s)}
+                      className="flex items-center gap-1.5 rounded-lg bg-brand-soft px-3 py-1.5 text-xs font-semibold text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+                    >
+                      <ScanFace size={14} strokeWidth={2} /> Face photos
+                    </button>
+                  </div>
                 ) : (
                   <div className="flex items-center gap-2">
                     <input

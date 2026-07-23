@@ -36,6 +36,12 @@ export function getMe() {
   return request('/auth/subject/me')
 }
 
+// Sessions a collection agent has added this subject to — the subject's own
+// "where am I being collected" view, distinct from the project catalogue.
+export function getMyParticipations() {
+  return request('/api/v1/me/participations')
+}
+
 export function refreshSession() {
   return request('/auth/subject/refresh', { method: 'POST' })
 }
@@ -58,4 +64,66 @@ export function grantConsent(projectId) {
 
 export function revokeConsent(projectId) {
   return request(`/api/v1/consent/projects/${projectId}/revoke`, { method: 'POST' })
+}
+
+// --- Face enrollment ---------------------------------------------------------
+// The photo and its embedding are both stored, the embedding encrypted at rest,
+// and both go when consent does. The server takes the subject id from the session
+// cookie, never from anything sent here.
+
+export function getEnrollmentStatus() {
+  return request('/api/v1/me/enrollment-status')
+}
+
+export function setBiometricConsent(accepted) {
+  return request('/api/v1/me/biometric-consent', {
+    method: 'PATCH',
+    body: JSON.stringify({ accepted }),
+  })
+}
+
+// Multipart, so it bypasses request() — that helper forces a JSON content-type,
+// which would stop the browser generating the multipart boundary.
+export async function addEnrollment(blob, pose) {
+  const form = new FormData()
+  // pose goes in FIRST: multer streams the parts in order and only exposes text
+  // fields on req.body if they arrived before the file.
+  if (pose) form.append('pose', pose)
+  form.append('selfie', blob, 'selfie.jpg')
+
+  const res = await fetch(`${BASE_URL}/api/v1/me/enrollments`, {
+    method: 'POST',
+    credentials: 'include',
+    body: form,
+  })
+
+  const body = await res.json().catch(() => null)
+  if (!res.ok) {
+    const error = new Error(body?.error ?? `Enrollment failed with status ${res.status}`)
+    error.status = res.status
+    throw error
+  }
+  return body
+}
+
+export function listEnrollments() {
+  return request('/api/v1/me/enrollments')
+}
+
+export function deleteEnrollment(id) {
+  return request(`/api/v1/me/enrollments/${id}`, { method: 'DELETE' })
+}
+
+export const enrollmentImageUrl = (id) => `${BASE_URL}/api/v1/me/enrollments/${id}/image`
+
+// --- QR session join ---------------------------------------------------------
+// The lookup is public — a phone that has scanned the code but has not signed in
+// yet still needs to see what it is being asked to agree to. Accepting is not.
+
+export function getJoinInvite(token) {
+  return request(`/api/v1/join/${token}`)
+}
+
+export function acceptJoinInvite(token) {
+  return request(`/api/v1/join/${token}/accept`, { method: 'POST' })
 }

@@ -20,8 +20,8 @@ export default function Login() {
     setError(null)
 
     try {
-      await requestLoginOtp(email.trim())
-      navigate('/verify', { state: { email: email.trim() } })
+      const res = await requestLoginOtp(email.trim())
+      navigate('/verify', { state: { email: email.trim(), devOtp: res?.devOtp } })
     } catch (err) {
       setError(err.message ?? 'Could not send a code. Please try again.')
     } finally {

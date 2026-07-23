@@ -32,6 +32,13 @@ export async function assertResendCooldown(email, purpose) {
   }
 }
 
+// Dev-only escape hatch: surfaces the plaintext code to the client so the flow
+// stays testable without working email delivery. Hard-gated on NODE_ENV so a
+// production build can never leak a live code over the wire.
+export function devOtp(code) {
+  return process.env.NODE_ENV === 'production' ? undefined : code
+}
+
 export async function createOtp(email, purpose) {
   const code = generateCode()
 

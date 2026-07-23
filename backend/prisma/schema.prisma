@@ -64,9 +64,56 @@ model Subject {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  faceEnrollments SubjectFaceEnrollment[]
+
   @@index([group, status])
   @@index([employeeRef])
   @@map("data_subjects")
+}
+
+enum EnrollmentSource {
+  SELF  // captured by the subject in user-portal
+  AGENT // captured by a collection agent in admin-portal
+}
+
+// Multi-pose capture: five angles is what makes a match survive a head turn.
+// buffalo_l degrades past ~±45° yaw, so anything wider is wasted storage.
+enum EnrollmentPose {
+  FRONT
+  LEFT
+  RIGHT
+  UP
+  DOWN
+}
+
+// The enrollment SELFIE and its embedding are BOTH persisted. The embedding is
+// encrypted at rest (AES-256-GCM, see lib/embeddingCrypto.js) and is cleared the
+// moment the enrollment is deleted — the tombstone row survives for the audit
+// chain, the biometric does not. It is never selected by any API response.
+// Persisting it is what makes a session gallery build in seconds instead of one
+// face-service round trip per enrollment per session.
+model SubjectFaceEnrollment {
+  id         String           @id @default(uuid()) @db.Uuid
+  subjectId  String           @map("subject_id") @db.Uuid
+  imagePath  String // relative to STORAGE_ROOT
+  sha256     String
+  detScore   Float
+  width      Int?
+  height     Int?
+  source     EnrollmentSource
+  pose       EnrollmentPose?
+  // AES-256-GCM(512 × float32 LE) laid out as nonce(12) || tag(16) || ciphertext
+  embedding    Bytes?
+  embeddingDim Int? // 512; null = legacy row, re-derived from the selfie on use
+  capturedBy String?          @db.Uuid // AdminUser.id when source=AGENT
+  createdAt  DateTime         @default(now())
+  deletedAt  DateTime? // soft delete; file removed immediately
+
+  subject Subject @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
+
+  @@unique([subjectId, sha256])
+  @@index([subjectId, deletedAt])
+  @@map("subject_face_enrollments")
 }
 
 model AuditLog {
@@ -282,10 +329,30 @@ model Session {
   photos       Photo[]
   clusters     FaceCluster[]
   jobs         RecognitionJob[]
+  handoff      SessionHandoff?
+  invites      SessionInvite[]
 
   @@index([agentId, status])
   @@index([projectId])
   @@map("sessions")
+}
+
+// The bearer credential behind the join QR. Deliberately NOT Session.code —
+// the code is an operator-facing label printed in the UI, while this has to be
+// rotatable and revocable on its own without renaming the session.
+model SessionInvite {
+  id        String    @id @default(uuid()) @db.Uuid
+  sessionId String    @map("session_id") @db.Uuid
+  token     String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdBy String    @db.Uuid
+  createdAt DateTime  @default(now())
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@map("session_invites")
 }
 
 model SessionParticipant {
@@ -322,6 +389,10 @@ model Photo {
   height       Int?
   takenAt      DateTime?
   createdAt    DateTime     @default(now())
+
+  // Bystander-blurred derivative written at finalize. The original at storagePath
+  // is never overwritten — downstream decides which derivative it is entitled to.
+  redactedPath String? @map("redacted_path")
 
   session  Session         @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   faces    FaceDetection[]
@@ -374,6 +445,11 @@ model FaceCluster {
   taggedSubjectId    String?       @db.Uuid
   createdAt          DateTime      @default(now())
 
+  // Provenance of the tag: what the gallery scored and whether the worker applied
+  // it without an agent ever looking at the card.
+  matchScore Float?  @map("match_score")
+  autoTagged Boolean @default(false) @map("auto_tagged")
+
   session          Session         @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   faces            FaceDetection[]
   suggestedSubject Subject?        @relation(fields: [suggestedSubjectId], references: [masterUserId], onDelete: SetNull)
@@ -423,4 +499,30 @@ model RecognitionJob {
 
   @@index([sessionId])
   @@map("recognition_jobs")
+}
+
+enum HandoffStatus {
+  PENDING_INGEST
+  INGESTED
+  REJECTED
+}
+
+// Emitted when a session is finalized. The batch the Consent Mapping Engine and
+// the PII/Redaction Engine consume (steps 7–9 of the DSAR dataflow) — every photo
+// in it already carries a consentId via photo_subjects.
+model SessionHandoff {
+  id           String        @id @default(uuid()) @db.Uuid
+  sessionId    String        @unique @db.Uuid
+  projectId    String        @db.Uuid
+  status       HandoffStatus @default(PENDING_INGEST)
+  photoCount   Int
+  subjectCount Int
+  linkCount    Int
+  emittedAt    DateTime      @default(now())
+  ingestedAt   DateTime?
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@map("session_handoffs")
 }

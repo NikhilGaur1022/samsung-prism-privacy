@@ -1,7 +1,7 @@
 import { prisma } from '../../config/prisma.js'
 import { ApiError } from '../../middleware/errorHandler.js'
 import { writeAuditLog } from '../../lib/auditLog.js'
-import { assertResendCooldown, createOtp, verifyOtp as verifyOtpCode } from '../../lib/otp.js'
+import { assertResendCooldown, createOtp, devOtp, verifyOtp as verifyOtpCode } from '../../lib/otp.js'
 import { sendOtpEmail } from '../../lib/resend.js'
 import {
   signSubjectAccessToken,
@@ -29,6 +29,8 @@ export async function requestLogin(email) {
     action: 'LOGIN_OTP_REQUESTED',
     actorId: subject.masterUserId,
   })
+
+  return { devOtp: devOtp(code) }
 }
 
 // Used for both registration-verify and returning-subject login — a subject's
@@ -75,7 +77,9 @@ export async function getMe(masterUserId) {
   if (!subject) throw new ApiError(404, 'Subject not found')
   return {
     masterUserId: subject.masterUserId,
+    fullName: subject.fullName,
     email: subject.email,
+    phone: subject.phone,
     group: subject.group,
     status: subject.status,
   }

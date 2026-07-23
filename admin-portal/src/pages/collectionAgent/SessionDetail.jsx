@@ -1,15 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
+import { QRCodeSVG } from 'qrcode.react'
 import {
   Camera,
   CircleSlash,
+  Copy,
   Loader2,
+  RefreshCw,
   Search,
   ShieldOff,
   StopCircle,
   Trash2,
   UploadCloud,
   UserPlus,
+  Users,
   X,
 } from 'lucide-react'
 import Sidebar from '../../components/Sidebar'
@@ -17,11 +21,14 @@ import PageHeader from '../../components/PageHeader'
 import StatusPill from '../../components/StatusPill'
 import {
   addParticipant,
+  createInvite,
   deletePhoto,
   endSession,
-  getSession,
+  getInvite,
+  getSessionFresh,
   mediaUrl,
   removeParticipant,
+  revokeInvite,
   searchProjectSubjects,
   uploadPhotos,
 } from '../../lib/api'
@@ -83,6 +90,138 @@ function useCamera() {
   return { videoRef, on, error, start, stop, capture }
 }
 
+function useCountdown(expiresAt) {
+  const [now, setNow] = useState(Date.now())
+
+  useEffect(() => {
+    if (!expiresAt) return
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [expiresAt])
+
+  if (!expiresAt) return null
+  const seconds = Math.max(0, Math.floor((new Date(expiresAt).getTime() - now) / 1000))
+  const h = Math.floor(seconds / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  const s = seconds % 60
+  return { seconds, text: h > 0 ? `${h}h ${m}m` : `${m}m ${String(s).padStart(2, '0')}s` }
+}
+
+// The subject scans this, reads the consent text, and taps agree — the scan alone
+// is not consent, which is why the QR points at a screen and not at an accept
+// endpoint. Accepting creates the roster row, so the agent adds nobody by hand.
+function JoinPanel({ sessionId, active }) {
+  const [invite, setInvite] = useState(null)
+  const [error, setError] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [copied, setCopied] = useState(false)
+
+  useEffect(() => {
+    getInvite(sessionId)
+      .then((res) => setInvite(res.invite))
+      .catch(setError)
+  }, [sessionId])
+
+  const countdown = useCountdown(invite?.expiresAt)
+  const expired = countdown?.seconds === 0
+
+  const run = async (fn) => {
+    setBusy(true)
+    setError(null)
+    try {
+      setInvite(await fn())
+    } catch (err) {
+      setError(err)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const copy = async () => {
+    await navigator.clipboard.writeText(invite.url)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 1500)
+  }
+
+  if (!active) {
+    return (
+      <p className="mt-4 text-xs font-medium text-ink-faint">
+        People can only join while the session is active.
+      </p>
+    )
+  }
+
+  return (
+    <div className="mt-4">
+      {error && <p className="mb-3 text-sm font-semibold text-danger">{error.message}</p>}
+
+      {!invite || expired ? (
+        <div className="rounded-lg border border-dashed border-border p-6 text-center">
+          <p className="text-sm font-semibold text-ink">
+            {expired ? 'This code has expired.' : 'No join code yet.'}
+          </p>
+          <p className="mt-1 text-xs font-medium text-ink-faint">
+            Generate one and show it to people as they arrive.
+          </p>
+          <button
+            onClick={() => run(() => createInvite(sessionId))}
+            disabled={busy}
+            className="mt-4 rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-white disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-dark"
+          >
+            {busy ? 'Generating…' : 'Generate join code'}
+          </button>
+        </div>
+      ) : (
+        <>
+          <div className="flex justify-center rounded-lg bg-white p-5">
+            <QRCodeSVG value={invite.url} size={220} level="M" />
+          </div>
+
+          {/* Printed under the QR because a cracked camera or a locked-down phone
+              is common enough that "just scan it" is not a complete answer. */}
+          <div className="mt-3 flex items-center gap-2">
+            <code className="min-w-0 flex-1 truncate rounded-lg bg-canvas px-3 py-2 text-xs font-semibold text-ink-muted">
+              {invite.url}
+            </code>
+            <button
+              onClick={copy}
+              className="flex shrink-0 items-center gap-1.5 rounded-lg bg-canvas px-3 py-2 text-xs font-semibold text-ink-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+            >
+              <Copy size={13} strokeWidth={2} /> {copied ? 'Copied' : 'Copy'}
+            </button>
+          </div>
+
+          <div className="mt-3 flex items-center justify-between gap-3">
+            <p className="text-xs font-semibold text-ink-faint">Expires in {countdown?.text}</p>
+            <div className="flex gap-2">
+              <button
+                onClick={() => run(() => createInvite(sessionId))}
+                disabled={busy}
+                className="flex items-center gap-1.5 rounded-lg bg-brand-soft px-3 py-1.5 text-xs font-semibold text-brand disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+              >
+                <RefreshCw size={13} strokeWidth={2} /> Rotate
+              </button>
+              <button
+                onClick={() => run(async () => (await revokeInvite(sessionId), null))}
+                disabled={busy}
+                className="rounded-lg bg-danger-soft px-3 py-1.5 text-xs font-semibold text-danger disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger"
+              >
+                Revoke
+              </button>
+            </div>
+          </div>
+
+          <p className="mt-3 rounded-lg bg-canvas px-3 py-2 text-[11px] font-medium leading-relaxed text-ink-faint">
+            A phone cannot reach <code>localhost</code> — the link must use this machine&apos;s LAN
+            IP or a tunnel. On-device selfie capture additionally needs HTTPS, so a tunnel
+            (ngrok/cloudflared) is the realistic setup.
+          </p>
+        </>
+      )}
+    </div>
+  )
+}
+
 export default function SessionDetail() {
   const { sessionId } = useParams()
   const navigate = useNavigate()
@@ -95,9 +234,14 @@ export default function SessionDetail() {
   const [results, setResults] = useState([])
   const [searching, setSearching] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [notEnrolled, setNotEnrolled] = useState([])
+  const [rosterTab, setRosterTab] = useState('qr')
 
+  // Fresh, not cached: reload runs right after a mutation (add/remove participant,
+  // upload, end) and the 60s GET cache would otherwise echo the pre-mutation
+  // roster — a removed person would reappear until the cache aged out.
   const reload = useCallback(
-    () => getSession(sessionId).then(setSession).catch(setError),
+    () => getSessionFresh(sessionId).then(setSession).catch(setError),
     [sessionId],
   )
 
@@ -116,6 +260,17 @@ export default function SessionDetail() {
   useEffect(() => {
     if (session?.status === 'TAGGING') navigate(`/sessions/${sessionId}/tagging`)
   }, [session?.status, sessionId, navigate])
+
+  // People join by scanning, with nothing to tell the agent it happened. Poll the
+  // roster while the QR is on screen — through getSessionFresh, because the 60s
+  // GET cache would otherwise hide every joiner for a minute at a time.
+  useEffect(() => {
+    if (session?.status !== 'ACTIVE' || rosterTab !== 'qr') return
+    const timer = setInterval(() => {
+      getSessionFresh(sessionId).then(setSession).catch(() => {})
+    }, 3000)
+    return () => clearInterval(timer)
+  }, [session?.status, rosterTab, sessionId])
 
   useEffect(() => {
     if (!session) return
@@ -159,7 +314,10 @@ export default function SessionDetail() {
   const handleEnd = () =>
     run(async () => {
       camera.stop()
-      await endSession(sessionId)
+      // The gallery build reports who has no enrolled photo — surface it now, while
+      // the agent is still in the room and could take one.
+      const result = await endSession(sessionId)
+      setNotEnrolled(result.notEnrolled ?? [])
     })
 
   if (!session) {
@@ -197,6 +355,13 @@ export default function SessionDetail() {
               >
                 <StopCircle size={16} strokeWidth={2} /> End session & detect faces
               </button>
+            ) : session.status === 'ARCHIVED' ? (
+              <Link
+                to={`/sessions/${sessionId}/people`}
+                className="flex items-center gap-2 rounded-lg bg-brand px-4 py-2.5 text-sm font-semibold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-dark"
+              >
+                <Users size={16} strokeWidth={2} /> View people
+              </Link>
             ) : (
               <StatusPill tone="warning">Detecting faces…</StatusPill>
             )
@@ -206,6 +371,14 @@ export default function SessionDetail() {
         {error && (
           <div className="mt-5 rounded-lg bg-danger-soft px-3 py-2.5 text-sm font-semibold text-danger">
             {error.message}
+          </div>
+        )}
+
+        {notEnrolled.length > 0 && (
+          <div className="mt-5 rounded-lg bg-warning-soft px-3 py-2.5 text-sm font-semibold text-warning">
+            {notEnrolled.length} {notEnrolled.length === 1 ? 'person has' : 'people have'} no
+            enrolled photo and will need manual tagging:{' '}
+            {notEnrolled.map((n) => n.fullName).join(', ')}
           </div>
         )}
 
@@ -221,10 +394,37 @@ export default function SessionDetail() {
           <section className="rounded-card bg-surface p-6 shadow-card">
             <h2 className="text-base font-bold text-ink">Roster</h2>
             <p className="mt-0.5 text-xs font-medium text-ink-faint">
-              Only people who consented to this project in their own portal can be added.
+              Only people who have consented to this project can be added — by scanning, or by hand.
             </p>
 
-            <ul className="mt-4 divide-y divide-border">
+            {capturing && (
+              <div className="mt-4 flex gap-2">
+                {[
+                  ['qr', 'Scan to join'],
+                  ['manual', 'Add manually'],
+                ].map(([key, label]) => (
+                  <button
+                    key={key}
+                    onClick={() => setRosterTab(key)}
+                    className={`rounded-pill px-3 py-1.5 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand ${
+                      rosterTab === key ? 'bg-brand text-white' : 'bg-canvas text-ink-muted'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {capturing && rosterTab === 'qr' && (
+              <JoinPanel sessionId={sessionId} active={session.status === 'ACTIVE'} />
+            )}
+
+            <p className="mt-5 text-xs font-bold uppercase tracking-wide text-ink-faint">
+              {session.participants.length} on the roster
+            </p>
+
+            <ul className="mt-2 divide-y divide-border">
               {session.participants.map((p) => (
                 <li key={p.subjectId} className="flex items-center justify-between gap-3 py-3">
                   <div className="min-w-0">
@@ -248,7 +448,7 @@ export default function SessionDetail() {
               )}
             </ul>
 
-            {capturing && (
+            {capturing && rosterTab === 'manual' && (
               <div className="mt-5 border-t border-border pt-5">
                 <div className="relative">
                   <Search
@@ -390,6 +590,7 @@ export default function SessionDetail() {
                     <img
                       src={mediaUrl.photo(sessionId, photo.id)}
                       alt=""
+                      loading="lazy"
                       className="aspect-square w-full object-cover"
                     />
                     {capturing && (

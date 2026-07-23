@@ -40,6 +40,9 @@ const tagSchema = z.object({
   subjectId: uuid.optional(),
 })
 
+const clusterIdsSchema = z.object({ clusterIds: z.array(uuid).min(1) })
+const faceIdsSchema = z.object({ faceIds: z.array(uuid).min(1) })
+
 sessionRoutes.post('/', async (req, res, next) => {
   try {
     const body = createSessionSchema.parse(req.body)
@@ -132,7 +135,23 @@ sessionRoutes.get('/:sessionId/photos/:photoId/file', async (req, res, next) => 
       uuid.parse(req.params.photoId),
       req.admin,
     )
-    res.type(mimeType).sendFile(resolvePath(path), { root: process.cwd() })
+    // Photos are content-addressed by sha256 — they never change, so cache hard.
+    res.set('Cache-Control', 'private, max-age=86400, immutable')
+    res.type(mimeType).sendFile(resolvePath(path), { root: process.cwd(), maxAge: 86400000 })
+  } catch (err) {
+    next(err)
+  }
+})
+
+sessionRoutes.get('/:sessionId/photos/:photoId/redacted', async (req, res, next) => {
+  try {
+    const { path, mimeType } = await sessionService.readRedactedPhoto(
+      uuid.parse(req.params.sessionId),
+      uuid.parse(req.params.photoId),
+      req.admin,
+    )
+    res.set('Cache-Control', 'private, max-age=86400, immutable')
+    res.type(mimeType).sendFile(resolvePath(path), { root: process.cwd(), maxAge: 86400000 })
   } catch (err) {
     next(err)
   }
@@ -145,7 +164,9 @@ sessionRoutes.get('/:sessionId/faces/:faceId/crop', async (req, res, next) => {
       uuid.parse(req.params.faceId),
       req.admin,
     )
-    res.type(mimeType).sendFile(resolvePath(path), { root: process.cwd() })
+    // Crops are deterministic from the source photo — cache hard.
+    res.set('Cache-Control', 'private, max-age=86400, immutable')
+    res.type(mimeType).sendFile(resolvePath(path), { root: process.cwd(), maxAge: 86400000 })
   } catch (err) {
     next(err)
   }
@@ -167,6 +188,86 @@ sessionRoutes.get('/:sessionId/clusters', async (req, res, next) => {
   }
 })
 
+// Declared before /:sessionId/clusters/:clusterId so the literal segments are
+// never parsed as a cluster id.
+sessionRoutes.post('/:sessionId/clusters/merge', async (req, res, next) => {
+  try {
+    const body = clusterIdsSchema.parse(req.body)
+    res.json(
+      await sessionService.mergeClusters(uuid.parse(req.params.sessionId), body, req.admin),
+    )
+  } catch (err) {
+    next(err)
+  }
+})
+
+sessionRoutes.post('/:sessionId/clusters/accept-suggestions', async (req, res, next) => {
+  try {
+    const body = clusterIdsSchema.parse(req.body)
+    res.json(
+      await sessionService.acceptSuggestions(uuid.parse(req.params.sessionId), body, req.admin),
+    )
+  } catch (err) {
+    next(err)
+  }
+})
+
+sessionRoutes.post('/:sessionId/clusters/:clusterId/split', async (req, res, next) => {
+  try {
+    const body = faceIdsSchema.parse(req.body)
+    res.json(
+      await sessionService.splitFaces(
+        uuid.parse(req.params.sessionId),
+        uuid.parse(req.params.clusterId),
+        body,
+        req.admin,
+      ),
+    )
+  } catch (err) {
+    next(err)
+  }
+})
+
+sessionRoutes.get('/:sessionId/people', async (req, res, next) => {
+  try {
+    res.json(await sessionService.getPeople(uuid.parse(req.params.sessionId), req.admin))
+  } catch (err) {
+    next(err)
+  }
+})
+
+sessionRoutes.get(
+  '/:sessionId/people/:subjectId/photos/:photoId/redacted',
+  async (req, res, next) => {
+    try {
+      const { path, mimeType } = await sessionService.readPersonRedactedPhoto(
+        uuid.parse(req.params.sessionId),
+        uuid.parse(req.params.photoId),
+        uuid.parse(req.params.subjectId),
+        req.admin,
+      )
+      res.set('Cache-Control', 'private, max-age=86400, immutable')
+      res.type(mimeType).sendFile(resolvePath(path), { root: process.cwd(), maxAge: 86400000 })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+sessionRoutes.get('/:sessionId/people/:subjectId/photos', async (req, res, next) => {
+  try {
+    res.json(
+      await sessionService.getPersonPhotos(
+        uuid.parse(req.params.sessionId),
+        uuid.parse(req.params.subjectId),
+        req.admin,
+      ),
+    )
+  } catch (err) {
+    next(err)
+  }
+})
+
 sessionRoutes.patch('/:sessionId/clusters/:clusterId', async (req, res, next) => {
   try {
     const body = tagSchema.parse(req.body)
@@ -177,6 +278,16 @@ sessionRoutes.patch('/:sessionId/clusters/:clusterId', async (req, res, next) =>
         body,
         req.admin,
       ),
+    )
+  } catch (err) {
+    next(err)
+  }
+})
+
+sessionRoutes.get('/:sessionId/photos/review', async (req, res, next) => {
+  try {
+    res.json(
+      await sessionService.getPhotosForReview(uuid.parse(req.params.sessionId), req.admin),
     )
   } catch (err) {
     next(err)

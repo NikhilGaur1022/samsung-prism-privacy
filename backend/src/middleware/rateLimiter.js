@@ -38,6 +38,12 @@ export const subjectVerifyEmailLimiter = makeLimiter({
   keyGenerator: emailKey,
 })
 
+// The join lookup is fully public — the only thing standing between a scanner and
+// an enumeration attempt is the token's 256 bits and this. Accept is separate and
+// tighter: it writes consent records.
+export const joinLookupIpLimiter = makeLimiter({ limit: 60, prefix: 'rl:join-lookup-ip:' })
+export const joinAcceptIpLimiter = makeLimiter({ limit: 20, prefix: 'rl:join-accept-ip:' })
+
 // Admin login also gets the independent per-account lockout in auth-admin/service.js —
 // this only covers the IP-flood case, not the slow-distributed-attack case.
 export const adminLoginIpLimiter = makeLimiter({ limit: 30, prefix: 'rl:admin-login-ip:' })

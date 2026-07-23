@@ -1,12 +1,4 @@
-import {
-  Download,
-  FileEdit,
-  Trash2,
-  RefreshCw,
-  CircleAlert,
-  ChevronRight,
-  ShieldCheck,
-} from 'lucide-react'
+import { Download, FileEdit, Trash2 } from 'lucide-react'
 import TopBar from '../components/TopBar'
 import Card from '../components/Card'
 import IconChip from '../components/IconChip'
@@ -15,13 +7,6 @@ const QUICK_ACTIONS = [
   { label: 'Download All', icon: Download, tone: 'brand' },
   { label: 'Update Info', icon: FileEdit, tone: 'neutral' },
   { label: 'Delete Account', icon: Trash2, tone: 'danger' },
-]
-
-const AUDIT_LOG = [
-  { title: 'Personal Info Accessed', detail: 'Dashboard Internal API', time: 'Just now', badge: 'SECURE' },
-  { title: 'Session Token Renewed', detail: 'Web Browser · Chrome', time: '2h ago' },
-  { title: 'Email Preferences Updated', detail: 'User Settings', time: 'Yesterday' },
-  { title: 'Privacy Policy Accepted', detail: 'v2.4 Agreement', time: '3 days ago' },
 ]
 
 export default function DataRights() {
@@ -80,36 +65,12 @@ export default function DataRights() {
           </Card>
         </div>
 
-        <div className="mt-6 flex items-center justify-between">
-          <p className="text-xs font-bold uppercase tracking-wide text-ink-faint">Audit Log</p>
-          <button className="rounded text-xs font-semibold text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
-            Filter
-          </button>
+        <p className="mt-6 text-xs font-bold uppercase tracking-wide text-ink-faint">
+          Audit Log
+        </p>
+        <div className="mt-3 rounded-card bg-surface px-4 py-6 text-center shadow-card">
+          <p className="text-xs font-medium text-ink-faint">Your activity log will appear here.</p>
         </div>
-
-        <div className="mt-3 divide-y divide-black/5 rounded-card bg-surface px-4 shadow-card">
-          {AUDIT_LOG.map(({ title, detail, time, badge }) => (
-            <div key={title} className="flex items-center gap-3 py-3">
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-semibold text-ink">{title}</p>
-                <p className="truncate text-xs font-medium text-ink-muted">{detail}</p>
-              </div>
-              <div className="flex shrink-0 flex-col items-end gap-1">
-                <span className="text-xs font-medium text-ink-faint">{time}</span>
-                {badge && (
-                  <span className="flex items-center gap-1 text-[10px] font-bold text-success">
-                    <ShieldCheck size={11} strokeWidth={2} />
-                    {badge}
-                  </span>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-
-        <button className="mt-3 mb-6 w-full rounded text-center text-sm font-semibold text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
-          View Full Audit History
-        </button>
       </div>
     </div>
   )

@@ -6,8 +6,15 @@ import { logger } from '../lib/logger.js'
 import { writeAuditLog } from '../lib/auditLog.js'
 import { readFile, writeFile } from '../lib/storage.js'
 import { FACE_QUEUE_NAME, faceQueueConnection } from '../lib/faceQueue.js'
+import { searchGallery, destroyGallery } from '../lib/faceGallery.js'
 
 const FACE_SERVICE_URL = process.env.FACE_SERVICE_URL ?? 'http://localhost:8001'
+
+// Three bands, both env-tunable. The bias is deliberately conservative: a missed
+// match costs the agent one click, a wrong auto-tag puts someone's face into a
+// stranger's consent bucket.
+const MATCH_THRESHOLD = Number(process.env.FACE_MATCH_THRESHOLD ?? 0.38)
+const AUTO_TAG_THRESHOLD = Number(process.env.FACE_AUTO_TAG_THRESHOLD ?? 0.55)
 
 // Cosine similarity on L2-normalised ArcFace embeddings. 0.40 is the usual
 // same-person threshold for buffalo_l; lower splits one person into several
@@ -134,19 +141,60 @@ async function processSession(sessionId, jobId) {
 
   const clusters = clusterFaces(detected)
 
+  let autoTaggedCount = 0
+  let suggestedCount = 0
+  let unidentifiedCount = 0
+
   for (const cluster of clusters) {
     const rep = cluster.members.reduce((a, b) => (a.detScore >= b.detScore ? a : b))
+
+    // One gallery probe per person-group, not per face: the running centroid is a
+    // cleaner signal than any single frame, and it keeps the decision 1:1 with the
+    // card the agent will see.
+    let match = null
+    try {
+      const [top] = await searchGallery(sessionId, cluster.centroid, 1)
+      if (top && top.score >= MATCH_THRESHOLD) match = top
+    } catch (err) {
+      logger.warn({ err, sessionId }, 'gallery search failed — cluster left for manual tagging')
+    }
+
+    const subjectId = match?.payload?.masterUserId ?? null
+    const autoTagged = Boolean(match && match.score >= AUTO_TAG_THRESHOLD)
+
+    if (autoTagged) autoTaggedCount += 1
+    else if (subjectId) suggestedCount += 1
+    else unidentifiedCount += 1
+
     const created = await prisma.faceCluster.create({
-      data: { sessionId, repFaceId: rep.id, faceCount: cluster.members.length },
+      data: {
+        sessionId,
+        repFaceId: rep.id,
+        faceCount: cluster.members.length,
+        matchScore: match?.score ?? null,
+        autoTagged,
+        tagStatus: autoTagged ? 'TAGGED' : 'PENDING',
+        taggedSubjectId: autoTagged ? subjectId : null,
+        // Set in BOTH bands — an auto-tag the agent later overrides should still
+        // show what the model originally suggested.
+        suggestedSubjectId: subjectId,
+      },
     })
+
     await prisma.faceDetection.updateMany({
       where: { id: { in: cluster.members.map((m) => m.id) } },
-      data: { clusterId: created.id },
+      data: {
+        clusterId: created.id,
+        ...(autoTagged && { tagStatus: 'TAGGED', taggedSubjectId: subjectId }),
+      },
     })
   }
 
-  // Embeddings existed only in this function's memory and die with it — they are
-  // never written to Postgres or Qdrant, per the session-scoped-only decision.
+  // Embeddings existed only in this function's memory and die with it. They are
+  // searched against the ephemeral per-session Qdrant collection above, but no
+  // vector from a session photo is ever written anywhere — only the roster's
+  // re-derived enrollment vectors live in that collection, and it is destroyed
+  // at finalize.
   detected.length = 0
 
   await prisma.$transaction([
@@ -161,10 +209,22 @@ async function processSession(sessionId, jobId) {
     entityType: 'Session',
     entityId: sessionId,
     action: 'RECOGNITION_COMPLETED',
-    payload: { photos: photos.length, clusters: clusters.length },
+    payload: {
+      photos: photos.length,
+      clusters: clusters.length,
+      autoTagged: autoTaggedCount,
+      suggested: suggestedCount,
+      unidentified: unidentifiedCount,
+    },
   })
 
-  return { photos: photos.length, clusters: clusters.length }
+  return {
+    photos: photos.length,
+    clusters: clusters.length,
+    autoTagged: autoTaggedCount,
+    suggested: suggestedCount,
+    unidentified: unidentifiedCount,
+  }
 }
 
 export const recognitionWorker = new Worker(
@@ -192,6 +252,9 @@ recognitionWorker.on('failed', async (job, err) => {
       where: { id: job.data.sessionId },
       data: { status: 'FAILED' },
     })
+    // A FAILED session is never finalized, so nothing else would ever drop its
+    // gallery — tear it down here or the vectors outlive the job that needed them.
+    await destroyGallery(job.data.sessionId)
   }
 })
 

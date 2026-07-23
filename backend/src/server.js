@@ -13,6 +13,13 @@ import { authAdminRoutes } from './modules/auth-admin/auth-admin.routes.js'
 import { projectRoutes } from './modules/projects/project.routes.js'
 import { sessionRoutes } from './modules/sessions/session.routes.js'
 import { consentRoutes } from './modules/consent/consent.routes.js'
+import {
+  agentEnrollmentRoutes,
+  selfEnrollmentRoutes,
+} from './modules/enrollment/enrollment.routes.js'
+import { handoffRoutes } from './modules/handoff/handoff.routes.js'
+import { meRoutes } from './modules/me/me.routes.js'
+import { joinRoutes, sessionInviteRoutes } from './modules/join/join.routes.js'
 
 // Boot guard: refuse to start in production without real auth wired in.
 // requireAuth.js is a dev-stub only — this stops it from silently shipping.
@@ -54,8 +61,20 @@ app.get('/health/deep', async (_req, res) => {
   res.status(allHealthy ? 200 : 503).json(result)
 })
 
+// Mounted BEFORE subjectRoutes: that router applies requireAuth (a dev stub) and
+// owns a bare /:id, which would otherwise swallow these paths.
+app.use('/api/v1/subjects', agentEnrollmentRoutes)
+app.use('/api/v1/me', meRoutes)
+app.use('/api/v1/me', selfEnrollmentRoutes)
+app.use('/api/v1/handoffs', handoffRoutes)
 app.use('/api/v1/subjects', subjectRoutes)
 app.use('/api/v1/projects', projectRoutes)
+// Public — no auth middleware anywhere above it on this path, and mounted before
+// sessionRoutes' router-level requireAdminAuth can see anything.
+app.use('/api/v1/join', joinRoutes)
+// Per-route guards, mounted ahead of sessionRoutes so /:sessionId/invite is
+// matched here rather than falling through to a session handler.
+app.use('/api/v1/sessions', sessionInviteRoutes)
 app.use('/api/v1/sessions', sessionRoutes)
 app.use('/api/v1/consent', consentRoutes)
 app.use('/auth/subject', authSubjectRoutes)

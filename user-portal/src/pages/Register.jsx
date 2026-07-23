@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
-import { ArrowLeft, UserPlus, Mail, Phone, Users } from 'lucide-react'
+import { ArrowLeft, UserPlus, Mail, Phone, ScanFace, Users } from 'lucide-react'
 import IconChip from '../components/IconChip'
 import { registerSubject } from '../lib/api'
 
@@ -34,17 +34,20 @@ export default function Register() {
     setError(null)
 
     try {
-      await registerSubject({
+      const res = await registerSubject({
         group,
         fullName: fullName.trim(),
         email: email.trim(),
         phone: phone.trim() || undefined,
         registrationChannel: 'SELF',
       })
-      navigate('/verify', { state: { email: email.trim() } })
+      navigate('/verify', { state: { email: email.trim(), devOtp: res?.devOtp } })
     } catch (err) {
-      if (err.status === 409 && email.trim()) {
-        navigate('/verify', { state: { email: email.trim() } })
+      if (err.status === 409) {
+        // The email is already taken. Do NOT silently sign them into the existing
+        // account — that hides the collision and looks like a second account was
+        // created. Send them to sign in, which handles unverified accounts too.
+        setError('duplicate')
         return
       }
       setError(err.message ?? 'Registration failed. Please try again.')
@@ -133,7 +136,28 @@ export default function Register() {
           </div>
         </div>
 
-        {error && <p className="text-sm font-semibold text-danger">{error}</p>}
+        {/* The photo step is /enroll, straight after OTP verification — it needs a
+            signed-in session and an ACTIVE account before the server will accept it. */}
+        <div className="flex items-start gap-2.5 rounded-2xl bg-canvas px-4 py-3">
+          <ScanFace size={18} strokeWidth={1.75} className="mt-0.5 shrink-0 text-ink-faint" />
+          <p className="text-xs font-medium text-ink-muted">
+            Right after you verify your email we&apos;ll ask for five quick photos of your face, so
+            pictures of you are found automatically. You can skip it — an agent will then tag you by
+            hand instead.
+          </p>
+        </div>
+
+        {error === 'duplicate' ? (
+          <p className="text-sm font-semibold text-danger">
+            An account with this email already exists.{' '}
+            <Link to="/login" className="underline">
+              Sign in instead
+            </Link>
+            .
+          </p>
+        ) : (
+          error && <p className="text-sm font-semibold text-danger">{error}</p>
+        )}
 
         <button
           type="submit"

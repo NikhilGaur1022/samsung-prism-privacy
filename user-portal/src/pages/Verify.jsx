@@ -16,6 +16,9 @@ export default function Verify() {
   const [error, setError] = useState(null)
   const [resendCooldown, setResendCooldown] = useState(0)
   const [resending, setResending] = useState(false)
+  // Dev only — the API omits `devOtp` entirely when NODE_ENV=production, so this
+  // banner disappears on its own rather than needing a separate frontend flag.
+  const [devOtp, setDevOtp] = useState(location.state?.devOtp)
   const inputs = useRef([])
   const cooldownTimer = useRef(null)
 
@@ -62,7 +65,10 @@ export default function Verify() {
 
     try {
       await verifyLoginOtp(email, digits.join(''))
-      navigate('/dashboard')
+      // Verification is the moment the account becomes ACTIVE, which is the only
+      // point enrollment is possible at all. /enroll decides for itself whether
+      // there is anything left to do and is skippable either way.
+      navigate('/enroll')
     } catch (err) {
       setError(err.message ?? 'Verification failed. Please try again.')
     } finally {
@@ -77,7 +83,8 @@ export default function Verify() {
     setError(null)
 
     try {
-      await requestLoginOtp(email)
+      const res = await requestLoginOtp(email)
+      setDevOtp(res?.devOtp)
       startCooldown()
     } catch (err) {
       setError(err.message ?? 'Could not resend code. Please try again.')
@@ -102,6 +109,26 @@ export default function Verify() {
           Enter the 6-digit code sent to {email ?? 'your email'}.
         </p>
       </div>
+
+      {devOtp && (
+        <div className="mt-5 rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3">
+          <p className="text-xs font-bold uppercase tracking-wide text-amber-700">
+            Dev mode — email delivery bypassed
+          </p>
+          <div className="mt-1.5 flex items-center justify-between gap-3">
+            <span className="font-mono text-2xl font-extrabold tracking-[0.3em] text-amber-900">
+              {devOtp}
+            </span>
+            <button
+              type="button"
+              onClick={() => setDigits(String(devOtp).split('').slice(0, LENGTH))}
+              className="shrink-0 rounded-full bg-amber-600 px-3 py-1.5 text-xs font-bold text-white"
+            >
+              Autofill
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="mt-8 flex justify-between gap-2">
         {digits.map((d, i) => (

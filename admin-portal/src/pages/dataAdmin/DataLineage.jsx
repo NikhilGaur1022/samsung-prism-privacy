@@ -1,6 +1,10 @@
+import { useEffect, useState } from 'react'
 import Sidebar from '../../components/Sidebar'
 import PageHeader from '../../components/PageHeader'
-import { ArrowRight } from 'lucide-react'
+import StatusPill from '../../components/StatusPill'
+import EmptyState from '../../components/EmptyState'
+import { ArrowRight, Loader2, Share2 } from 'lucide-react'
+import { getLineage } from '../../lib/api'
 import { LINEAGE_NODES, LINEAGE_EDGES } from '../../data/dataAdmin'
 
 const KIND_TONE = {
@@ -33,6 +37,65 @@ function buildLayers(nodes, edges) {
     layers[d].push(n)
   })
   return layers
+}
+
+// One row per photo_subjects entry: photo → subject → consent → project. That
+// chain is exactly what a DSAR erasure walks, so rendering it is the evidence.
+function LineageRows() {
+  const [data, setData] = useState(null)
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    getLineage().then(setData).catch(setError)
+  }, [])
+
+  if (error) return <p className="mt-4 text-sm font-semibold text-danger">{error.message}</p>
+  if (!data) return <Loader2 size={18} className="mt-4 animate-spin text-ink-faint" />
+
+  if (data.items.length === 0) {
+    return (
+      <div className="mt-4 rounded-card bg-surface p-6 shadow-card">
+        <EmptyState
+          icon={Share2}
+          title="No photo lineage yet"
+          message="Links appear once a collection session is finalized."
+        />
+      </div>
+    )
+  }
+
+  return (
+    <div className="mt-4 overflow-x-auto rounded-card bg-surface p-4 shadow-card">
+      <table className="min-w-full text-left text-xs">
+        <thead className="text-ink-faint">
+          <tr>
+            <th className="py-2 pr-4 font-bold uppercase tracking-wide">Photo</th>
+            <th className="py-2 pr-4 font-bold uppercase tracking-wide">Session</th>
+            <th className="py-2 pr-4 font-bold uppercase tracking-wide">Subject</th>
+            <th className="py-2 pr-4 font-bold uppercase tracking-wide">Consent</th>
+            <th className="py-2 pr-4 font-bold uppercase tracking-wide">Project</th>
+            <th className="py-2 font-bold uppercase tracking-wide">Status</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-border">
+          {data.items.map((row) => (
+            <tr key={row.id}>
+              <td className="py-2 pr-4 font-mono text-ink-muted">{row.sha256.slice(0, 12)}</td>
+              <td className="py-2 pr-4 text-ink-muted">{row.sessionCode}</td>
+              <td className="py-2 pr-4 font-semibold text-ink">{row.subjectName}</td>
+              <td className="py-2 pr-4 font-mono text-ink-muted">{row.consentId.slice(0, 8)}</td>
+              <td className="py-2 pr-4 text-ink-muted">{row.projectName}</td>
+              <td className="py-2">
+                <StatusPill tone={row.consentStatus === 'ACTIVE' ? 'success' : 'danger'}>
+                  {row.consentStatus}
+                </StatusPill>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
 }
 
 export default function DataLineage() {
@@ -69,6 +132,13 @@ export default function DataLineage() {
             ))}
           </div>
         </div>
+
+        <h2 className="mt-8 text-base font-bold text-ink">Photo → subject → consent</h2>
+        <p className="text-xs font-medium text-ink-faint">
+          Every link written at session finalize. Erasing a consent erases these rows and the
+          photos they point at.
+        </p>
+        <LineageRows />
       </main>
     </div>
   )

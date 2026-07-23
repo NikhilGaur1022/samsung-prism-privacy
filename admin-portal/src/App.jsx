@@ -31,6 +31,8 @@ import ConsentCheck from './pages/collectionAgent/ConsentCheck'
 import Sessions from './pages/collectionAgent/Sessions'
 import SessionDetail from './pages/collectionAgent/SessionDetail'
 import Tagging from './pages/collectionAgent/Tagging'
+import ReviewPhotos from './pages/collectionAgent/ReviewPhotos'
+import People from './pages/collectionAgent/People'
 
 const PAGE_COMPONENTS = {
   '/project-approvals': ProjectApprovals,
@@ -79,6 +81,22 @@ export default function App() {
             element={
               <RequireRole allow={['collectionAgent']}>
                 <Tagging />
+              </RequireRole>
+            }
+          />
+          <Route
+            path="/sessions/:sessionId/people"
+            element={
+              <RequireRole allow={['collectionAgent']}>
+                <People />
+              </RequireRole>
+            }
+          />
+          <Route
+            path="/sessions/:sessionId/review"
+            element={
+              <RequireRole allow={['collectionAgent']}>
+                <ReviewPhotos />
               </RequireRole>
             }
           />

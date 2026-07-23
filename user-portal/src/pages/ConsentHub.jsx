@@ -1,29 +1,73 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { ShieldCheck, ShieldOff, ShieldAlert, Building2, Globe2 } from 'lucide-react'
+import { ShieldCheck, ShieldOff, ScanFace } from 'lucide-react'
 import TopBar from '../components/TopBar'
 import Card from '../components/Card'
 import Badge from '../components/Badge'
 import IconChip from '../components/IconChip'
+import { ConsentGate, PoseStepper, useEnrollment } from '../components/FaceEnrollment'
 
-const REQUESTS = [
-  {
-    id: 'AZ-99120',
-    name: 'Amazon Inc.',
-    purpose: 'Personalization Data',
-    status: 'DONE',
-    tone: 'neutral',
-    icon: Building2,
-  },
-  {
-    id: 'MT-12884',
-    name: 'Meta Platforms',
-    purpose: 'Social Graph Portability',
-    status: 'APPLIED',
-    tone: 'brand',
-    icon: Globe2,
-  },
-]
+// Collapsed-behind-"Add photo" was the actual reason nobody ever enrolled: the
+// card looked finished when it was empty. It now opens itself until the set is
+// complete, and only collapses once there is genuinely nothing left to do.
+function FaceEnrollmentCard() {
+  const enrollment = useEnrollment()
+  const { status } = enrollment
+  const [expanded, setExpanded] = useState(null)
+
+  const complete = status?.complete === true
+  const open = expanded ?? !complete
+
+  const summary = !status
+    ? 'Loading…'
+    : !status.verified
+      ? 'Verify your email to set this up.'
+      : !status.biometricConsent
+        ? 'Not set up. Photos of you have to be tagged by hand until it is.'
+        : complete
+          ? `${status.count} photo${status.count === 1 ? '' : 's'} on file, covering ${status.poses.length} angles.`
+          : `${status.poses.length} of 5 angles captured — a few more makes matching far more reliable.`
+
+  return (
+    <Card className="mt-5">
+      <div className="flex items-start gap-3">
+        <IconChip icon={ScanFace} tone="brand" size="sm" />
+        <div className="flex-1">
+          <p className="text-sm font-semibold text-ink">Face matching</p>
+          <p className="mt-0.5 text-xs font-medium text-ink-muted">{summary}</p>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          {complete && <Badge tone="success">SET UP</Badge>}
+          <button
+            onClick={() => setExpanded(!open)}
+            className="rounded-pill bg-brand-soft px-3 py-1.5 text-xs font-semibold text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+          >
+            {open ? 'Hide' : 'Manage'}
+          </button>
+        </div>
+      </div>
+
+      {open && status?.verified && (
+        <div className="mt-4">
+          {status.biometricConsent ? (
+            <>
+              <PoseStepper enrollment={enrollment} />
+              <button
+                onClick={() => enrollment.consent(false)}
+                disabled={enrollment.busy}
+                className="mt-4 text-xs font-semibold text-danger disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger"
+              >
+                Turn off face matching and delete my photos
+              </button>
+            </>
+          ) : (
+            <ConsentGate enrollment={enrollment} />
+          )}
+        </div>
+      )}
+    </Card>
+  )
+}
 
 export default function ConsentHub() {
   const [revoked, setRevoked] = useState(false)
@@ -36,12 +80,13 @@ export default function ConsentHub() {
         <h1 className="text-2xl font-extrabold tracking-tight text-ink">Consent</h1>
         <p className="mt-1 text-sm font-medium text-ink-muted">Manage your data and privacy preferences.</p>
 
+        <FaceEnrollmentCard />
+
         <div className="mt-5 grid gap-3 md:grid-cols-2">
           <Card className="flex items-center gap-3">
             <IconChip icon={ShieldCheck} tone="solid" size="sm" />
             <div>
               <p className="text-sm font-semibold text-ink">Secure &amp; Active</p>
-              <p className="text-xs font-medium text-ink-muted">Last checked: 2 mins ago</p>
             </div>
           </Card>
 
@@ -68,47 +113,10 @@ export default function ConsentHub() {
           </Card>
         </div>
 
-        <div className="mt-6 flex items-center justify-between">
-          <h2 className="text-base font-bold text-ink">Recent Requests</h2>
-          <button className="rounded text-sm font-semibold text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
-            View All
-          </button>
-        </div>
-
-        <div className="mt-3 space-y-3 md:grid md:grid-cols-2 md:gap-3 md:space-y-0">
-          {REQUESTS.map(({ id, name, purpose, status, tone, icon: Icon }) => (
-            <Card key={id}>
-              <div className="flex items-start gap-3">
-                <IconChip icon={Icon} tone="neutral" />
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="truncate text-sm font-semibold text-ink">{name}</p>
-                    <Badge tone={tone}>{status}</Badge>
-                  </div>
-                  <p className="text-xs font-medium text-ink-muted">{purpose}</p>
-                  <div className="mt-1 flex items-center justify-between">
-                    <p className="text-[11px] font-medium text-ink-faint">Request ID: #{id}</p>
-                    <button className="rounded text-xs font-semibold text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
-                      View Report
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </Card>
-          ))}
-        </div>
-
-        <div className="mt-6 grid grid-cols-2 gap-3">
-          <Card className="flex flex-col justify-center">
-            <div className="flex items-center gap-1.5 text-ink-muted">
-              <ShieldAlert size={16} strokeWidth={1.75} />
-              <span className="text-xs font-semibold">Privacy Score</span>
-            </div>
-            <p className="mt-1 text-2xl font-extrabold text-brand">88</p>
-          </Card>
+        <div className="mt-6 grid grid-cols-1">
           <Link
             to="/rights"
-            className="flex items-center justify-center rounded-card bg-brand text-sm font-bold text-white shadow-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-dark"
+            className="flex items-center justify-center rounded-card bg-brand py-3 text-sm font-bold text-white shadow-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-dark"
           >
             Data Request
           </Link>

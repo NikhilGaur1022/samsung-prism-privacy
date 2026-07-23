@@ -2,6 +2,7 @@ import { prisma } from '../../config/prisma.js'
 import { ApiError } from '../../middleware/errorHandler.js'
 import { writeAuditLog } from '../../lib/auditLog.js'
 import { signConsent } from '../../lib/consent.js'
+import { deleteAllEnrollments } from '../enrollment/enrollment.service.js'
 
 // Subject-facing. The subject grants consent to a whole project from the
 // user-portal; the collection agent only ever reads the result of this.
@@ -94,10 +95,22 @@ export async function revokeConsent(subjectId, projectId) {
     throw new ApiError(404, 'No active consent for this project')
   }
 
-  const updated = await prisma.$transaction(async (tx) => {
+  const { updated: revoked, dropped } = await prisma.$transaction(async (tx) => {
     const revoked = await tx.projectConsent.update({
       where: { consentId: consent.consentId },
       data: { status: 'REVOKED', revokedAt: new Date() },
+    })
+
+    // Read the rows before deleting them so the drop is auditable — otherwise a
+    // participant silently disappears from a live session roster with no record of
+    // why (this is the trail that was missing when a re-joined subject vanished
+    // from a session between add and end).
+    const rosterRows = await tx.sessionParticipant.findMany({
+      where: {
+        consentId: consent.consentId,
+        session: { status: { in: ['ACTIVE', 'PROCESSING', 'TAGGING'] } },
+      },
+      select: { sessionId: true },
     })
 
     // Pull them out of any session roster that hasn't been archived yet. Faces
@@ -109,7 +122,7 @@ export async function revokeConsent(subjectId, projectId) {
       },
     })
 
-    return revoked
+    return { updated: revoked, dropped: rosterRows.map((r) => r.sessionId) }
   })
 
   await writeAuditLog({
@@ -117,8 +130,18 @@ export async function revokeConsent(subjectId, projectId) {
     entityId: consent.consentId,
     action: 'CONSENT_REVOKED',
     actorId: subjectId,
-    payload: { projectId },
+    payload: { projectId, droppedFromSessions: dropped },
   })
 
-  return updated
+  // The enrollment selfie is biometric data held on the basis of consent. If any
+  // other project still has active consent it stays — it is lawfully held for that
+  // one. Only when nothing is left does it lose its basis and get purged.
+  const remaining = await prisma.projectConsent.count({
+    where: { subjectId, status: 'ACTIVE' },
+  })
+  if (remaining === 0) {
+    await deleteAllEnrollments(subjectId, subjectId, 'ALL_CONSENT_REVOKED')
+  }
+
+  return revoked
 }

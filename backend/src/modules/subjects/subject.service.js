@@ -1,8 +1,9 @@
 import { prisma } from '../../config/prisma.js'
 import { writeAuditLog } from '../../lib/auditLog.js'
 import { ApiError } from '../../middleware/errorHandler.js'
-import { assertResendCooldown, createOtp } from '../../lib/otp.js'
+import { assertResendCooldown, createOtp, devOtp } from '../../lib/otp.js'
 import { sendOtpEmail } from '../../lib/resend.js'
+import { deleteAllEnrollments } from '../enrollment/enrollment.service.js'
 
 // employeeRef is the primary dedupe key for the 4 employee groups (deterministic,
 // doesn't rot like shared/reassigned corporate email aliases). Email (citext,
@@ -41,7 +42,7 @@ export async function registerSubject(input, actorId) {
   const { code } = await createOtp(subject.email, 'SUBJECT_LOGIN')
   await sendOtpEmail(subject.email, code)
 
-  return subject
+  return { ...subject, devOtp: devOtp(code) }
 }
 
 export async function getSubject(masterUserId) {
@@ -98,6 +99,12 @@ export async function updateStatus(masterUserId, status, actorId) {
     actorId,
     payload: { status },
   })
+
+  // A subject who is no longer active has no live basis for us to hold their
+  // biometric enrollment image — drop it with the status change, not later.
+  if (status === 'INACTIVE' || status === 'REJECTED') {
+    await deleteAllEnrollments(masterUserId, actorId, 'SUBJECT_STATUS_CHANGE')
+  }
 
   return updated
 }

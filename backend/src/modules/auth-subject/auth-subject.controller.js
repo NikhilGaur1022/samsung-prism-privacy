@@ -10,8 +10,8 @@ import { ApiError } from '../../middleware/errorHandler.js'
 export async function requestLogin(req, res, next) {
   try {
     const { email } = requestLoginSchema.parse(req.body)
-    await authSubjectService.requestLogin(email)
-    res.json({ message: 'Verification code sent' })
+    const { devOtp } = await authSubjectService.requestLogin(email)
+    res.json({ message: 'Verification code sent', ...(devOtp && { devOtp }) })
   } catch (err) {
     next(err)
   }
