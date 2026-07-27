@@ -11,6 +11,12 @@ import ProjectDetails from './pages/ProjectDetails'
 import DataRights from './pages/DataRights'
 import Projects from './pages/Projects'
 import Profile from './pages/Profile'
+import MyData from './pages/MyData'
+import MyConsents from './pages/MyConsents'
+import RaiseRequest from './pages/RaiseRequest'
+import RequestStatus from './pages/RequestStatus'
+import SecureInbox from './pages/SecureInbox'
+import Certificate from './pages/Certificate'
 
 export default function App() {
   return (
@@ -31,6 +37,13 @@ export default function App() {
           <Route path="/consent/:projectId" element={<ProjectDetails />} />
           <Route path="/rights" element={<DataRights />} />
           <Route path="/profile" element={<Profile />} />
+          <Route path="/my-data" element={<MyData />} />
+          <Route path="/consents" element={<MyConsents />} />
+          <Route path="/requests/new" element={<RaiseRequest />} />
+          <Route path="/requests" element={<RequestStatus />} />
+          <Route path="/requests/:requestId" element={<RequestStatus />} />
+          <Route path="/requests/:requestId/certificate" element={<Certificate />} />
+          <Route path="/inbox" element={<SecureInbox />} />
         </Route>
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Routes>

@@ -127,3 +127,84 @@ export function getJoinInvite(token) {
 export function acceptJoinInvite(token) {
   return request(`/api/v1/join/${token}/accept`, { method: 'POST' })
 }
+
+// --- Consent notices (DPDP §5) ------------------------------------------------
+// Rendered server-side and returned verbatim — never assembled or summarised
+// on the client, or the text a principal signs stops matching what is stored.
+
+export function renderConsentNotice(templateId, locale) {
+  return request(`/api/v1/consent-templates/${templateId}/render?locale=${encodeURIComponent(locale)}`)
+}
+
+// --- Data principal rights (DPDP §11-§13) -------------------------------------
+// The subject id never appears in any of these calls — the server reads it from
+// the session cookie, so every response here is already scoped to "me".
+
+export function raiseDsarRequest(payload) {
+  return request('/api/v1/me/dsar', { method: 'POST', body: JSON.stringify(payload) })
+}
+
+export function listMyDsarRequests() {
+  return request('/api/v1/me/dsar')
+}
+
+export function getMyDsarRequest(id) {
+  return request(`/api/v1/me/dsar/${id}`)
+}
+
+export function getMyDsarCertificate(id) {
+  return request(`/api/v1/me/dsar/${id}/certificate`)
+}
+
+// Binary and single-use, so it bypasses request(): a 410 body still needs to be
+// read as JSON for its message, but a 200 body is a zip, never JSON.
+export async function downloadMyDsarPackage(id, token) {
+  const res = await fetch(
+    `${BASE_URL}/api/v1/me/dsar/${id}/package?token=${encodeURIComponent(token)}`,
+    { credentials: 'include' },
+  )
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => null)
+    const error = new Error(body?.error ?? `Download failed with status ${res.status}`)
+    error.status = res.status
+    throw error
+  }
+
+  const disposition = res.headers.get('Content-Disposition') ?? ''
+  const filename = /filename="?([^";]+)"?/.exec(disposition)?.[1] ?? 'dsar-package.zip'
+  return { blob: await res.blob(), filename }
+}
+
+// Single-use, short-lived token that unlocks the download above. Never store
+// or log the token this resolves to — the caller must use it once and drop it.
+export function createDsarPackageToken(id) {
+  return request(`/api/v1/me/dsar/${id}/package-token`, { method: 'POST' })
+}
+
+// --- Photos (DPDP §11) --------------------------------------------------------
+// The subject's own record of photos they appear in, grouped by project. The
+// server derives "appears in" from confirmed face-tag links against the
+// session cookie's subject id, never from anything sent here.
+
+export function getMyPhotos() {
+  return request('/api/v1/me/photos')
+}
+
+// Binary, so it bypasses request(): everyone but the requesting principal is
+// blurred server-side. A 409 means the redaction has not been confirmed yet —
+// callers should check `viewable` on the photo entry before ever calling this.
+export async function getMyRedactedPhoto(photoId) {
+  const res = await fetch(`${BASE_URL}/api/v1/me/photos/${photoId}/redacted`, {
+    credentials: 'include',
+  })
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => null)
+    const error = new Error(body?.error ?? `Photo fetch failed with status ${res.status}`)
+    error.status = res.status
+    throw error
+  }
+
+  return res.blob()
+}

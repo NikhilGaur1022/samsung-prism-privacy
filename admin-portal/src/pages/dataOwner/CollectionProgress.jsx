@@ -1,11 +1,10 @@
 import Sidebar from '../../components/Sidebar'
 import PageHeader from '../../components/PageHeader'
 import { useMockQuery } from '../../lib/useMockQuery'
-import { fetchMock } from '../../lib/mockApi'
-import { COLLECTION_PROGRESS } from '../../data/dataOwner'
+import { getDashboardSummary } from '../../lib/api'
 
 export default function CollectionProgress() {
-  const { data, loading } = useMockQuery(() => fetchMock(COLLECTION_PROGRESS), [])
+  const { data, loading, error } = useMockQuery(() => getDashboardSummary(), [])
 
   return (
     <div className="flex min-h-svh bg-canvas">
@@ -14,8 +13,14 @@ export default function CollectionProgress() {
       <main className="flex-1 px-10 py-8">
         <PageHeader
           title="Collection Progress"
-          subtitle="Live progress toward each project's collection target."
+          subtitle="Sessions and consented links recorded so far for each of your projects."
         />
+
+        {error && (
+          <div className="mt-5 rounded-lg bg-danger-soft px-3 py-2.5 text-sm font-semibold text-danger">
+            {error.message}
+          </div>
+        )}
 
         <div className="mt-6 rounded-card bg-surface p-6 shadow-card">
           {loading || !data ? (
@@ -27,27 +32,22 @@ export default function CollectionProgress() {
                 </div>
               ))}
             </div>
+          ) : (data.projects ?? []).length === 0 ? (
+            <p className="text-sm font-medium text-ink-faint">No projects yet.</p>
           ) : (
             <div className="space-y-5">
-              {data.map((p) => {
-                const pct = Math.round((p.collected / p.target) * 100)
-                return (
-                  <div key={p.id}>
-                    <div className="flex items-center justify-between text-sm">
-                      <span className="font-medium text-ink">{p.project}</span>
-                      <span className="font-semibold text-ink-muted">
-                        {p.collected.toLocaleString()} / {p.target.toLocaleString()} ({pct}%)
-                      </span>
-                    </div>
-                    <div className="mt-1.5 h-2 rounded-pill bg-canvas">
-                      <div
-                        className={`h-2 rounded-pill ${pct >= 100 ? 'bg-success' : 'bg-brand'}`}
-                        style={{ width: `${Math.min(pct, 100)}%` }}
-                      />
-                    </div>
+              {data.projects.map((p) => (
+                <div key={p.id}>
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="font-medium text-ink">{p.name}</span>
+                    <span className="font-semibold text-ink-muted">
+                      {p.sessionCount} session{p.sessionCount === 1 ? '' : 's'} · {p.consentCount} consent
+                      {p.consentCount === 1 ? '' : 's'} · {p.agentCount} agent{p.agentCount === 1 ? '' : 's'}
+                    </span>
                   </div>
-                )
-              })}
+                  <p className="mt-1 text-xs font-medium text-ink-faint">{p.status}</p>
+                </div>
+              ))}
             </div>
           )}
         </div>

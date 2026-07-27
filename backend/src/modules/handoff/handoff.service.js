@@ -82,6 +82,23 @@ export async function ingestHandoff(handoffId, admin) {
     throw new ApiError(409, `Handoff is already ${handoff.status}`)
   }
 
+  // Fail closed (invariant 8). A batch containing a photo whose PII masking was
+  // never confirmed must not reach the golden store — once ingested it is copied,
+  // indexed and exported, and an unmasked Aadhaar in the vault is a §8(5) breach
+  // that no later fix can undo. The redaction retry worker clears these.
+  const unmasked = await prisma.photo.count({
+    where: {
+      sessionId: handoff.sessionId,
+      OR: [{ piiStatus: 'DEFERRED' }, { piiStatus: 'FAILED' }, { redactedPath: null }],
+    },
+  })
+  if (unmasked > 0) {
+    throw new ApiError(
+      409,
+      `REDACTION_INCOMPLETE — ${unmasked} photo(s) in this batch have no confirmed mask. Ingest is blocked until the redaction queue clears them.`,
+    )
+  }
+
   const updated = await prisma.sessionHandoff.update({
     where: { id: handoffId },
     data: { status: 'INGESTED', ingestedAt: new Date() },

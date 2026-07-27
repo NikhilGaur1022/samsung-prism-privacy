@@ -9,10 +9,27 @@ export const faceQueueConnection = {
   maxRetriesPerRequest: null,
 }
 
-export const faceQueue = new Queue(FACE_QUEUE_NAME, { connection: faceQueueConnection })
+// Built on first use, not at import. `new Queue()` dials Redis immediately and,
+// with maxRetriesPerRequest: null, reconnects forever — so constructing it at
+// module scope meant that merely importing a route module pinned an open handle
+// for the life of the process. Invisible in a long-running server; fatal in a
+// test runner, where the file can then never exit.
+let queue = null
+
+export function getFaceQueue() {
+  if (!queue) queue = new Queue(FACE_QUEUE_NAME, { connection: faceQueueConnection })
+  return queue
+}
+
+export async function closeFaceQueue() {
+  if (!queue) return
+  const q = queue
+  queue = null
+  await q.close()
+}
 
 export async function enqueueRecognition(sessionId, jobId) {
-  return faceQueue.add(
+  return getFaceQueue().add(
     'recognize-session',
     { sessionId, jobId },
     {

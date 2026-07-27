@@ -50,7 +50,12 @@ export const joinRoutes = Router()
 // exactly what a scanner would grind against.
 joinRoutes.get('/:token', joinLookupIpLimiter, async (req, res, next) => {
   try {
-    res.json(await joinService.describeInvite(tokenSchema.parse(req.params.token)))
+    res.json(
+      await joinService.describeInvite(
+        tokenSchema.parse(req.params.token),
+        typeof req.query.locale === 'string' ? req.query.locale : undefined,
+      ),
+    )
   } catch (err) {
     next(err)
   }

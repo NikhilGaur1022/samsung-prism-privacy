@@ -1,0 +1,17 @@
+-- WAVE 2 — make the audit chain verifiable.
+--
+-- payloadHash is HMAC(secret, canonical(entityType, entityId, action, actorId,
+-- payload, prevHash)). Because the payload plaintext is deliberately never
+-- stored, that HMAC could not be recomputed, so `verifyChain` could only ever
+-- check that prevHash links matched — which detects insertion, deletion and
+-- reordering, but NOT an in-place edit of `action` or `actorId` on an existing
+-- row. That is precisely the edit an insider would make.
+--
+-- Storing a SHA-256 digest of the payload (a hash, not the payload — invariant 7
+-- is intact) supplies the one missing input, so the HMAC becomes recomputable
+-- from stored columns alone and any field edit is detectable.
+--
+-- Nullable on purpose: rows written before this migration have no digest and are
+-- reported by verifyChain as "linkage-only", never as verified. Backfilling is
+-- impossible by design, and claiming otherwise would be worse than the gap.
+ALTER TABLE "audit_log" ADD COLUMN "payload_digest" TEXT;

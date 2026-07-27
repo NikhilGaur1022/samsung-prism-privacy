@@ -1,12 +1,13 @@
 import Sidebar from '../../components/Sidebar'
 import PageHeader from '../../components/PageHeader'
 import StatCard from '../../components/StatCard'
+import ListPanel from '../../components/ListPanel'
+import StatusPill from '../../components/StatusPill'
 import { useMockQuery } from '../../lib/useMockQuery'
-import { fetchMock } from '../../lib/mockApi'
-import { SLA_METRICS } from '../../data/dpo'
+import { getDsarSla } from '../../lib/api'
 
 export default function SlaMonitoring() {
-  const { data, loading } = useMockQuery(() => fetchMock(SLA_METRICS), [])
+  const { data, loading, error } = useMockQuery(() => getDsarSla(), [])
 
   return (
     <div className="flex min-h-svh bg-canvas">
@@ -15,8 +16,14 @@ export default function SlaMonitoring() {
       <main className="flex-1 px-10 py-8">
         <PageHeader
           title="SLA Monitoring"
-          subtitle="Turnaround performance against DPDP-mandated response windows."
+          subtitle="Turnaround performance against the statutory and internal response windows."
         />
+
+        {error && (
+          <div className="mt-5 rounded-lg bg-danger-soft px-3 py-2.5 text-sm font-semibold text-danger">
+            {error.message}
+          </div>
+        )}
 
         {loading || !data ? (
           <div className="mt-6 grid grid-cols-3 gap-4">
@@ -27,29 +34,37 @@ export default function SlaMonitoring() {
         ) : (
           <>
             <div className="mt-6 grid grid-cols-3 gap-4">
-              <StatCard label="Overall SLA Compliance" value={`${data.compliance}%`} />
-              <StatCard label="Breached This Month" value={data.breachedThisMonth} />
-              <StatCard label="Avg. Resolution (days)" value={data.avgResolutionDays} />
+              <StatCard label={`Open requests (${data.statutoryDays}-day statutory clock)`} value={data.open} />
+              <StatCard label="SLA breached" value={data.breached} />
+              <StatCard label={`Past internal target (${data.internalTargetDays}d)`} value={data.internalBreached} />
             </div>
 
-            <div className="mt-6 rounded-card bg-surface p-6 shadow-card">
-              <h2 className="text-base font-bold text-ink">Compliance by Request Type</h2>
-              <div className="mt-4 space-y-4">
-                {data.byType.map((row) => (
-                  <div key={row.label}>
-                    <div className="flex items-center justify-between text-sm">
-                      <span className="font-medium text-ink">{row.label}</span>
-                      <span className="font-semibold text-ink-muted">{row.value}%</span>
+            <div className="mt-6">
+              <ListPanel
+                title="Open requests"
+                rows={data.requests}
+                emptyTitle="Nothing open"
+                emptyMessage="No open DSAR requests."
+                renderRow={(r) => (
+                  <div className="flex items-center justify-between gap-4 py-4 first:pt-0 last:pb-0">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-semibold text-ink">
+                        {r.subjectRef} — {r.type}
+                      </p>
+                      <p className="mt-0.5 truncate text-xs font-medium text-ink-faint">
+                        {r.status} · SLA due {new Date(r.slaDueAt).toLocaleDateString()}
+                      </p>
                     </div>
-                    <div className="mt-1.5 h-2 rounded-pill bg-canvas">
-                      <div
-                        className="h-2 rounded-pill bg-brand"
-                        style={{ width: `${row.value}%` }}
-                      />
-                    </div>
+                    <StatusPill tone={r.breached ? 'danger' : r.internalBreached ? 'warning' : 'success'}>
+                      {r.breached
+                        ? 'Breached'
+                        : r.internalBreached
+                          ? 'Past internal target'
+                          : `${r.daysRemaining}d left`}
+                    </StatusPill>
                   </div>
-                ))}
-              </div>
+                )}
+              />
             </div>
           </>
         )}

@@ -23,6 +23,11 @@ enum SubjectStatus {
   ACTIVE
   INACTIVE
   REJECTED
+  // Terminal. The row survives an erasure — it anchors the ProjectConsent proof
+  // that the collection was lawful, and the DSAR request itself — but every
+  // identifying column has been overwritten. Distinct from INACTIVE so that
+  // "erased" is never mistaken for "dormant, could be reactivated".
+  ERASED
 }
 
 enum RegistrationChannel {
@@ -46,6 +51,14 @@ model Subject {
 
   otpVerifiedAt DateTime?
 
+  // DPDP §9 (children) and §14 (nomination). dateOfBirth is what gates the
+  // guardian flow — a volunteer under 18 cannot self-consent, so intake must be
+  // able to tell. guardianContact/nomineeContact are free-form contact strings
+  // (email or phone) deliberately kept out of the auth identity columns.
+  dateOfBirth     DateTime? @map("date_of_birth") @db.Date
+  guardianContact String?   @map("guardian_contact")
+  nomineeContact  String?   @map("nominee_contact")
+
   refreshTokens RefreshToken[]
 
   projectConsents     ProjectConsent[]
@@ -53,6 +66,9 @@ model Subject {
   taggedFaces         FaceDetection[]
   suggestedClusters   FaceCluster[]
   photoLinks          PhotoSubject[]
+  dsarRequests        DsarRequest[]
+  purgeJobs           PurgeJob[]
+  subjectKey          SubjectKey?
 
   // Intake-time UX defaults ONLY. Once project_consent_matrix exists (backend-plan.md
   // Phase 2), THAT table is the sole authority for any gating/consent-check logic.
@@ -105,6 +121,10 @@ model SubjectFaceEnrollment {
   // AES-256-GCM(512 × float32 LE) laid out as nonce(12) || tag(16) || ciphertext
   embedding    Bytes?
   embeddingDim Int? // 512; null = legacy row, re-derived from the selfie on use
+  // Which key sealed `embedding` and the selfie at imagePath. null = legacy row
+  // sealed with the global FACE_EMBEDDING_KEY; non-null = per-subject DEK from
+  // lib/keyring.js, and destroying that DEK crypto-shreds this row's biometrics.
+  encKeyId   String?          @map("enc_key_id")
   capturedBy String?          @db.Uuid // AdminUser.id when source=AGENT
   createdAt  DateTime         @default(now())
   deletedAt  DateTime? // soft delete; file removed immediately
@@ -123,6 +143,12 @@ model AuditLog {
   action      String
   actorId     String?  @db.Uuid
   payloadHash String
+  // SHA-256 of the canonical payload. A hash, never the payload itself, so
+  // invariant 7 holds — but storing it is what makes payloadHash recomputable and
+  // therefore the chain actually verifiable. Without it, an attacker editing
+  // `action` or `actorId` in place leaves a chain that still links up cleanly.
+  // Null on rows written before this column existed; those verify by linkage only.
+  payloadDigest String? @map("payload_digest")
   prevHash    String?
   createdAt   DateTime @default(now())
 
@@ -233,10 +259,22 @@ model RefreshToken {
 // Collection sessions & face tagging (collection-agent workflow)
 // ---------------------------------------------------------------------------
 
+// A project is a purpose. It may not collect anything until a DPO has approved
+// that purpose, so the lifecycle is a real state machine, not a label:
+// DRAFT -> SUBMITTED -> APPROVED | REJECTED -> ACTIVE -> CLOSED.
 enum ProjectStatus {
   DRAFT
+  SUBMITTED
+  APPROVED
+  REJECTED
   ACTIVE
   CLOSED
+}
+
+enum RiskLevel {
+  LOW
+  MEDIUM
+  HIGH
 }
 
 model Project {
@@ -244,18 +282,73 @@ model Project {
   name          String
   purpose       String
   policyVersion String        @default("v1")
-  status        ProjectStatus @default(ACTIVE)
+  status        ProjectStatus @default(DRAFT)
   ownerAdminId  String?       @db.Uuid
   retention     String?
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
 
-  owner       AdminUser?          @relation(fields: [ownerAdminId], references: [id], onDelete: SetNull)
-  assignments ProjectAssignment[]
-  consents    ProjectConsent[]
-  sessions    Session[]
+  // Approval workflow. approvedByAdminId is a bare FK-less UUID on purpose: an
+  // approver is an audit fact, and deleting the admin row must never cascade
+  // into rewriting the approval history.
+  submittedAt        DateTime?  @map("submitted_at")
+  approvedAt         DateTime?  @map("approved_at")
+  approvedByAdminId  String?    @map("approved_by_admin_id") @db.Uuid
+  rejectionReason    String?    @map("rejection_reason")
+  consentTemplateId  String?    @map("consent_template_id") @db.Uuid
+  // Itemised data categories the project claims to need (DPDP §5 notice input),
+  // e.g. ["FACE_IMAGE","NAME","EMAIL"]. Purpose limitation is checked against it.
+  dataTypes          Json?      @map("data_types")
+  riskLevel          RiskLevel? @map("risk_level")
 
+  owner           AdminUser?          @relation(fields: [ownerAdminId], references: [id], onDelete: SetNull)
+  consentTemplate ConsentTemplate?    @relation(fields: [consentTemplateId], references: [id], onDelete: SetNull)
+  assignments     ProjectAssignment[]
+  consents        ProjectConsent[]
+  sessions        Session[]
+  dsarRequests    DsarRequest[]
+  retentionPolicies RetentionPolicy[]
+
+  @@index([status])
+  @@index([ownerAdminId])
   @@map("projects")
+}
+
+enum ConsentTemplateStatus {
+  DRAFT
+  PUBLISHED
+  SUPERSEDED
+}
+
+// The itemised notice text a Data Principal reads before signing (DPDP §5).
+// Published templates are immutable: a change publishes a new version that
+// supersedes the old one, because a consent given in the past was given against
+// the exact words shown at the time, and those words have to stay retrievable.
+model ConsentTemplate {
+  id           String                @id @default(uuid()) @db.Uuid
+  name         String
+  version      Int                   @default(1)
+  status       ConsentTemplateStatus @default(DRAFT)
+  purpose      String
+  // { "en": "...", "hi": "...", "kn": "..." } — DPDP §5(3) requires the notice be
+  // available in the Eighth Schedule languages, so locale is data, not a column.
+  bodyByLocale Json                  @map("body_by_locale")
+  dataTypes    Json?                 @map("data_types")
+  retention    String?
+  grievanceContact String?           @map("grievance_contact")
+  supersedesId String?               @map("supersedes_id") @db.Uuid
+  createdByAdminId String?           @map("created_by_admin_id") @db.Uuid
+  publishedAt  DateTime?             @map("published_at")
+  createdAt    DateTime              @default(now())
+  updatedAt    DateTime              @updatedAt
+
+  supersedes ConsentTemplate?  @relation("TemplateVersions", fields: [supersedesId], references: [id], onDelete: SetNull)
+  supersededBy ConsentTemplate[] @relation("TemplateVersions")
+  projects   Project[]
+
+  @@unique([name, version])
+  @@index([status])
+  @@map("consent_templates")
 }
 
 // Scopes a collection agent to the projects they may run sessions for. Every
@@ -394,6 +487,14 @@ model Photo {
   // is never overwritten — downstream decides which derivative it is entitled to.
   redactedPath String? @map("redacted_path")
 
+  // PII masking is fail-closed. DEFERRED means the image-pii-worker did not
+  // confirm a mask, so the derivative must not be served and the batch must not
+  // ingest — an unmasked Aadhaar leaving this system is a reportable breach.
+  piiStatus PiiStatus @default(PENDING) @map("pii_status")
+  // keyId of the DEK that sealed storagePath / redactedPath. null = plaintext
+  // legacy blob not yet swept by scripts/migrate-media-encrypt.js.
+  encKeyId  String?   @map("enc_key_id")
+
   session  Session         @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   faces    FaceDetection[]
   subjects PhotoSubject[]
@@ -401,6 +502,14 @@ model Photo {
   @@unique([sessionId, sha256])
   @@index([sessionId])
   @@map("photos")
+}
+
+enum PiiStatus {
+  PENDING
+  CLEAN
+  MASKED
+  DEFERRED
+  FAILED
 }
 
 enum FaceTagStatus {
@@ -525,4 +634,333 @@ model SessionHandoff {
 
   @@index([status])
   @@map("session_handoffs")
+}
+
+// ---------------------------------------------------------------------------
+// Data-principal rights: DSAR, purge, certificates, access logging (DPDP §11–§14)
+// ---------------------------------------------------------------------------
+
+enum DsarType {
+  ACCESS // §11 summary of data + processing
+  CORRECT // §12(1) correction / completion
+  ERASE // §12(3) erasure
+  WITHDRAWAL_ERASURE // §6(4) withdrawal, auto-raised by lib/revocation.js
+  GRIEVANCE // §13
+  NOMINATION // §14
+}
+
+enum DsarStatus {
+  RECEIVED
+  TRIAGE
+  DISCOVERY
+  EXECUTING
+  REVIEW
+  CLOSED
+  REJECTED
+}
+
+enum DsarChannel {
+  PORTAL
+  EMAIL
+  PHONE
+  INTERNAL
+}
+
+model DsarRequest {
+  id          String      @id @default(uuid()) @db.Uuid
+  subjectId   String      @map("subject_id") @db.Uuid
+  projectId   String?     @map("project_id") @db.Uuid
+  type        DsarType
+  status      DsarStatus  @default(RECEIVED)
+  channel     DsarChannel @default(PORTAL)
+  description String?
+
+  // Raised by the platform rather than the principal — a consent withdrawal walks
+  // the same audited executor as a hand-filed erasure request, never a side path.
+  autoRaised Boolean @default(false) @map("auto_raised")
+
+  assignedAdminId String? @map("assigned_admin_id") @db.Uuid
+  dpoAdminId      String? @map("dpo_admin_id") @db.Uuid
+
+  // 30 days is the statutory ceiling; internalDueAt (7d) is what the SLA board
+  // reports against so a breach of the real deadline is never the first warning.
+  slaDueAt      DateTime  @map("sla_due_at")
+  internalDueAt DateTime? @map("internal_due_at")
+
+  resolutionNote  String?   @map("resolution_note")
+  rejectionReason String?   @map("rejection_reason")
+  closedAt        DateTime? @map("closed_at")
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  subject     Subject              @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
+  project     Project?             @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  evidence    DsarEvidence[]
+  purgeJobs   PurgeJob[]
+  certificate DeletionCertificate?
+
+  @@index([status, slaDueAt])
+  @@index([subjectId, createdAt])
+  @@index([assignedAdminId, status])
+  @@map("dsar_requests")
+}
+
+enum EvidenceKind {
+  DISCOVERY_RESULT
+  IDENTITY_PROOF
+  EXPORT_PACKAGE
+  PURGE_REPORT
+  CORRESPONDENCE
+  APPROVAL
+}
+
+// The audit chain stores hashes only and therefore cannot prove *what* was done.
+// Anything that must be provable to a regulator lives here, in full, with its own
+// hash — this table is the evidentiary record, audit_log is only tamper-evidence.
+model DsarEvidence {
+  id            String       @id @default(uuid()) @db.Uuid
+  dsarRequestId String       @map("dsar_request_id") @db.Uuid
+  kind          EvidenceKind
+  label         String
+  payload       Json?
+  storagePath   String?      @map("storage_path")
+  contentHash   String       @map("content_hash")
+  createdByAdminId String?   @map("created_by_admin_id") @db.Uuid
+  createdAt     DateTime     @default(now())
+
+  request DsarRequest @relation(fields: [dsarRequestId], references: [id], onDelete: Cascade)
+
+  @@index([dsarRequestId, createdAt])
+  @@map("dsar_evidence")
+}
+
+enum PurgeJobStatus {
+  QUEUED
+  RUNNING
+  PARTIAL
+  COMPLETED
+  FAILED
+}
+
+enum PurgeLocationStatus {
+  PENDING
+  RUNNING
+  DONE
+  SKIPPED
+  FAILED
+}
+
+// The erasure executor's unit of work. One job per DSAR, one row per physical
+// location from 01_PRIVACY_DATAFLOW §2 — so a half-finished purge resumes from
+// the last completed location instead of restarting and double-deleting.
+model PurgeJob {
+  id             String         @id @default(uuid()) @db.Uuid
+  dsarRequestId  String         @map("dsar_request_id") @db.Uuid
+  subjectId      String         @map("subject_id") @db.Uuid
+  status         PurgeJobStatus @default(QUEUED)
+  locationsTotal Int            @default(0) @map("locations_total")
+  locationsDone  Int            @default(0) @map("locations_done")
+  // Set only when every location reached DONE/SKIPPED. The certificate is issued
+  // off this flag, never off "the job finished running".
+  keyDestroyedAt DateTime?      @map("key_destroyed_at")
+  startedAt      DateTime?      @map("started_at")
+  finishedAt     DateTime?      @map("finished_at")
+  error          String?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  request   DsarRequest        @relation(fields: [dsarRequestId], references: [id], onDelete: Cascade)
+  subject   Subject            @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
+  locations PurgeJobLocation[]
+
+  @@index([status])
+  @@index([dsarRequestId])
+  @@map("purge_jobs")
+}
+
+model PurgeJobLocation {
+  id         String              @id @default(uuid()) @db.Uuid
+  purgeJobId String              @map("purge_job_id") @db.Uuid
+  // "L2".."L11" from the photo-lifecycle table, so the certificate can name the
+  // location in the same vocabulary the DPIA uses.
+  locationCode String            @map("location_code")
+  objectType   String            @map("object_type")
+  objectId     String?           @map("object_id")
+  storagePath  String?           @map("storage_path")
+  status       PurgeLocationStatus @default(PENDING)
+  // Proof the thing existed and what it was, captured before deletion. After the
+  // delete there is nothing left to hash — this is the only chance.
+  hashBefore   String?           @map("hash_before")
+  attempts     Int               @default(0)
+  error        String?
+  completedAt  DateTime?         @map("completed_at")
+  createdAt    DateTime          @default(now())
+
+  job PurgeJob @relation(fields: [purgeJobId], references: [id], onDelete: Cascade)
+
+  @@unique([purgeJobId, locationCode, objectType, objectId])
+  @@index([purgeJobId, status])
+  @@map("purge_job_locations")
+}
+
+// Signed, self-contained proof of erasure handed to the Data Principal. Holds its
+// own canonical payload because audit_log is hash-only and cannot substitute.
+model DeletionCertificate {
+  id                String   @id @default(uuid()) @db.Uuid
+  dsarRequestId     String   @unique @map("dsar_request_id") @db.Uuid
+  purgeJobId        String?  @map("purge_job_id") @db.Uuid
+  // Never the real identity: certificates are shown to DPO/auditors who have no
+  // basis to see who the principal is.
+  subjectPseudonym  String   @map("subject_pseudonym")
+  locationsCount    Int      @map("locations_count")
+  payload           Json
+  payloadHash       String   @map("payload_hash")
+  signature         String
+  signingKeyId      String   @map("signing_key_id")
+  algorithm         String   @default("ed25519")
+  issuedByAdminId   String?  @map("issued_by_admin_id") @db.Uuid
+  completedAt       DateTime @map("completed_at")
+  issuedAt          DateTime @default(now()) @map("issued_at")
+
+  request DsarRequest @relation(fields: [dsarRequestId], references: [id], onDelete: Cascade)
+
+  @@map("deletion_certificates")
+}
+
+enum AccessActorType {
+  ADMIN
+  SUBJECT
+  SERVICE
+}
+
+enum AccessObjectType {
+  PHOTO
+  REDACTED_PHOTO
+  FACE_CROP
+  ENROLLMENT
+  EMBEDDING
+  SUBJECT_PII
+  EXPORT
+  DSAR_PACKAGE
+  VAULT_OBJECT
+  AUDIT_LOG
+}
+
+enum AccessAction {
+  VIEW
+  DOWNLOAD
+  DECRYPT
+  EXPORT
+  DENIED
+}
+
+// audit_log records mutations; this records reads. DPDP §8(4) reasonable-security
+// needs both, and only this one answers "who looked at this face, and why".
+// Append-only by RLS: the app role may INSERT and SELECT, nothing else.
+model AccessEvent {
+  id            String           @id @default(uuid()) @db.Uuid
+  actorType     AccessActorType  @map("actor_type")
+  actorId       String?          @map("actor_id") @db.Uuid
+  objectType    AccessObjectType @map("object_type")
+  objectId      String           @map("object_id")
+  action        AccessAction
+  purpose       String?
+  dsarRequestId String?          @map("dsar_request_id") @db.Uuid
+  projectId     String?          @map("project_id") @db.Uuid
+  ip            String?
+  userAgent     String?          @map("user_agent")
+  breakGlass    Boolean          @default(false) @map("break_glass")
+  justification String?
+  createdAt     DateTime         @default(now())
+
+  @@index([actorId, createdAt])
+  @@index([objectType, objectId])
+  @@index([dsarRequestId])
+  @@index([createdAt])
+  @@map("access_events")
+}
+
+enum BreachSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum BreachStatus {
+  OPEN
+  CONTAINED
+  NOTIFIED
+  CLOSED
+}
+
+// DPDP §8(5) + Rules 2025: the Data Protection Board gets a report within 72h and
+// every affected principal gets told without delay. Both timestamps are columns
+// so "we forgot" is a query, not an archaeology exercise.
+model BreachRecord {
+  id                    String         @id @default(uuid()) @db.Uuid
+  title                 String
+  description           String
+  severity              BreachSeverity
+  status                BreachStatus   @default(OPEN)
+  discoveredAt          DateTime       @map("discovered_at")
+  containedAt           DateTime?      @map("contained_at")
+  affectedSubjectCount  Int            @default(0) @map("affected_subject_count")
+  affectedProjectIds    Json?          @map("affected_project_ids")
+  dpbNotifiedAt         DateTime?      @map("dpb_notified_at")
+  principalsNotifiedAt  DateTime?      @map("principals_notified_at")
+  reportedByAdminId     String?        @map("reported_by_admin_id") @db.Uuid
+  remediation           String?
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+
+  @@index([status, discoveredAt])
+  @@map("breach_records")
+}
+
+enum RetentionAction {
+  HARD_DELETE
+  CRYPTO_SHRED
+  ANONYMISE
+  TOMBSTONE
+}
+
+// Retention clocks from 01_PRIVACY_DATAFLOW §6.1, as data rather than constants,
+// so the sweeper is one loop and a project can tighten (never loosen) a default.
+model RetentionPolicy {
+  id            String          @id @default(uuid()) @db.Uuid
+  // null projectId = the platform default for that data class.
+  projectId     String?         @map("project_id") @db.Uuid
+  dataClass     String          @map("data_class")
+  retentionDays Int             @map("retention_days")
+  action        RetentionAction @default(HARD_DELETE)
+  clockStart    String          @map("clock_start")
+  active        Boolean         @default(true)
+  createdByAdminId String?      @map("created_by_admin_id") @db.Uuid
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  project Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, dataClass])
+  @@index([active])
+  @@map("retention_policies")
+}
+
+// The per-subject DEK is HKDF-derived from MEDIA_KEK **and this random salt**.
+// Pure HKDF(KEK, subjectId) would be unshreddable — the KEK regenerates it
+// forever. Deleting the salt is what makes erasure irreversible, including in
+// backups that cannot be rewritten. The row survives with salt NULL as the
+// tombstone proving the key once existed and when it died.
+model SubjectKey {
+  subjectId   String    @id @map("subject_id") @db.Uuid
+  keyId       String    @unique @map("key_id")
+  salt        Bytes?
+  kekVersion  Int       @default(1) @map("kek_version")
+  destroyedAt DateTime? @map("destroyed_at")
+  createdAt   DateTime  @default(now())
+
+  subject Subject @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
+
+  @@map("subject_keys")
 }

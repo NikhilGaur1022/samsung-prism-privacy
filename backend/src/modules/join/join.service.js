@@ -5,6 +5,7 @@ import { writeAuditLog } from '../../lib/auditLog.js'
 import { grantConsent } from '../consent/consent.service.js'
 import { addParticipantInternal } from '../sessions/session.service.js'
 import { getEnrollmentStatus } from '../enrollment/enrollment.service.js'
+import { renderNotice, REQUIRED_LOCALE } from '../consentTemplates/consentTemplate.service.js'
 
 const INVITE_TTL_MS = Number(process.env.SESSION_INVITE_TTL_MINUTES ?? 240) * 60 * 1000
 const USER_PORTAL_URL = process.env.USER_PORTAL_URL ?? 'http://localhost:5173'
@@ -100,7 +101,15 @@ async function loadInvite(token) {
     include: {
       session: {
         include: {
-          project: { select: { id: true, name: true, purpose: true, policyVersion: true } },
+          project: {
+            select: {
+              id: true,
+              name: true,
+              purpose: true,
+              policyVersion: true,
+              consentTemplateId: true,
+            },
+          },
           agent: { select: { email: true } },
         },
       },
@@ -121,19 +130,37 @@ async function loadInvite(token) {
 
 // PUBLIC. Returns what a stranger needs to decide whether to consent, and nothing
 // else: no subject data, no session id, no roster, no counts.
-export async function describeInvite(token) {
+export async function describeInvite(token, locale = REQUIRED_LOCALE) {
   const invite = await loadInvite(token)
   const { session } = invite
 
+  // The notice comes from the published ConsentTemplate bound to the project, not
+  // from a string assembled here. Two texts describing the same collection is one
+  // text too many: the principal reads this one and the audit trail records the
+  // template version, so they have to be the same artifact or the signature
+  // attests to something nobody was shown.
+  //
+  // projectId and consentTemplateId are returned so the portal can address the
+  // notice directly — without them it was matching templates by name, which
+  // silently picks the wrong version the moment two projects share a notice name.
+  let notice = null
+  if (session.project.consentTemplateId) {
+    notice = await renderNotice(session.project.consentTemplateId, locale)
+  }
+
   return {
+    projectId: session.project.id,
     projectName: session.project.name,
-    purpose: session.project.purpose,
+    purpose: notice?.purpose ?? session.project.purpose,
     policyVersion: session.project.policyVersion,
+    consentTemplateId: session.project.consentTemplateId,
+    notice,
+    // Kept as a field so an older portal build does not render a blank consent
+    // step, but it is now the notice body rather than a paraphrase of it. A
+    // project with no bound notice has nothing lawful to show, and says so.
     consentText:
-      `By joining, you consent to ${session.project.name} collecting and processing photographs of you ` +
-      `for the purpose of: ${session.project.purpose}. Consent covers the whole project, including ` +
-      `automatic face matching where you have enrolled a photo. You can withdraw it at any time from ` +
-      `your Consent Hub, which deletes the photos linked to you and any face data held for you.`,
+      notice?.body ??
+      'This session has no published privacy notice attached. It cannot lawfully collect your data — ask the agent before continuing.',
     sessionLocation: session.location,
     agentName: session.agent?.email ?? null,
     expiresAt: invite.expiresAt,

@@ -311,6 +311,225 @@ export function getLineage(params = {}) {
   return request(`/api/v1/handoffs/lineage${query ? `?${query}` : ''}`)
 }
 
+// --- Dashboard ----------------------------------------------------------------
+
+export function getDashboardSummary() {
+  return request('/api/v1/dashboard/summary')
+}
+
+// from/to are optional ISO dates; the backend defaults to the trailing 90 days.
+export function getComplianceReport(params = {}) {
+  const query = new URLSearchParams(params).toString()
+  return request(`/api/v1/dashboard/compliance-report${query ? `?${query}` : ''}`)
+}
+
+// --- Projects (governance lifecycle) ------------------------------------------
+
+export function createProject(payload) {
+  return request('/api/v1/projects', { method: 'POST', body: JSON.stringify(payload) })
+}
+
+export function getProject(projectId) {
+  return request(`/api/v1/projects/${projectId}`)
+}
+
+export function updateProject(projectId, payload) {
+  return request(`/api/v1/projects/${projectId}`, { method: 'PATCH', body: JSON.stringify(payload) })
+}
+
+export function submitProject(projectId) {
+  return request(`/api/v1/projects/${projectId}/submit`, { method: 'POST' })
+}
+
+export function approveProject(projectId) {
+  return request(`/api/v1/projects/${projectId}/approve`, { method: 'POST' })
+}
+
+export function rejectProject(projectId, reason) {
+  return request(`/api/v1/projects/${projectId}/reject`, {
+    method: 'POST',
+    body: JSON.stringify({ reason }),
+  })
+}
+
+export function closeProject(projectId) {
+  return request(`/api/v1/projects/${projectId}/close`, { method: 'POST' })
+}
+
+export function listProjectAssignments(projectId) {
+  return request(`/api/v1/projects/${projectId}/assignments`)
+}
+
+// --- Project oversight (sessions/handoffs/report roll-ups) -------------------
+
+export function listProjectSessions(projectId) {
+  return request(`/api/v1/projects/${projectId}/sessions`)
+}
+
+export function listProjectHandoffs(projectId) {
+  return request(`/api/v1/projects/${projectId}/handoffs`)
+}
+
+export function getProjectReport(projectId) {
+  return request(`/api/v1/projects/${projectId}/report`)
+}
+
+export function addProjectAssignment(projectId, adminId) {
+  return request(`/api/v1/projects/${projectId}/assignments`, {
+    method: 'POST',
+    body: JSON.stringify({ adminId }),
+  })
+}
+
+export function removeProjectAssignment(projectId, adminId) {
+  return request(`/api/v1/projects/${projectId}/assignments/${adminId}`, { method: 'DELETE' })
+}
+
+// --- Consent templates ---------------------------------------------------------
+
+export function listConsentTemplates(params = {}) {
+  const query = new URLSearchParams(params).toString()
+  return request(`/api/v1/consent-templates${query ? `?${query}` : ''}`)
+}
+
+export function createConsentTemplate(payload) {
+  return request('/api/v1/consent-templates', { method: 'POST', body: JSON.stringify(payload) })
+}
+
+export function getConsentTemplate(templateId) {
+  return request(`/api/v1/consent-templates/${templateId}`)
+}
+
+export function updateConsentTemplate(templateId, payload) {
+  return request(`/api/v1/consent-templates/${templateId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function publishConsentTemplate(templateId) {
+  return request(`/api/v1/consent-templates/${templateId}/publish`, { method: 'POST' })
+}
+
+export function renderConsentTemplate(templateId, locale = 'en') {
+  const query = new URLSearchParams({ locale }).toString()
+  return request(`/api/v1/consent-templates/${templateId}/render?${query}`)
+}
+
+// --- DSAR ------------------------------------------------------------------
+
+export function listDsar(params = {}) {
+  const query = new URLSearchParams(params).toString()
+  return request(`/api/v1/dsar${query ? `?${query}` : ''}`)
+}
+
+// Vault-wide evidence listing, not scoped to a single request.
+export function listDsarEvidence(params = {}) {
+  const query = new URLSearchParams(params).toString()
+  return request(`/api/v1/dsar/evidence${query ? `?${query}` : ''}`)
+}
+
+export function getDsarSla() {
+  return request('/api/v1/dsar/sla')
+}
+
+export function getDsarSigningKey() {
+  return request('/api/v1/dsar/signing-key')
+}
+
+export function getDsar(requestId) {
+  return request(`/api/v1/dsar/${requestId}`)
+}
+
+export function assignDsar(requestId, assignedAdminId) {
+  return request(`/api/v1/dsar/${requestId}/assign`, {
+    method: 'POST',
+    body: JSON.stringify({ assignedAdminId }),
+  })
+}
+
+export function runDsarDiscovery(requestId) {
+  return request(`/api/v1/dsar/${requestId}/discovery`, { method: 'POST' })
+}
+
+export function attachDsarEvidence(requestId, payload) {
+  return request(`/api/v1/dsar/${requestId}/evidence`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function executeDsar(requestId, inline = true) {
+  return request(`/api/v1/dsar/${requestId}/execute`, {
+    method: 'POST',
+    body: JSON.stringify({ inline }),
+  })
+}
+
+export function approveDsar(requestId, note) {
+  return request(`/api/v1/dsar/${requestId}/approve`, {
+    method: 'POST',
+    body: JSON.stringify({ note }),
+  })
+}
+
+export function rejectDsar(requestId, reason) {
+  return request(`/api/v1/dsar/${requestId}/reject`, {
+    method: 'POST',
+    body: JSON.stringify({ reason }),
+  })
+}
+
+export function getDsarCertificate(requestId) {
+  return request(`/api/v1/dsar/${requestId}/certificate`)
+}
+
+export function getPurgeJob(requestId, purgeJobId) {
+  return request(`/api/v1/dsar/${requestId}/purge-jobs/${purgeJobId}`)
+}
+
+// --- Audit -----------------------------------------------------------------
+
+export function listAudit(params = {}) {
+  const query = new URLSearchParams(params).toString()
+  return request(`/api/v1/audit${query ? `?${query}` : ''}`)
+}
+
+export function verifyAuditChain(params) {
+  const query = new URLSearchParams(params).toString()
+  return request(`/api/v1/audit/verify?${query}`)
+}
+
+export function listAccessEvents(params = {}) {
+  const query = new URLSearchParams(params).toString()
+  return request(`/api/v1/access-events${query ? `?${query}` : ''}`)
+}
+
+// Metadata-only picker for break-glass targets: the frames the request's own
+// subject is linked to, so an operator can choose one instead of copying a
+// sessionId/photoId out of a discovery result by hand.
+export function getDsarMedia(requestId) {
+  return request(`/api/v1/dsar/${requestId}/media`)
+}
+
+// --- Break-glass raw media ---------------------------------------------------
+// Never cached, never left as a lingering blob URL — the caller is expected to
+// revoke it once the modal or preview closes.
+export async function requestRawMedia(sessionId, photoId, { dsarRequestId, justification }) {
+  const query = new URLSearchParams({ dsarRequestId, justification }).toString()
+  const res = await fetch(`${BASE_URL}/api/v1/sessions/${sessionId}/photos/${photoId}/raw?${query}`, {
+    credentials: 'include',
+  })
+  if (!res.ok) {
+    const body = await res.json().catch(() => null)
+    const error = new Error(body?.error ?? `Break-glass request failed with status ${res.status}`)
+    error.status = res.status
+    throw error
+  }
+  const blob = await res.blob()
+  return URL.createObjectURL(blob)
+}
+
 export const mediaUrl = {
   photo: (sessionId, photoId) => `${BASE_URL}/api/v1/sessions/${sessionId}/photos/${photoId}/file`,
   faceCrop: (sessionId, faceId) => `${BASE_URL}/api/v1/sessions/${sessionId}/faces/${faceId}/crop`,

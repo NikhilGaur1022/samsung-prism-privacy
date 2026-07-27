@@ -40,3 +40,7 @@ ENV/
 *.png
 *.jpg
 .huggingface/
+.gitnexus
+
+# Redis dev snapshot — a local artifact, never a source file
+dump.rdb

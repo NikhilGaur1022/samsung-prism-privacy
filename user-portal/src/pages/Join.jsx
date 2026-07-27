@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { Building2, CheckCircle2, MapPin, ShieldCheck } from 'lucide-react'
+import { Building2, CheckCircle2, MapPin, TriangleAlert } from 'lucide-react'
 import IconChip from '../components/IconChip'
 import { PoseStepper, useEnrollment } from '../components/FaceEnrollment'
 import {
   acceptJoinInvite,
   getJoinInvite,
   getMe,
+  renderConsentNotice,
   requestLoginOtp,
   verifyLoginOtp,
 } from '../lib/api'
@@ -32,7 +33,17 @@ export default function Join() {
   const [otpSent, setOtpSent] = useState(false)
   const [devOtp, setDevOtp] = useState(null)
 
+  // The §5 notice for this project. GET /api/v1/join/:token now returns both the
+  // rendered notice and the consentTemplateId it came from, so this no longer has
+  // to guess which template applies.
+  const [notice, setNotice] = useState(null)
+  const [noticeError, setNoticeError] = useState(null)
+  const [noticeLoading, setNoticeLoading] = useState(false)
+  const [locale, setLocale] = useState('en')
+  const [scrolledToBottom, setScrolledToBottom] = useState(false)
+
   const signedIn = useRef(false)
+  const templateId = useRef(null)
 
   useEffect(() => {
     getJoinInvite(token).then(setInvite).catch(setError)
@@ -75,6 +86,44 @@ export default function Join() {
       setResult(res)
       setStep('done')
     })
+
+  // The invite response carries the notice already rendered in the default
+  // locale, plus the template id. Matching the project by NAME — which is what
+  // this did before the endpoint returned an id — picks the wrong notice as soon
+  // as two projects share a name, and picks nothing at all before the subject has
+  // consented to anything. Only a locale change re-fetches.
+  useEffect(() => {
+    if (step !== 'consent' || !invite || notice || noticeLoading) return
+
+    setNoticeLoading(true)
+    setNoticeError(null)
+    ;(async () => {
+      templateId.current = invite.consentTemplateId ?? null
+      if (!templateId.current) {
+        throw new Error('No published consent notice is on file for this project.')
+      }
+      if (invite.notice && invite.notice.locale === locale) return invite.notice
+      return renderConsentNotice(templateId.current, locale)
+    })()
+      .then((n) => {
+        setNotice(n)
+        setLocale(n.locale)
+      })
+      .catch((err) => setNoticeError(err))
+      .finally(() => setNoticeLoading(false))
+  }, [step, invite, notice, noticeLoading, locale])
+
+  const changeLocale = (nextLocale) => {
+    setLocale(nextLocale)
+    setNotice(null)
+    setScrolledToBottom(false)
+    setNoticeError(null)
+  }
+
+  const handleNoticeScroll = (e) => {
+    const el = e.currentTarget
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 8) setScrolledToBottom(true)
+  }
 
   if (error && !invite) {
     return (
@@ -201,22 +250,85 @@ export default function Join() {
 
       {step === 'consent' && (
         <div className="mt-6">
-          <div className="flex items-start gap-3 rounded-card border border-border bg-surface p-4">
-            <ShieldCheck size={18} strokeWidth={1.75} className="mt-0.5 shrink-0 text-brand" />
-            <div>
-              <p className="text-sm font-bold text-ink">What you are agreeing to</p>
-              <p className="mt-1.5 text-xs font-medium leading-relaxed text-ink-muted">
-                {invite.consentText}
-              </p>
-              <p className="mt-2 text-[11px] font-semibold text-ink-faint">
-                Policy version {invite.policyVersion}
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-sm font-bold text-ink">What you are agreeing to</p>
+            {notice && notice.availableLocales.length > 1 && (
+              <select
+                value={locale}
+                onChange={(e) => changeLocale(e.target.value)}
+                className="rounded-lg border border-black/10 bg-canvas px-2 py-1 text-xs font-semibold text-ink outline-none focus:border-brand"
+              >
+                {notice.availableLocales.map((l) => (
+                  <option key={l} value={l}>
+                    {l}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+
+          {noticeLoading && (
+            <p className="mt-3 text-xs font-medium text-ink-faint">Loading the consent notice…</p>
+          )}
+
+          {noticeError && (
+            <div className="mt-3 flex items-start gap-2 rounded-card border border-border bg-danger-soft p-4">
+              <TriangleAlert size={16} strokeWidth={1.75} className="mt-0.5 shrink-0 text-danger" />
+              <p className="text-xs font-medium leading-relaxed text-danger">
+                Could not load the consent notice for this project: {noticeError.message} You cannot
+                join until it can be shown to you.
               </p>
             </div>
-          </div>
+          )}
+
+          {notice && (
+            <>
+              {notice.localeFallback && (
+                <div className="mt-3 flex items-start gap-2 rounded-card border border-border bg-warning-soft p-3">
+                  <TriangleAlert size={14} strokeWidth={1.75} className="mt-0.5 shrink-0 text-warning" />
+                  <p className="text-[11px] font-semibold text-warning">
+                    This notice is not yet available in "{notice.requestedLocale}" — showing English instead.
+                  </p>
+                </div>
+              )}
+
+              <div
+                onScroll={handleNoticeScroll}
+                className="mt-3 max-h-64 overflow-y-auto rounded-card border border-border bg-surface p-4"
+              >
+                <p className="text-xs font-bold uppercase tracking-wide text-brand">{notice.purpose}</p>
+                <p className="mt-2 whitespace-pre-wrap text-xs font-medium leading-relaxed text-ink-muted">
+                  {notice.body}
+                </p>
+                {notice.dataTypes?.length > 0 && (
+                  <p className="mt-3 text-[11px] font-semibold text-ink-faint">
+                    Data types: {notice.dataTypes.join(', ')}
+                  </p>
+                )}
+                {notice.retention && (
+                  <p className="mt-1 text-[11px] font-semibold text-ink-faint">Retention: {notice.retention}</p>
+                )}
+                {notice.grievanceContact && (
+                  <p className="mt-1 text-[11px] font-semibold text-ink-faint">
+                    Grievance contact: {notice.grievanceContact}
+                  </p>
+                )}
+                <p className="mt-2 text-[11px] font-semibold text-ink-faint">
+                  Policy version {notice.policyVersion}
+                </p>
+              </div>
+
+              {!scrolledToBottom && (
+                <p className="mt-2 text-[11px] font-medium text-ink-faint">
+                  Scroll to the end of the notice to enable the agree button.
+                </p>
+              )}
+            </>
+          )}
 
           <button
             onClick={handleAccept}
-            disabled={busy}
+            disabled={busy || !notice || !scrolledToBottom}
             className="mt-6 w-full rounded-card bg-brand py-3.5 text-base font-bold text-white shadow-card disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-dark"
           >
             {busy ? 'Joining…' : 'I agree — add me to this session'}

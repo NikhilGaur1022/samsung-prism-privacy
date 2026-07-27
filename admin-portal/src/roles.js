@@ -42,16 +42,6 @@ export const ROLES = {
       { label: 'SLA Monitoring', icon: Gauge, path: '/sla-monitoring' },
       { label: 'Compliance Reports', icon: ClipboardList, path: '/compliance-reports' },
     ],
-    stats: [
-      { label: 'Pending Projects', value: '6' },
-      { label: 'Requests Awaiting Approval', value: '4' },
-      { label: 'SLA Compliance', value: '96.8%' },
-    ],
-    queue: [
-      { title: 'XR Research 2026 — High Risk — Review' },
-      { title: 'Camera Quality Study — Medium Risk — Approve' },
-      { title: 'Request 10001 — Resolution Evidence — Review' },
-    ],
   },
   dataOwner: {
     key: 'dataOwner',
@@ -68,16 +58,6 @@ export const ROLES = {
       { label: 'Processed Data', icon: Database, path: '/processed-data' },
       { label: 'Project Reports', icon: FileBarChart, path: '/project-reports' },
     ],
-    stats: [
-      { label: 'My Projects', value: '12' },
-      { label: 'Awaiting Approval', value: '3' },
-      { label: 'Processed Assets', value: '84.2K' },
-    ],
-    queue: [
-      { title: 'XR Research 2026 — XR Sessions — 72% Collected' },
-      { title: 'Camera Quality Study — DSLR Photos — 91% Collected' },
-      { title: 'Mobile Capture Program — iPhone Media — Processing' },
-    ],
   },
   collectionAgent: {
     key: 'collectionAgent',
@@ -92,16 +72,6 @@ export const ROLES = {
       { label: 'Sessions', icon: Camera, path: '/sessions' },
       { label: 'Subject Verification', icon: UserCheck, path: '/subject-verification' },
       { label: 'Consent Check', icon: ShieldCheck, path: '/consent-check' },
-    ],
-    stats: [
-      { label: 'Assigned Today', value: '14' },
-      { label: 'Ready to Collect', value: '8' },
-      { label: 'Uploading', value: '3' },
-    ],
-    queue: [
-      { title: 'COL-2048 — XR Session — Ready' },
-      { title: 'COL-2047 — DSLR Photos — Uploading' },
-      { title: 'COL-2046 — iPhone Media — Consent Check' },
     ],
   },
   dataAdmin: {
@@ -118,16 +88,6 @@ export const ROLES = {
       { label: 'Purge / Export', icon: FileText, path: '/purge-export' },
       { label: 'Evidence Vault', icon: Lock, path: '/evidence-vault' },
       { label: 'Audit Logs', icon: FileClock, path: '/audit-logs' },
-    ],
-    stats: [
-      { label: 'Open Requests', value: '18' },
-      { label: 'In Discovery', value: '7' },
-      { label: 'Actions Queued', value: '23' },
-    ],
-    queue: [
-      { title: 'Request 10001 — Erasure — 9 Locations' },
-      { title: 'Request 10000 — Access — 4 Locations' },
-      { title: 'Request 09999 — Correction — 2 Locations' },
     ],
   },
 }

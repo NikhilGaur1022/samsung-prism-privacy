@@ -3,12 +3,18 @@ import { ApiError } from '../../middleware/errorHandler.js'
 import { writeAuditLog } from '../../lib/auditLog.js'
 import { signConsent } from '../../lib/consent.js'
 import { deleteAllEnrollments } from '../enrollment/enrollment.service.js'
+import { logger } from '../../lib/logger.js'
 
 // Subject-facing. The subject grants consent to a whole project from the
 // user-portal; the collection agent only ever reads the result of this.
 export async function listProjectsForSubject(subjectId) {
+  // APPROVED is the collectable state a project reaches after DPO sign-off
+  // (project.service.assertCollectable). Filtering on ACTIVE alone predates that
+  // workflow and meant the portal showed a principal nothing they could actually
+  // consent to — every governed project is APPROVED, never ACTIVE. ACTIVE is kept
+  // for the legacy rows that still carry it.
   const projects = await prisma.project.findMany({
-    where: { status: 'ACTIVE' },
+    where: { status: { in: ['APPROVED', 'ACTIVE'] } },
     orderBy: { createdAt: 'desc' },
     include: { consents: { where: { subjectId } } },
   })
@@ -141,6 +147,28 @@ export async function revokeConsent(subjectId, projectId) {
   })
   if (remaining === 0) {
     await deleteAllEnrollments(subjectId, subjectId, 'ALL_CONSENT_REVOKED')
+  }
+
+  // §6(4): withdrawal must be as easy as giving consent, and §8(7) requires the
+  // data to go once its basis has. Raising an internal DSAR rather than deleting
+  // here means the withdrawal walks the same audited, resumable, certificate-
+  // issuing executor a hand-filed erasure does — instead of a second, quieter
+  // deletion path with no evidence trail and no SLA clock on it.
+  //
+  // Imported lazily: consent.service is loaded by the join flow, and dsar.service
+  // pulls in the purge executor and the whole storage/keyring stack behind it.
+  // A static import would make every consent read pay for that.
+  try {
+    const { raiseWithdrawalErasure } = await import('../dsar/dsar.service.js')
+    await raiseWithdrawalErasure(subjectId, projectId)
+  } catch (err) {
+    // The revocation itself has already committed and must stand — processing has
+    // stopped, which is the part with immediate legal effect. A failure to open
+    // the erasure request is loud so it can be raised by hand.
+    logger.error(
+      { err, subjectId, projectId },
+      'consent revoked but the withdrawal erasure request could not be raised — raise it manually',
+    )
   }
 
   return revoked

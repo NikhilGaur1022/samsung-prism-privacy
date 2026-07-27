@@ -6,11 +6,12 @@ import { writeAuditLog } from '../../lib/auditLog.js'
 import { consentVerdict, isEligible, CONSENT_VERDICT } from '../../lib/consent.js'
 import { writeFile, readFile, deleteFile } from '../../lib/storage.js'
 import { enqueueRecognition } from '../../lib/faceQueue.js'
+import { enqueueRedaction } from '../../lib/redactionQueue.js'
 import { logger } from '../../lib/logger.js'
 import { createGallery, addEnrollmentPoint, destroyGallery } from '../../lib/faceGallery.js'
 import { embedImage } from '../enrollment/enrollment.service.js'
 import { decryptEmbedding, encryptEmbedding } from '../../lib/embeddingCrypto.js'
-import { assertAssigned } from '../projects/project.service.js'
+import { assertCollectable } from '../projects/project.service.js'
 
 const TAGGABLE = ['TAGGED', 'UNKNOWN', 'SKIPPED', 'NOT_A_FACE']
 const FACE_SERVICE_URL = process.env.FACE_SERVICE_URL ?? 'http://localhost:8001'
@@ -34,7 +35,9 @@ function assertStatus(session, ...allowed) {
 }
 
 export async function createSession({ projectId, location }, admin) {
-  await assertAssigned(projectId, admin)
+  // Hard gate: no collection without a DPO approval and a published notice bound
+  // to the project. Throws 403 PROJECT_NOT_APPROVED.
+  await assertCollectable(projectId, admin)
 
   const code = `COL-${randomInt(1000, 9999)}`
   const session = await prisma.session.create({
@@ -813,7 +816,7 @@ export async function finalizeSession(sessionId, admin) {
   })
 
   // Everything below runs after the commit and must never be able to undo it.
-  const redacted = await redactBystanders(sessionId)
+  const { written: redacted, deferred } = await redactBystanders(sessionId)
   await destroyGallery(sessionId)
 
   await writeAuditLog({
@@ -842,10 +845,21 @@ export async function finalizeSession(sessionId, admin) {
       clustersTagged: tagged.length,
       revokedSubjectIds,
       redactedPhotos: redacted,
+      deferredPhotos: deferred,
     },
   })
 
-  return { photoLinks: links.length, revokedSubjectIds, redactedPhotos: redacted }
+  // deferredPhotos is surfaced to the agent rather than buried in a log line: it
+  // is the number of photos that cannot be served or ingested until the retry
+  // queue clears them, and the agent is the one person still on site who could
+  // notice the PII worker is down.
+  return {
+    photoLinks: links.length,
+    revokedSubjectIds,
+    redactedPhotos: redacted,
+    deferredPhotos: deferred,
+    ingestBlocked: deferred > 0,
+  }
 }
 
 async function redactImage(buffer, bboxes, filename) {
@@ -858,37 +872,62 @@ async function redactImage(buffer, bboxes, filename) {
   return Buffer.from(await res.arrayBuffer())
 }
 
+// Raised when the image-PII worker could not confirm a result. It is a distinct
+// type because the caller must treat "no PII in this image" and "we do not know
+// whether there is PII in this image" as completely different outcomes.
+export class PiiUnavailableError extends Error {
+  constructor(message, cause) {
+    super(message)
+    this.name = 'PiiUnavailableError'
+    this.cause = cause
+  }
+}
+
 // Asks the image-PII worker for pixel regions of sensitive text (Aadhaar, PAN,
-// plates, phone numbers, ID cards) visible in the photo. Best-effort: if the
-// service is down or errors, we return [] so face redaction still proceeds — a
-// missing PII pass is a degraded result, never a reason to leak an unblurred face.
+// plates, phone numbers, ID cards) visible in the photo.
+//
+// This used to return [] when the worker was unreachable, so an outage silently
+// downgraded to "faces blurred, Aadhaar number fully legible" and the pipeline
+// reported success. Shipping an unmasked Aadhaar is a reportable breach under
+// §8(5), so the failure now propagates and the caller parks the photo as
+// DEFERRED. Fail closed (invariant 8).
 async function detectPiiRegions(buffer, filename) {
+  let res
   try {
     const form = new FormData()
     form.append('file', new Blob([buffer], { type: 'image/jpeg' }), filename)
-    const res = await fetch(`${PII_SERVICE_URL}/detect-pii`, { method: 'POST', body: form })
-    if (!res.ok) {
-      logger.warn({ status: res.status, filename }, 'PII detection service returned non-OK')
-      return []
-    }
-    const body = await res.json()
-    return Array.isArray(body?.regions) ? body.regions : []
+    res = await fetch(`${PII_SERVICE_URL}/detect-pii`, { method: 'POST', body: form })
   } catch (err) {
-    logger.warn({ err, filename }, 'PII detection unavailable — redacting faces only')
-    return []
+    throw new PiiUnavailableError(`PII worker unreachable while scanning ${filename}`, err)
   }
+
+  if (!res.ok) {
+    throw new PiiUnavailableError(`PII worker returned ${res.status} while scanning ${filename}`)
+  }
+
+  const body = await res.json().catch((err) => {
+    throw new PiiUnavailableError(`PII worker returned an unreadable response for ${filename}`, err)
+  })
+
+  // A malformed body is indistinguishable from "no regions found", and guessing
+  // in favour of "clean" is exactly the wrong default here.
+  if (!Array.isArray(body?.regions)) {
+    throw new PiiUnavailableError(`PII worker response for ${filename} carried no regions array`)
+  }
+  return body.regions
 }
 
 // Writes a blurred derivative for every photo containing a face nobody claimed
 // or sensitive PII text (Aadhaar/PAN/plate/ID). The original is never touched —
 // downstream decides which copy it is entitled to.
-async function redactBystanders(sessionId) {
+export async function redactBystanders(sessionId, { photoIds } = {}) {
   const photos = await prisma.photo.findMany({
-    where: { sessionId },
+    where: { sessionId, ...(photoIds ? { id: { in: photoIds } } : {}) },
     include: { faces: { select: { bbox: true, tagStatus: true } } },
   })
 
   let written = 0
+  let deferred = 0
   for (const photo of photos) {
     // Max-privacy rule: the ONLY box left visible is one tagged to a consented
     // participant. Everything else is blurred — UNKNOWN, SKIPPED, PENDING, and even
@@ -902,22 +941,106 @@ async function redactBystanders(sessionId) {
       const original = await readFile(photo.storagePath)
       const piiRegions = await detectPiiRegions(original, `${photo.id}.jpg`)
       const regions = [...bystanders, ...piiRegions]
-      // Nothing to hide: no bystander faces and no PII text. Skip the derivative.
-      if (regions.length === 0) continue
 
-      const blurred = await redactImage(original, regions, `${photo.id}.jpg`)
+      // A derivative is written even when there is nothing to blur. Skipping it
+      // used to leave redactedPath null, which the serving layer now — correctly
+      // — treats as "redaction has not happened", so a clean photo would have
+      // been unserveable forever.
+      const blurred =
+        regions.length === 0 ? original : await redactImage(original, regions, `${photo.id}.jpg`)
       const redactedPath = `sessions/${sessionId}/redacted/${photo.id}.jpg`
       await writeFile(redactedPath, blurred)
-      await prisma.photo.update({ where: { id: photo.id }, data: { redactedPath } })
+      await prisma.photo.update({
+        where: { id: photo.id },
+        data: { redactedPath, piiStatus: piiRegions.length > 0 ? 'MASKED' : 'CLEAN' },
+      })
       written += 1
     } catch (err) {
-      // Finalize has already committed; a failed derivative is a warning, not a
-      // rollback. The original stays intact either way.
-      logger.warn({ err, photoId: photo.id }, 'bystander redaction failed')
+      // Finalize has already committed, so this cannot roll back — but it must
+      // not pass either. The photo is parked as DEFERRED: no redactedPath, so
+      // nothing can serve it, and the handoff refuses to ingest the batch until
+      // the retry queue clears it.
+      const isPii = err instanceof PiiUnavailableError
+      await prisma.photo.update({
+        where: { id: photo.id },
+        data: { piiStatus: 'DEFERRED', redactedPath: null },
+      })
+      deferred += 1
+      logger.error(
+        { err, photoId: photo.id, sessionId, reason: isPii ? 'PII_WORKER' : 'REDACTION' },
+        'redaction deferred — photo is not serveable and the batch cannot ingest',
+      )
+
+      await enqueueRedaction({ sessionId, photoId: photo.id }).catch((queueErr) => {
+        // A dead queue must not erase the DEFERRED state; the retention/ingest
+        // guard still blocks, and this is visible on the DSAR/ops screens.
+        logger.error({ err: queueErr, photoId: photo.id }, 'could not enqueue redaction retry')
+      })
     }
   }
 
-  return written
+  if (deferred > 0) {
+    logger.warn({ sessionId, deferred, written }, 'session has deferred redactions — ingest is blocked')
+  }
+
+  return { written, deferred }
+}
+
+/**
+ * Rebuilds one photo's redacted derivative from the subjects who are STILL
+ * lawfully linked to it. Called by the DSAR purge after an erasing subject's
+ * link has been removed.
+ *
+ * This is what makes invariant 5 real. When A erases from a photo that also holds
+ * B, the photo survives for B — but it must not survive still showing A. Because
+ * the max-privacy rule is "blur every face not tagged to a remaining subject",
+ * removing A's link is by itself enough to make A a bystander here; no list of
+ * A's bounding boxes has to be threaded through, which means the blur cannot
+ * drift out of sync with the links.
+ *
+ * Ordering constraint the caller must honour: this needs the ORIGINAL, so it has
+ * to run before L2 is deleted. Doing it the other way round produces a photo that
+ * can never be re-redacted again.
+ */
+export async function rebuildRedactedForRemaining(photoId) {
+  const photo = await prisma.photo.findUnique({
+    where: { id: photoId },
+    select: {
+      id: true,
+      sessionId: true,
+      storagePath: true,
+      redactedPath: true,
+      faces: { select: { bbox: true, taggedSubjectId: true } },
+      subjects: { select: { subjectId: true } },
+    },
+  })
+  if (!photo) throw new ApiError(404, 'Photo not found')
+
+  const remaining = new Set(photo.subjects.map((s) => s.subjectId))
+  const toBlur = photo.faces.filter((f) => !f.taggedSubjectId || !remaining.has(f.taggedSubjectId)).map((f) => f.bbox)
+
+  const original = await readFile(photo.storagePath)
+  const piiRegions = await detectPiiRegions(original, `${photo.id}.jpg`)
+  const regions = [...toBlur, ...piiRegions]
+
+  const rebuilt = regions.length === 0 ? original : await redactImage(original, regions, `${photo.id}.jpg`)
+  const redactedPath = photo.redactedPath ?? `sessions/${photo.sessionId}/redacted/${photo.id}.jpg`
+  await writeFile(redactedPath, rebuilt)
+
+  await prisma.photo.update({
+    where: { id: photo.id },
+    data: { redactedPath, piiStatus: piiRegions.length > 0 ? 'MASKED' : 'CLEAN' },
+  })
+
+  return { photoId: photo.id, redactedPath, blurredRegions: regions.length, remainingSubjects: remaining.size }
+}
+
+// Any photo in this session whose masking is unconfirmed. The handoff ingest and
+// the retention sweep both ask this rather than re-deriving the rule.
+export async function countDeferredPhotos(sessionId) {
+  return prisma.photo.count({
+    where: { sessionId, OR: [{ piiStatus: 'DEFERRED' }, { piiStatus: 'FAILED' }] },
+  })
 }
 
 // Returns every photo in the session with its face detections and tagged subject
@@ -961,28 +1084,78 @@ export async function getPhotosForReview(sessionId, admin) {
 }
 
 // Media is never served straight off disk by a static handler — every read goes
-// through the same session ownership check as the rest of the module.
+// through the same session ownership check as the rest of the module, and every
+// one of these returns a decrypted BUFFER rather than a path. Returning a path
+// invited `res.sendFile`, which streams whatever is on disk: once blobs are
+// sealed that is ciphertext, and before they were sealed it silently bypassed
+// every check in this file.
 export async function readPhotoFile(sessionId, photoId, admin) {
   const session = await loadSession(sessionId, admin)
   const photo = await prisma.photo.findFirst({ where: { id: photoId, sessionId } })
   if (!photo) throw new ApiError(404, 'Photo not found')
 
-  // Once the session is archived the redacted derivative IS the photo. Serving the
-  // original here would mean an unrecognised bystander's face is blurred in the
-  // handoff manifest and still fully visible one URL away — which is not redaction,
-  // it is a checkbox. The original stays on disk for the audit trail only.
-  if (session.status === 'ARCHIVED' && photo.redactedPath) {
-    return { path: photo.redactedPath, mimeType: 'image/jpeg' }
+  // Matrix §B: the agent's basis for the raw original is operational necessity
+  // during capture, and it expires at ARCHIVE. This used to fall back to the
+  // redacted derivative, which was friendlier but wrong — the route means "give
+  // me the original", and after archive the honest answer is no.
+  if (admin.role === 'collectionAgent' && session.status === 'ARCHIVED') {
+    throw new ApiError(403, 'This session is ARCHIVED — the original is no longer available to the collecting agent')
   }
 
-  return { path: photo.storagePath, mimeType: photo.mimeType }
+  return { buffer: await readFile(photo.storagePath), mimeType: photo.mimeType }
 }
 
 export async function readRedactedPhoto(sessionId, photoId, admin) {
   await loadSession(sessionId, admin)
   const photo = await prisma.photo.findFirst({ where: { id: photoId, sessionId } })
-  if (!photo?.redactedPath) throw new ApiError(404, 'No redacted copy for this photo')
-  return { path: photo.redactedPath, mimeType: 'image/jpeg' }
+  if (!photo) throw new ApiError(404, 'Photo not found')
+
+  // Fail closed (invariant 8). A missing derivative means redaction has not
+  // succeeded yet; 409 tells the caller to wait. There is no branch here that
+  // reaches for storagePath, and none may be added.
+  if (!photo.redactedPath || photo.piiStatus === 'DEFERRED' || photo.piiStatus === 'FAILED') {
+    throw new ApiError(409, 'REDACTION_PENDING — no redacted copy is available for this photo yet')
+  }
+  return { buffer: await readFile(photo.redactedPath), mimeType: 'image/jpeg' }
+}
+
+// Break-glass binding helpers. They answer "whose data is this object?" so the
+// middleware can refuse an open DSAR being used as a skeleton key for a subject
+// it does not name. A photo can lawfully hold several subjects, so these return
+// every subject linked to the object and the caller checks membership.
+export async function subjectsOnPhoto(photoId) {
+  const links = await prisma.photoSubject.findMany({
+    where: { photoId },
+    select: { subjectId: true },
+  })
+  return links.map((l) => l.subjectId)
+}
+
+// Raw original for a DSAR operator. There is no `admin` parameter and no session
+// ownership check because the caller is by definition not the collecting agent —
+// the authorization already happened in requireBreakGlass, which proved an open
+// DSAR names a subject on this photo. Passing the breakGlass context in makes
+// that dependency explicit: the function cannot be called from anywhere that has
+// not been through the middleware.
+export async function readRawForDsar(sessionId, photoId, breakGlass) {
+  if (!breakGlass?.dsarRequestId) {
+    throw new ApiError(403, 'Raw media requires an established break-glass context')
+  }
+
+  const photo = await prisma.photo.findFirst({ where: { id: photoId, sessionId } })
+  if (!photo) throw new ApiError(404, 'Photo not found')
+
+  return { buffer: await readFile(photo.storagePath), mimeType: photo.mimeType }
+}
+
+export async function subjectsOnFace(faceId) {
+  const face = await prisma.faceDetection.findUnique({
+    where: { id: faceId },
+    select: { taggedSubjectId: true, photoId: true },
+  })
+  if (!face) return []
+  if (face.taggedSubjectId) return [face.taggedSubjectId]
+  return subjectsOnPhoto(face.photoId)
 }
 
 // Per-person view: serve a copy of the photo with EVERYONE except `subjectId`
@@ -993,6 +1166,24 @@ export async function readRedactedPhoto(sessionId, photoId, admin) {
 // Derivatives are cached per subject so the on-the-fly blur runs once per photo.
 export async function readPersonRedactedPhoto(sessionId, photoId, subjectId, admin) {
   await loadSession(sessionId, admin)
+  return buildPersonRedacted(sessionId, photoId, subjectId)
+}
+
+// The principal's own §11 view of a photo they appear in. There is no `admin` and
+// no session ownership check: the authorization is the PhotoSubject link itself,
+// re-proved here rather than trusted from the caller. Everyone but the principal
+// is blurred by exactly the same code path the agent's per-person view uses — a
+// second implementation is a second place for the blur to be forgotten.
+export async function readPersonRedactedPhotoForSubject(photoId, subjectId) {
+  const link = await prisma.photoSubject.findUnique({
+    where: { photoId_subjectId: { photoId, subjectId } },
+    select: { photo: { select: { sessionId: true } } },
+  })
+  if (!link) throw new ApiError(404, 'Photo not found')
+  return buildPersonRedacted(link.photo.sessionId, photoId, subjectId)
+}
+
+async function buildPersonRedacted(sessionId, photoId, subjectId) {
   const photo = await prisma.photo.findFirst({
     where: { id: photoId, sessionId },
     include: { faces: { select: { bbox: true, taggedSubjectId: true } } },
@@ -1001,32 +1192,43 @@ export async function readPersonRedactedPhoto(sessionId, photoId, subjectId, adm
 
   const cachePath = `sessions/${sessionId}/redacted/${photoId}.person-${subjectId}.jpg`
   try {
-    await readFile(cachePath)
-    return { path: cachePath, mimeType: 'image/jpeg' }
+    return { buffer: await readFile(cachePath), mimeType: 'image/jpeg' }
   } catch {
     // Not built yet — fall through and generate it.
   }
 
   const original = await readFile(photo.storagePath)
   const otherFaces = photo.faces.filter((f) => f.taggedSubjectId !== subjectId).map((f) => f.bbox)
+  // PII detection failing must not degrade into "serve it unmasked" — see
+  // detectPiiRegions, which throws rather than returning [] on a worker error.
   const piiRegions = await detectPiiRegions(original, `${photoId}.jpg`)
   const regions = [...otherFaces, ...piiRegions]
 
-  // Nobody else in frame and no PII — the original already shows only this person.
-  if (regions.length === 0) return { path: photo.storagePath, mimeType: photo.mimeType }
-
-  const blurred = await redactImage(original, regions, `${photoId}.jpg`)
-  await writeFile(cachePath, blurred)
-  return { path: cachePath, mimeType: 'image/jpeg' }
+  // Even with nothing to blur we materialise a separate derivative rather than
+  // handing back storagePath. Invariant 8 is easier to keep when no code path in
+  // the serving layer can name the original at all.
+  const derived = regions.length === 0 ? original : await redactImage(original, regions, `${photoId}.jpg`)
+  // No explicit scope: storage.scopeForPath derives the DEK from the path, so a
+  // per-person derivative is sealed under the same key as the session it belongs
+  // to and stays readable after a process restart.
+  await writeFile(cachePath, derived)
+  return { buffer: derived, mimeType: 'image/jpeg' }
 }
 
 export async function readFaceCrop(sessionId, faceId, admin) {
-  await loadSession(sessionId, admin)
+  const session = await loadSession(sessionId, admin)
+
+  // Matrix §B: crops exist so an agent can tag. Outside the TAGGING window there
+  // is no purpose for a close-up of a face, so there is no access.
+  if (admin.role === 'collectionAgent' && session.status !== 'TAGGING') {
+    throw new ApiError(403, `Face crops are readable during TAGGING only — this session is ${session.status}`)
+  }
+
   const face = await prisma.faceDetection.findFirst({
     where: { id: faceId, photo: { sessionId } },
   })
   if (!face?.cropPath) throw new ApiError(404, 'Face crop not found')
-  return { path: face.cropPath, mimeType: 'image/jpeg' }
+  return { buffer: await readFile(face.cropPath), mimeType: 'image/jpeg' }
 }
 
 export { TAGGABLE, CONSENT_VERDICT }

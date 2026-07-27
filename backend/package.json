@@ -8,12 +8,17 @@
     "start": "node src/server.js",
     "worker": "node --watch src/workers/recognition.worker.js",
     "worker:start": "node src/workers/recognition.worker.js",
+    "worker:redaction": "node src/workers/redaction.worker.js",
+    "worker:purge": "node src/workers/purge.worker.js",
+    "worker:retention": "node src/workers/retention.worker.js",
     "prisma:migrate": "prisma migrate dev",
     "prisma:generate": "prisma generate",
-    "prisma:seed": "node prisma/seed.js",
-    "prisma:seed-admin": "node prisma/seed-admin.js",
-    "prisma:seed-project": "node prisma/seed-project.js",
-    "prisma:seed-subjects": "node prisma/seed-subjects.js"
+    "bootstrap-admin": "node prisma/seed-admin.js",
+    "preflight": "node scripts/preflight.js",
+    "test": "node --test --test-concurrency=1 tests/**/*.test.js",
+    "test:security": "node --test --test-concurrency=1 tests/security/*.test.js",
+    "test:e2e": "node --test --test-concurrency=1 tests/e2e/*.test.js",
+    "fixtures:e2e": "node scripts/make-e2e-fixtures.js"
   },
   "dependencies": {
     "@prisma/client": "^6.3.1",

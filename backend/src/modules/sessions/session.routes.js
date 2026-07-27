@@ -3,13 +3,26 @@ import multer from 'multer'
 import { z } from 'zod'
 import { requireAdminAuth } from '../../middleware/requireAdminAuth.js'
 import { requireRole } from '../../middleware/requireRole.js'
-import { resolvePath } from '../../lib/storage.js'
+import { logAccess } from '../../middleware/logAccess.js'
+import { requireBreakGlass } from '../../middleware/requireBreakGlass.js'
 import * as sessionService from './session.service.js'
 
 export const sessionRoutes = Router()
 
 sessionRoutes.use(requireAdminAuth)
+// Deliberately unchanged and deliberately narrow. dataAdmin's break-glass path to
+// a raw original lives in sessionBreakGlassRoutes below, mounted as its own
+// router — widening this floor would have quietly opened every session route in
+// the file to a role the matrix admits to exactly one of them.
 sessionRoutes.use(requireRole('collectionAgent', 'super_admin'))
+
+// Serving helper. Media leaves this process as a decrypted buffer and never as a
+// path handed to res.sendFile — sendFile would stream the sealed bytes straight
+// off disk, bypassing both decryption and every check in session.service.
+function sendMedia(res, { buffer, mimeType }) {
+  res.set('Cache-Control', 'private, no-store')
+  res.type(mimeType).send(buffer)
+}
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -128,49 +141,70 @@ sessionRoutes.delete('/:sessionId/photos/:photoId', async (req, res, next) => {
   }
 })
 
-sessionRoutes.get('/:sessionId/photos/:photoId/file', async (req, res, next) => {
-  try {
-    const { path, mimeType } = await sessionService.readPhotoFile(
-      uuid.parse(req.params.sessionId),
-      uuid.parse(req.params.photoId),
-      req.admin,
-    )
-    // Photos are content-addressed by sha256 — they never change, so cache hard.
-    res.set('Cache-Control', 'private, max-age=86400, immutable')
-    res.type(mimeType).sendFile(resolvePath(path), { root: process.cwd(), maxAge: 86400000 })
-  } catch (err) {
-    next(err)
-  }
-})
+// logAccess sits between the guard and the handler on every media route: the
+// AccessEvent is written before session.service is ever asked to decrypt, and if
+// that write fails the handler never runs (invariant 6).
+//
+// Caching also changed here. These responses used to be `max-age=86400,
+// immutable`, which meant a browser could re-display a face for a day with no
+// second AccessEvent — and could still display it after the subject erased.
+// no-store is the only setting consistent with logging every read.
+sessionRoutes.get(
+  '/:sessionId/photos/:photoId/file',
+  logAccess('PHOTO', (req) => req.params.photoId, { purpose: 'COLLECTION' }),
+  async (req, res, next) => {
+    try {
+      sendMedia(
+        res,
+        await sessionService.readPhotoFile(
+          uuid.parse(req.params.sessionId),
+          uuid.parse(req.params.photoId),
+          req.admin,
+        ),
+      )
+    } catch (err) {
+      next(err)
+    }
+  },
+)
 
-sessionRoutes.get('/:sessionId/photos/:photoId/redacted', async (req, res, next) => {
-  try {
-    const { path, mimeType } = await sessionService.readRedactedPhoto(
-      uuid.parse(req.params.sessionId),
-      uuid.parse(req.params.photoId),
-      req.admin,
-    )
-    res.set('Cache-Control', 'private, max-age=86400, immutable')
-    res.type(mimeType).sendFile(resolvePath(path), { root: process.cwd(), maxAge: 86400000 })
-  } catch (err) {
-    next(err)
-  }
-})
+sessionRoutes.get(
+  '/:sessionId/photos/:photoId/redacted',
+  logAccess('REDACTED_PHOTO', (req) => req.params.photoId, { purpose: 'COLLECTION' }),
+  async (req, res, next) => {
+    try {
+      sendMedia(
+        res,
+        await sessionService.readRedactedPhoto(
+          uuid.parse(req.params.sessionId),
+          uuid.parse(req.params.photoId),
+          req.admin,
+        ),
+      )
+    } catch (err) {
+      next(err)
+    }
+  },
+)
 
-sessionRoutes.get('/:sessionId/faces/:faceId/crop', async (req, res, next) => {
-  try {
-    const { path, mimeType } = await sessionService.readFaceCrop(
-      uuid.parse(req.params.sessionId),
-      uuid.parse(req.params.faceId),
-      req.admin,
-    )
-    // Crops are deterministic from the source photo — cache hard.
-    res.set('Cache-Control', 'private, max-age=86400, immutable')
-    res.type(mimeType).sendFile(resolvePath(path), { root: process.cwd(), maxAge: 86400000 })
-  } catch (err) {
-    next(err)
-  }
-})
+sessionRoutes.get(
+  '/:sessionId/faces/:faceId/crop',
+  logAccess('FACE_CROP', (req) => req.params.faceId, { purpose: 'TAGGING' }),
+  async (req, res, next) => {
+    try {
+      sendMedia(
+        res,
+        await sessionService.readFaceCrop(
+          uuid.parse(req.params.sessionId),
+          uuid.parse(req.params.faceId),
+          req.admin,
+        ),
+      )
+    } catch (err) {
+      next(err)
+    }
+  },
+)
 
 sessionRoutes.post('/:sessionId/end', async (req, res, next) => {
   try {
@@ -238,16 +272,18 @@ sessionRoutes.get('/:sessionId/people', async (req, res, next) => {
 
 sessionRoutes.get(
   '/:sessionId/people/:subjectId/photos/:photoId/redacted',
+  logAccess('REDACTED_PHOTO', (req) => req.params.photoId, { purpose: 'PER_PERSON_VIEW' }),
   async (req, res, next) => {
     try {
-      const { path, mimeType } = await sessionService.readPersonRedactedPhoto(
-        uuid.parse(req.params.sessionId),
-        uuid.parse(req.params.photoId),
-        uuid.parse(req.params.subjectId),
-        req.admin,
+      sendMedia(
+        res,
+        await sessionService.readPersonRedactedPhoto(
+          uuid.parse(req.params.sessionId),
+          uuid.parse(req.params.photoId),
+          uuid.parse(req.params.subjectId),
+          req.admin,
+        ),
       )
-      res.set('Cache-Control', 'private, max-age=86400, immutable')
-      res.type(mimeType).sendFile(resolvePath(path), { root: process.cwd(), maxAge: 86400000 })
     } catch (err) {
       next(err)
     }
@@ -301,3 +337,45 @@ sessionRoutes.post('/:sessionId/finalize', async (req, res, next) => {
     next(err)
   }
 })
+
+// ---------------------------------------------------------------------------
+// Break-glass raw media (matrix §C)
+// ---------------------------------------------------------------------------
+// Its own router, mounted ahead of sessionRoutes, so that admitting dataAdmin
+// here cannot leak into the rest of the session surface. The path is distinct
+// from the agent's `/file` route on purpose: two different bases for access
+// should not share one URL, or the audit trail cannot tell them apart.
+export const sessionBreakGlassRoutes = Router()
+
+// Guards are per-route, NOT router-level. `router.use()` here would run for every
+// request that enters this router — and because it is mounted at the same
+// /api/v1/sessions prefix as sessionRoutes, that is every session request, not
+// just the one route below. A router-level requireRole('dataAdmin') therefore
+// 403'd collection agents out of their own sessions entirely. The RBAC matrix
+// test caught it; nothing else would have until an agent tried to work.
+sessionBreakGlassRoutes.get(
+  '/:sessionId/photos/:photoId/raw',
+  requireAdminAuth,
+  requireRole('dataAdmin', 'super_admin'),
+  requireBreakGlass('PHOTO', (req) => sessionService.subjectsOnPhoto(req.params.photoId), {
+    resolveObjectId: (req) => req.params.photoId,
+  }),
+  async (req, res, next) => {
+    try {
+      // requireBreakGlass has already written the AccessEvent{breakGlass:true}
+      // and notified the DPO; reaching this handler means all four conditions
+      // held. It reads with a service identity because the caller is not the
+      // collecting agent and must not inherit that role's session checks.
+      sendMedia(
+        res,
+        await sessionService.readRawForDsar(
+          uuid.parse(req.params.sessionId),
+          uuid.parse(req.params.photoId),
+          req.breakGlass,
+        ),
+      )
+    } catch (err) {
+      next(err)
+    }
+  },
+)
