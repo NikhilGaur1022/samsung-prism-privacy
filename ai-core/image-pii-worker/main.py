@@ -36,9 +36,10 @@ _analyzer: AnalyzerEngine | None = None
 
 
 def get_ocr_engine() -> RapidOCR:
-    """Lazily builds the OCR engine. rapidocr-onnxruntime downloads its ONNX
-    models to a local cache on first use — that happens here, not at import
-    time, so /health stays cheap even before models are fetched."""
+    """Lazily builds the OCR engine. rapidocr-onnxruntime's ONNX weights ship
+    inside the wheel, so nothing is fetched here — but loading them into three
+    sessions is slow, and doing it at import time would make /health wait on
+    work it does not need."""
     global _ocr_engine
     if _ocr_engine is None:
         _ocr_engine = RapidOCR()

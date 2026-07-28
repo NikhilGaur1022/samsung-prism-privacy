@@ -262,6 +262,34 @@ curl -s -m 5 localhost:8002/health          # {"status":"ok"}
 Then put a real photo through `/detect-pii` — a healthy `/health` only proves the
 process booted, not that OCR and Presidio initialised.
 
+**The application half of this is already verified**, natively rather than in the
+container. Running the worker from its venv on 8002, a generated Indian-ID card
+(all identifiers fabricated) through `/detect-pii` returned 6 regions and 6
+entities, one per planted identifier:
+
+| Planted | Detected as |
+|---|---|
+| `4321 8765 2109` | `IN_AADHAAR` |
+| `ABCDE1234F` | `IN_PAN` |
+| `+91 98765 43210` | `PHONE_NUMBER` |
+| `MH12AB1234` | `IN_VEHICLE_REGISTRATION` |
+| `HDFC0001234` | `IFSC_CODE` |
+| `ravi.sharma@okhdfcbank` | `UPI_ID` |
+
+So RapidOCR loads its bundled weights, Presidio's `AnalyzerEngine` initialises,
+and every custom Indian recognizer fires. What the container build still has to
+prove is the *packaging*: that `libgl1`/`libglib2.0-0` satisfy opencv inside
+`python:3.11-slim`, and that the baked `en_core_web_sm` is found at run time.
+Those are the only two things the native run cannot tell you.
+
+**Gap found while verifying.** `ravi.sharma@example.com` on the same card was
+**not** detected. `PII_ENTITIES` in `pii_recognizers.py` is an allow-list, and
+`EMAIL_ADDRESS` is not on it, so Presidio's built-in email recognizer never runs
+even though it is loaded. An email address printed on a photographed document is
+personal data, and it currently survives redaction unblurred. One line fixes it;
+it was left alone because widening what gets blurred is a behaviour change, not
+part of §2.3. Decide and then either add it or write down why not.
+
 Two judgement calls in that Dockerfile worth knowing:
 
 - `python -m spacy download en_core_web_sm` is baked at **build** time. Presidio's

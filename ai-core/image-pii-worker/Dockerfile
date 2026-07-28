@@ -20,7 +20,7 @@ COPY main.py pii_recognizers.py ./
 
 # No model volume, unlike face-worker: rapidocr-onnxruntime ships its detection,
 # recognition and classification ONNX weights inside the wheel, so there is
-# nothing to fetch at runtime and nothing to cache. (The worker's README says
-# otherwise; it is out of date.)
+# nothing to fetch at runtime and nothing to cache. This means the image needs
+# no network at run time, only at build.
 EXPOSE 8002
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8002"]
