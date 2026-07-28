@@ -4,10 +4,9 @@
 gate is green (53/53), media is encrypted at rest, and the database has been
 cleaned of test residue.
 
-**One thing remains** — §2.3, blocked on this machine only: Docker Desktop is
-installed but its engine cannot start until WSL2 is enabled, which needs an
-elevated shell and a reboot. §2.1 and §2.2 are done.
-None of them is a feature. Do them, verify, stop.
+**§2 is done.** §2.1, §2.2 and §2.3 are all complete and verified on this
+machine. What remains is §3 — the five-check manual pass, which needs a human in
+the portals and cannot be automated.
 
 > The previous handoff said the API listens on **3000**. It does not — `.env` sets
 > `PORT=4000`. Anything in older notes citing 3000 is wrong.
@@ -42,7 +41,7 @@ Do not re-verify these. They were run and observed this session.
 | Redis | 6379 | Memurai `Memurai` Windows service, auto-start |
 | Qdrant | 6333 | `C:\Users\gaur3\Desktop\qdrant-portable\qdrant.exe` |
 | face-worker | 8001 | `face-worker/.venv/Scripts/python.exe -m uvicorn main:app --port 8001` |
-| image-pii-worker | 8002 | `ai-core/image-pii-worker/.venv/Scripts/python.exe -m uvicorn main:app --port 8002` |
+| image-pii-worker | 8002 | `cd backend && docker compose up -d image-pii-worker` (venv fallback: `ai-core/image-pii-worker/.venv/Scripts/python.exe -m uvicorn main:app --port 8002`) |
 
 Workers: `worker:start` (recognition), `worker:redaction`, `worker:purge`,
 `worker:retention`. There is no `worker:recognition` script.
@@ -124,8 +123,8 @@ have used. Relevant on every clean checkout, since the fixtures are gitignored.
 ### image-pii-worker is now containerised
 
 `ai-core/image-pii-worker/Dockerfile` added and wired into
-`backend/docker-compose.yml`. **It has not been built** — Docker is not installed
-on this machine. See §2.3.
+`backend/docker-compose.yml`. It has since been built, started and exercised with
+a real image — see §2.3, including the two port collisions it introduces.
 
 ---
 
@@ -237,58 +236,71 @@ shell — the MSI custom action needs to create a temp directory and fails with
 Do **not** put the team on one shared cloud Redis. BullMQ queue state is global,
 so two developers on one instance steal each other's jobs.
 
-### 2.3 Build and verify the image-pii-worker container
+### 2.3 Build and verify the image-pii-worker container — **done**
 
-The Dockerfile is written but **unbuilt and unverified**. Docker Desktop 4.84.0 is
-now installed (`%LOCALAPPDATA%\Programs\DockerDesktop`, a per-user install — it is
-not under `C:\Program Files`, and its `docker.exe` lives in
-`resources\bin`), but the engine will not start: this is Windows 11 **Home**, which
-has no Hyper-V backend, and WSL is not installed, so `docker info` reports
-`Docker Desktop is unable to start`. CPU virtualization is already on
-(`HypervisorPresent: True`), so WSL2 is the only missing piece. From an elevated
-terminal, then reboot:
+Built, started and exercised. `docker compose build image-pii-worker` succeeds on
+`python:3.11-slim`, the container answers `/health` with `{"status":"ok"}`, and a
+generated Indian-ID card (every identifier fabricated) through `/detect-pii`
+returned 7 regions and 7 entities:
 
-```powershell
-wsl --install --no-distribution
-```
+| Planted | Detected as | bbox |
+|---|---|---|
+| `4321 8765 2109` | `IN_AADHAAR` | `41,155,462,184` |
+| `ABCDE1234F` | `IN_PAN` | `42,212,321,237` |
+| `+91 98765 43210` | `PHONE_NUMBER` **and** `IN_AADHAAR` | `42,265,404,294` |
+| `MH12AB1234` | `IN_VEHICLE_REGISTRATION` | `42,377,362,404` |
+| `HDFC0001234` | `IFSC_CODE` | `42,431,344,459` |
+| `ravi.sharma@okhdfcbank` | `UPI_ID` | `42,484,477,517` |
 
-After the reboot, launch Docker Desktop once and the build below should run:
+That closes the two things only a container run could prove: `libgl1` and
+`libglib2.0-0` do satisfy opencv inside the slim image, and the `en_core_web_sm`
+baked at build time is found at run time. Reproduce with:
 
 ```bash
 cd backend && docker compose build image-pii-worker && docker compose up -d image-pii-worker
 curl -s -m 5 localhost:8002/health          # {"status":"ok"}
 ```
 
-Then put a real photo through `/detect-pii` — a healthy `/health` only proves the
-process booted, not that OCR and Presidio initialised.
+Getting here needed WSL2. Docker Desktop 4.84.0 installs to
+`%LOCALAPPDATA%\Programs\DockerDesktop` — a per-user install, not under
+`C:\Program Files`, with `docker.exe` under `resources\bin`. On Windows 11 **Home**
+there is no Hyper-V backend to fall back on, so with WSL absent the engine reports
+`Docker Desktop is unable to start` and nothing else works. `wsl --install`, a
+reboot, and one launch of Docker Desktop fixes it; CPU virtualization was already
+enabled in firmware.
 
-**The application half of this is already verified**, natively rather than in the
-container. Running the worker from its venv on 8002, a generated Indian-ID card
-(all identifiers fabricated) through `/detect-pii` returned 6 regions and 6
-entities, one per planted identifier:
+#### Two port collisions this introduces
 
-| Planted | Detected as |
-|---|---|
-| `4321 8765 2109` | `IN_AADHAAR` |
-| `ABCDE1234F` | `IN_PAN` |
-| `+91 98765 43210` | `PHONE_NUMBER` |
-| `MH12AB1234` | `IN_VEHICLE_REGISTRATION` |
-| `HDFC0001234` | `IFSC_CODE` |
-| `ravi.sharma@okhdfcbank` | `UPI_ID` |
+Both are consequences of the container now existing, and neither is hypothetical.
 
-So RapidOCR loads its bundled weights, Presidio's `AnalyzerEngine` initialises,
-and every custom Indian recognizer fires. What the container build still has to
-prove is the *packaging*: that `libgl1`/`libglib2.0-0` satisfy opencv inside
-`python:3.11-slim`, and that the baked `en_core_web_sm` is found at run time.
-Those are the only two things the native run cannot tell you.
+1. **Do not run `docker compose up -d` with no service name on this machine.** The
+   `redis` service binds 6379, which Memurai already holds (§2.2). Bring services
+   up by name.
+2. `image-pii-worker` is `restart: unless-stopped`, so it now starts on boot and
+   owns 8002. The venv worker in the ports table binds the same port — run one or
+   the other, never both. `docker compose stop image-pii-worker` frees it.
 
-**Gap found while verifying.** `ravi.sharma@example.com` on the same card was
-**not** detected. `PII_ENTITIES` in `pii_recognizers.py` is an allow-list, and
-`EMAIL_ADDRESS` is not on it, so Presidio's built-in email recognizer never runs
-even though it is loaded. An email address printed on a photographed document is
-personal data, and it currently survives redaction unblurred. One line fixes it;
-it was left alone because widening what gets blurred is a behaviour change, not
-part of §2.3. Decide and then either add it or write down why not.
+#### Two findings from the verification
+
+**An email address is not redacted.** `ravi.sharma@example.com` on the same card
+was not detected. `PII_ENTITIES` in `pii_recognizers.py` is an allow-list and
+`EMAIL_ADDRESS` is not on it, so Presidio's built-in email recognizer is loaded
+but never consulted. An email printed on a photographed document is personal data
+and currently survives redaction unblurred. One line fixes it. It was left alone
+because widening what gets blurred is a behaviour change, not part of §2.3 —
+decide, then either add it or write down why not.
+
+**A phone number also matches as an Aadhaar, and that is intended.** The container
+OCRs `+91 98765 43210` without its spaces, leaving the 12-digit run `919876543210`.
+`AadhaarRecognizer.is_valid` checks only for 12 digits with a leading digit other
+than 0 or 1 — there is no Verhoeff check digit — so it matches. **Do not "fix"
+this by adding the checksum.** OCR mangles digits routinely, and a checksum would
+turn every mangled real Aadhaar into a missed blur; this service states outright
+that a missed blur is worse than an extra one, which is also why `SCORE_THRESHOLD`
+sits at 0.4 rather than Presidio's 0.35 default. Both entities carry the identical
+bbox, so the picture is blurred once either way. It only matters if something
+downstream counts entity *types* — an audit record asserting "this photo contained
+an Aadhaar" would be wrong. Nothing does that today.
 
 Two judgement calls in that Dockerfile worth knowing:
 
@@ -527,8 +539,8 @@ test *is* this table) · `03_FILE_IMPLEMENTATION_PLAN.md` ·
 [x]      anon/authenticated revoked; preflight postgrest-exposure → ok
 [x] 2.2  Redis 7.2.5 via Memurai service on 6379; old redis 5 stopped
 [x]      preflight redis → ok; 17/17 GREEN
-[ ] 2.3  image-pii-worker image built; /health ok; a real photo through /detect-pii
-[ ]      ← blocked: needs `wsl --install` + reboot before the engine starts
+[x] 2.3  image-pii-worker image built; /health ok; a real photo through /detect-pii
+[x]      WSL2 enabled, Docker engine 29.6.2 up, container on 8002
 [ ] 3    manual pass, all five checks
 ```
 

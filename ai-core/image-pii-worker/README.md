@@ -26,11 +26,23 @@ cache on first use. They are not, and no model volume is mounted for them.)
 
 ## Run
 
-Run from this directory, like face-worker:
+The container is the verified path — the image is built and exercised:
+
+```
+cd ../../backend && docker compose up -d image-pii-worker
+```
+
+Bring it up by name. A bare `docker compose up -d` also starts the `redis`
+service on 6379, which collides with a native Redis or Memurai.
+
+Running from this directory, like face-worker, still works and is the fallback:
 
 ```
 uvicorn main:app --port 8002
 ```
+
+Only one of the two at a time — both bind 8002, and the container is
+`restart: unless-stopped`, so it comes back on boot.
 
 ## Endpoints
 
