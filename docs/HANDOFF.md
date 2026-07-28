@@ -48,12 +48,43 @@ Workers: `worker:start` (recognition), `worker:redaction`, `worker:purge`,
 
 ### Admin access
 
-All admin accounts were deleted and rebuilt this session, because
-`/auth/admin/invite` is `super_admin`-only and no `super_admin` existed. There is
-now exactly one admin — `chaitanyakhanna14@gmail.com`, `super_admin`, status
-`INVITED` until the single-use accept link is used. **Every other role has to be
-invited from the portal by that account.** If the link was lost, delete the admin
-row and re-run `npm run bootstrap-admin -- <email>`.
+All admin accounts were deleted and rebuilt, because `/auth/admin/invite` is
+`super_admin`-only and no `super_admin` existed. There is now exactly one admin —
+**`nikhilgaur1022@gmail.com`**, `super_admin`, status `INVITED` until the
+single-use accept link is used, which expires **2026-08-04**. **Every other role
+has to be invited from the portal by that account.**
+
+> A different address held this role until 2026-07-29. That account was deleted
+> and replaced. Its `ADMIN_BOOTSTRAPPED` row survives in `audit_log` — the ledger
+> is append-only, so deleting an account does not delete the record of it having
+> existed, which is the intended behaviour and not something to clean up.
+
+**"Exactly one" was false for most of a day, and worth understanding.** The e2e
+suite creates admins named `e2e-<hash>-<role>@test.invalid` and its teardown does
+not remove them. After the §2.1 gate runs the table held **21** rows: the one real
+account and 20 fixtures, four of which were `super_admin` with status `ACTIVE`.
+They carry no `passwordHash`, so none could be logged into, but they were live
+privileged rows in the shipped database and they list in the portal. Check with:
+
+```bash
+cd backend && node -e "import('./src/config/prisma.js').then(async({prisma})=>{console.log(await prisma.adminUser.count());await prisma.\$disconnect()})"
+```
+
+If it is not 1, run `node scripts/reset-bootstrap-admin.js` and bootstrap again.
+`bootstrap-admin` refuses to run while *any* admin row exists, so the reset is not
+optional — that guard is what makes the fixtures block the rebuild.
+
+**Deleting an admin is not as cheap as it looks.** `Session.agent` is
+`onDelete: Cascade`, so removing an admin who ran a session takes the session, its
+photos and every derived row with it. `reset-bootstrap-admin.js` refuses to run in
+that case rather than guessing. `Project.owner` is `SetNull`, so projects survive
+the delete as orphans — which is why **4 `E2E Project <hash>` rows now sit in the
+database with no owner.** They are gate residue and should be removed before
+anything ships; they were left in place because the authorisation given covered
+`admin_users` only.
+
+If the accept link is lost, delete the admin row and re-run
+`npm run bootstrap-admin -- <email>`.
 
 ---
 
@@ -448,7 +479,7 @@ server.js    listen only; the split exists so the RBAC test mounts the real app
 config/      prisma.js · qdrant.js · redis.js
 modules/     audit auth-admin auth-subject consent consentTemplates dashboard
              dsar enrollment handoff join me projects sessions subjects
-workers/     recognition · redaction · purge · retention
+workers/     recognition · redaction · purge · retention 
 ```
 
 `src/lib/` — the pieces most work touches:
@@ -476,6 +507,7 @@ workers/     recognition · redaction · purge · retention
 | `sql/provision-app-role.sql` | §2.1 — run; re-runnable per environment |
 | `run-sql.js` | applies a `.sql` file without `psql`; understands `-v name=value` and `:'name'` |
 | `verify-app-role.js` | proves the connected role cannot edit the evidentiary tables |
+| `reset-bootstrap-admin.js` | empties `admin_users` so `bootstrap-admin` can run again; backs up to `scratchpad/` first, refuses if any doomed admin owns a session |
 | `migrate-media-encrypt.js` | the sealing sweep; idempotent, resumable |
 | `make-e2e-fixtures.js` | rebuilds the gitignored `*.jpg` fixtures; unseals as it reads |
 

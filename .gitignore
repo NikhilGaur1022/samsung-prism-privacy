@@ -28,6 +28,11 @@ dist-ssr
 !.env.example
 
 __pycache__/
+
+# Pre-delete database backups land here. They are verbatim row dumps -- admin
+# email addresses, subject records -- so they are exactly what must not be
+# pushed. Local only, by design.
+scratchpad/
 *.py[cod]
 *$py.class
 .venv/
