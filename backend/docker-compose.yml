@@ -27,6 +27,16 @@ services:
       - face_models:/models
     restart: unless-stopped
 
+  # Not optional: redaction fails closed without it (PiiUnavailableError ->
+  # piiStatus=DEFERRED), so a stack missing this one silently stops publishing
+  # redacted frames rather than publishing unmasked ones.
+  image-pii-worker:
+    build: ../ai-core/image-pii-worker
+    container_name: prism-image-pii-worker
+    ports:
+      - "8002:8002"
+    restart: unless-stopped
+
 volumes:
   qdrant_storage:
   redis_data:
