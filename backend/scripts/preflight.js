@@ -173,6 +173,26 @@ async function checkDatabase() {
       pass('db-role', `connected as least-privilege role "${role?.name}"`)
     }
 
+    // Supabase publishes every table in `public` through PostgREST, and the
+    // `anon` key that reaches it is public by construction — it ships in the
+    // portal bundles. If anon holds table privileges, the entire corpus is
+    // readable with a key that is not a secret, whatever the API layer enforces.
+    // Nothing here uses PostgREST, so the only correct number is zero.
+    const exposed = await prisma.$queryRawUnsafe(`
+      SELECT grantee, count(DISTINCT table_name)::int AS tables
+      FROM information_schema.role_table_grants
+      WHERE table_schema = 'public' AND grantee IN ('anon', 'authenticated')
+      GROUP BY grantee
+    `)
+    if (exposed.length > 0) {
+      const detail = exposed
+        .map((r) => `${r.grantee} can reach ${r.tables} table(s)`)
+        .join('; ')
+      fail('postgrest-exposure', `${detail} — the anon key is public and bypasses the API entirely`)
+    } else {
+      pass('postgrest-exposure', 'anon and authenticated hold no table privileges')
+    }
+
     const pending = await prisma.$queryRawUnsafe(
       `SELECT count(*)::int AS n FROM "_prisma_migrations" WHERE finished_at IS NULL`,
     )
