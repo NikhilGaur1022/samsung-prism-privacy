@@ -4,8 +4,9 @@
 gate is green (53/53), media is encrypted at rest, and the database has been
 cleaned of test residue.
 
-**Two things remain** — §2.2 and §2.3, both blocked on this machine only (no
-elevation, no Docker). §2.1 is done.
+**One thing remains** — §2.3, blocked on this machine only: Docker Desktop is
+installed but its engine cannot start until WSL2 is enabled, which needs an
+elevated shell and a reboot. §2.1 and §2.2 are done.
 None of them is a feature. Do them, verify, stop.
 
 > The previous handoff said the API listens on **3000**. It does not — `.env` sets
@@ -26,7 +27,7 @@ Do not re-verify these. They were run and observed this session.
 | Gate | `53/53`, exit 0, under sealed media |
 | Portals | both build clean |
 | `/health/deep` | `{"postgres":true,"qdrant":true,"redis":true}` on **:4000** |
-| Preflight (dev) | 17 checks — 16 pass, 1 fail (Redis version, §2.2) |
+| Preflight (dev) | 17 checks — 17 pass, 0 fail. GREEN |
 | Database | 3 subjects (the owner's own `niga` accounts) + their 20 enrollments, 1 admin. Zero projects, sessions, photos, links |
 | Media | `MEDIA_KEK` set, 356 blobs swept and sealed, `MEDIA_REQUIRE_SEALED=on` |
 
@@ -38,7 +39,7 @@ Do not re-verify these. They were run and observed this session.
 | admin-portal | 5180 | `cd admin-portal && npm run dev` |
 | user-portal | 5173 | `cd user-portal && npm run dev` |
 | Postgres | — | Supabase `wblmtdrcohhjfyqvvobl`, remote |
-| Redis | 6379 | see §2.2 |
+| Redis | 6379 | Memurai `Memurai` Windows service, auto-start |
 | Qdrant | 6333 | `C:\Users\gaur3\Desktop\qdrant-portable\qdrant.exe` |
 | face-worker | 8001 | `face-worker/.venv/Scripts/python.exe -m uvicorn main:app --port 8001` |
 | image-pii-worker | 8002 | `ai-core/image-pii-worker/.venv/Scripts/python.exe -m uvicorn main:app --port 8002` |
@@ -211,29 +212,47 @@ Supabase MCP server needs an access token that was not present. Point
 pointing at the owner — `prisma migrate deploy` and `scripts/sql/*` need it and
 `prism_app` is deliberately not allowed to run them.
 
-### 2.2 Redis ≥ 6.2 for the team
+### 2.2 Redis ≥ 6.2 for the team — **done on this machine**
 
-The local binary is 5.0.14.1, below BullMQ's 6.2 floor. It is a warning, not a
-crash — all four workers do run — but deferred retries are not trustworthy on it.
+Was 5.0.14.1, below BullMQ's 6.2 floor. Now **7.2.5** via Memurai Developer
+Edition, running as the `Memurai` Windows service on 6379 with `StartType
+Automatic`. Preflight's `redis` check passes, taking the suite to 17/17 GREEN.
 
-`backend/docker-compose.yml` already pins `redis:7.4-alpine`, and `.env` already
-points at `redis://localhost:6379`, so for anyone with Docker this is a drop-in:
+The old `C:\Users\gaur3\redis\redis-server.exe` (5.0.14.1) is still on disk and is
+what has to stay stopped — it binds the same port, and whichever process wins 6379
+is the one BullMQ gets. Memurai's installer refuses to complete while it holds the
+port, which is what produced exit code 1603 on the first attempt.
+
+For the rest of the team, either route reaches the same floor:
 
 ```bash
-cd backend && docker compose up -d redis qdrant
+winget install Memurai.MemuraiDeveloper           # native Windows service
+cd backend && docker compose up -d redis qdrant   # redis:7.4-alpine, already pinned
 ```
 
-For Windows machines without Docker: Memurai Developer Edition — free, native
-Windows service, Redis 7.x wire-compatible, listens on 6379
-(`winget install Memurai.MemuraiDeveloper`).
+Run the winget install from a real elevated terminal, not through a sandboxed
+shell — the MSI custom action needs to create a temp directory and fails with
+`SFXCA: Failed to create temp directory. Error code 5` if it cannot.
 
 Do **not** put the team on one shared cloud Redis. BullMQ queue state is global,
 so two developers on one instance steal each other's jobs.
 
 ### 2.3 Build and verify the image-pii-worker container
 
-The Dockerfile is written but **unbuilt and unverified** — Docker was not
-available. It needs one run to confirm:
+The Dockerfile is written but **unbuilt and unverified**. Docker Desktop 4.84.0 is
+now installed (`%LOCALAPPDATA%\Programs\DockerDesktop`, a per-user install — it is
+not under `C:\Program Files`, and its `docker.exe` lives in
+`resources\bin`), but the engine will not start: this is Windows 11 **Home**, which
+has no Hyper-V backend, and WSL is not installed, so `docker info` reports
+`Docker Desktop is unable to start`. CPU virtualization is already on
+(`HypervisorPresent: True`), so WSL2 is the only missing piece. From an elevated
+terminal, then reboot:
+
+```powershell
+wsl --install --no-distribution
+```
+
+After the reboot, launch Docker Desktop once and the build below should run:
 
 ```bash
 cd backend && docker compose build image-pii-worker && docker compose up -d image-pii-worker
@@ -478,8 +497,10 @@ test *is* this table) · `03_FILE_IMPLEMENTATION_PLAN.md` ·
 [x]      world.js teardown narrowed, no longer deletes deletion_certificates
 [x]      npm test → 53/53 after the role switch
 [x]      anon/authenticated revoked; preflight postgrest-exposure → ok
-[ ] 2.2  Redis ≥6.2 on every developer machine   ← needs an elevated shell
+[x] 2.2  Redis 7.2.5 via Memurai service on 6379; old redis 5 stopped
+[x]      preflight redis → ok; 17/17 GREEN
 [ ] 2.3  image-pii-worker image built; /health ok; a real photo through /detect-pii
+[ ]      ← blocked: needs `wsl --install` + reboot before the engine starts
 [ ] 3    manual pass, all five checks
 ```
 
