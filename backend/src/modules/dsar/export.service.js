@@ -223,7 +223,13 @@ export async function buildAccessPackage(dsarRequestId, admin = null) {
 
   const archive = createZip(files)
   const storagePath = `dsar/${dsarRequestId}/package.zip`
-  await writeFile(storagePath, archive, { scope: 'export', scopeId: dsarRequestId })
+  // The export DEK is minted here and exists nowhere but the evidence row, wrapped
+  // under the KEK. Dropping that field is what makes the package unrecoverable at
+  // expiry — see expirePackages.
+  const { wrapped } = await writeFile(storagePath, archive, {
+    scope: 'export',
+    scopeId: dsarRequestId,
+  })
 
   const contentHash = createHash('sha256').update(archive).digest('hex')
   const rawToken = randomBytes(32).toString('base64url')
@@ -241,6 +247,7 @@ export async function buildAccessPackage(dsarRequestId, admin = null) {
       createdByAdminId: admin?.id ?? null,
       payload: {
         tokenHash: tokenHash(rawToken),
+        wrappedKey: wrapped ? wrapped.toString('base64') : null,
         expiresAt: expiresAt.toISOString(),
         consumedAt: null,
         sizeBytes: archive.length,
@@ -387,7 +394,11 @@ export async function downloadPackage(dsarRequestId, token, { req = null, subjec
     req,
   })
 
-  const buffer = await readFile(evidence.storagePath, { scope: 'export', scopeId: dsarRequestId })
+  const buffer = await readFile(evidence.storagePath, {
+    scope: 'export',
+    scopeId: dsarRequestId,
+    wrapped: payload.wrappedKey ? Buffer.from(payload.wrappedKey, 'base64') : undefined,
+  })
   return { buffer, filename: `prism-data-${dsarRequestId}.zip` }
 }
 
@@ -406,9 +417,12 @@ export async function expirePackages(now = new Date()) {
     if (!(await fileExists(item.storagePath))) continue
 
     await shredFile(item.storagePath)
+    // Drop the wrapped DEK as well as the bytes: shredding alone leaves a key for
+    // an object, and dropping the key alone leaves an object for a key.
+    const { wrappedKey: _dropped, ...rest } = item.payload ?? {}
     await prisma.dsarEvidence.update({
       where: { id: item.id },
-      data: { payload: { ...item.payload, shreddedAt: now.toISOString() } },
+      data: { payload: { ...rest, wrappedKey: null, shreddedAt: now.toISOString() } },
     })
     expired += 1
   }

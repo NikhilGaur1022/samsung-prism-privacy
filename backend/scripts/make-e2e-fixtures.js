@@ -28,6 +28,10 @@ import { readdir, readFile, writeFile, mkdir } from 'node:fs/promises'
 import path from 'node:path'
 import sharp from 'sharp'
 
+import { isSealed, openBlob, readHeader } from '../src/lib/blobCrypto.js'
+import { derivePathKey, kekAvailable } from '../src/lib/keyring.js'
+import { scopeForPath } from '../src/lib/storage.js'
+
 const FACE_SERVICE_URL = process.env.FACE_SERVICE_URL ?? 'http://localhost:8001'
 const args = process.argv.slice(2)
 const argOf = (flag, fallback) => {
@@ -48,6 +52,24 @@ async function detect(buffer, filename) {
 }
 
 const cosine = (a, b) => a.reduce((sum, v, i) => sum + v * b[i], 0)
+
+// The corpus under STORAGE_ROOT is sealed once MEDIA_KEK is set and the
+// migrate-media-encrypt sweep has run, so a bare fs read here would hand the face
+// service ciphertext and find no faces at all. Unseal with the same path-scoped
+// key storage.js would have used, rather than routing through storage.readFile —
+// --source may point somewhere that is not STORAGE_ROOT.
+async function readMedia(absolutePath, relativePath) {
+  const buffer = await readFile(absolutePath)
+  if (!isSealed(buffer)) return buffer
+  if (!kekAvailable()) {
+    throw new Error(
+      `${relativePath} is sealed but MEDIA_KEK is unset — export it before rebuilding fixtures`,
+    )
+  }
+  const { scopeId } = scopeForPath(relativePath)
+  const { key, keyId } = derivePathKey(scopeId)
+  return openBlob(buffer, key, readHeader(buffer).keyId ?? keyId)
+}
 
 async function* candidates(root) {
   let sessions = []
@@ -80,9 +102,10 @@ async function main() {
     if (seenHashes.has(key)) continue
     seenHashes.add(key)
 
-    const buffer = await readFile(file)
+    let buffer
     let faces
     try {
+      buffer = await readMedia(file, path.relative(SOURCE, file))
       faces = await detect(buffer, key)
     } catch (err) {
       console.error(`  ! ${key}: ${err.message}`)

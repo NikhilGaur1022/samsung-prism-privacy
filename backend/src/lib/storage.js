@@ -4,6 +4,7 @@ import path from 'node:path'
 
 import { HEADER_BYTES, MAGIC, isSealed, openBlob, sealBlob } from './blobCrypto.js'
 import {
+  createExportKey,
   derivePathKey,
   deriveProjectKey,
   getSubjectKey,
@@ -74,8 +75,11 @@ async function keyFor(relativePath, options) {
       return deriveProjectKey(scopeId)
     case 'subject':
       return getSubjectKey(scopeId)
+    // An export key is minted per package and never derived, so it can be
+    // destroyed with the job. A write has nothing to open yet; the caller has to
+    // persist the returned `wrapped` and hand it back on read.
     case 'export':
-      return openExportKey(wrapped)
+      return wrapped ? openExportKey(wrapped) : createExportKey()
     case 'path':
     default:
       return derivePathKey(scopeId)
@@ -88,8 +92,10 @@ async function keyFor(relativePath, options) {
  * @param {string} relativePath
  * @param {Buffer} buffer plaintext
  * @param {{scope?: 'project'|'subject'|'export'|'path', scopeId?: string, wrapped?: Buffer}} [options]
- * @returns {Promise<{fullPath: string, keyId: string|null, encrypted: boolean}>} keyId belongs in
- *          the row's `encKeyId` column so a later key rotation knows what it is looking at.
+ * @returns {Promise<{fullPath: string, keyId: string|null, encrypted: boolean, wrapped?: Buffer}>}
+ *          keyId belongs in the row's `encKeyId` column so a later key rotation knows what it is
+ *          looking at. `wrapped` is present only for scope 'export' — it is the KEK-wrapped DEK,
+ *          and losing it makes the object permanently unreadable, which is the point.
  */
 export async function writeFile(relativePath, buffer, options) {
   const fullPath = path.join(ROOT, relativePath)
@@ -100,13 +106,13 @@ export async function writeFile(relativePath, buffer, options) {
     return { fullPath, keyId: null, encrypted: false }
   }
 
-  const { key, keyId } = await keyFor(relativePath, options)
+  const { key, keyId, wrapped } = await keyFor(relativePath, options)
   try {
     await fs.writeFile(fullPath, sealBlob(buffer, key, keyId))
   } finally {
     zeroKey(key)
   }
-  return { fullPath, keyId, encrypted: true }
+  return { fullPath, keyId, encrypted: true, wrapped }
 }
 
 /**
