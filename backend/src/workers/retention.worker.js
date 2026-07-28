@@ -38,7 +38,7 @@ async function sweepOriginals() {
       storagePath: { not: '' },
       redactedPath: { not: null },
       piiStatus: { in: ['CLEAN', 'MASKED'] },
-      session: { status: 'ARCHIVED', updatedAt: { lt: cutoff } },
+      session: { is: { status: 'ARCHIVED', archivedAt: { lt: cutoff } } },
     },
     select: { id: true, storagePath: true, sessionId: true },
     take: 500,
@@ -65,7 +65,7 @@ async function sweepOriginals() {
   const blocked = await prisma.photo.count({
     where: {
       redactedPath: null,
-      session: { status: 'ARCHIVED', updatedAt: { lt: cutoff } },
+      session: { is: { status: 'ARCHIVED', archivedAt: { lt: cutoff } } },
     },
   })
 
