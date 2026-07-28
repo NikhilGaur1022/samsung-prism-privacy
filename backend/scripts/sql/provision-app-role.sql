@@ -27,9 +27,17 @@ BEGIN;
 -- ---------------------------------------------------------------------------
 -- 1. The role
 -- ---------------------------------------------------------------------------
--- NOSUPERUSER and NOBYPASSRLS are the whole point of the exercise and are stated
--- explicitly rather than left to the defaults, so that reading this file tells
--- you what is guaranteed.
+-- NOSUPERUSER and NOBYPASSRLS are the whole point of the exercise, but they
+-- cannot be *written* here: Postgres requires SUPERUSER to set either attribute
+-- at all, in any direction, and the platform owner this file runs as does not
+-- have it. Supabase's `postgres` holds BYPASSRLS and CREATEROLE but is not a
+-- superuser, so `ALTER ROLE ... NOSUPERUSER` fails with 42501 even though it
+-- would be a no-op.
+--
+-- Both attributes default to off on a freshly created role, so the guarantee is
+-- obtained by not asking for them and then asserted below. An assertion is in
+-- fact the stronger form: it also catches a prism_app that already exists and
+-- was granted something it should not have.
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'prism_app') THEN
@@ -40,7 +48,26 @@ BEGIN
 END
 $$;
 
-ALTER ROLE prism_app NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION;
+-- Settable without SUPERUSER, and worth stating.
+ALTER ROLE prism_app NOCREATEDB NOCREATEROLE;
+
+DO $$
+DECLARE
+  r record;
+BEGIN
+  SELECT rolsuper, rolbypassrls, rolreplication
+    INTO r
+    FROM pg_roles
+   WHERE rolname = 'prism_app';
+
+  IF r.rolsuper OR r.rolbypassrls OR r.rolreplication THEN
+    RAISE EXCEPTION
+      'prism_app must not hold SUPERUSER/BYPASSRLS/REPLICATION (super=%, bypassrls=%, replication=%). '
+      'Setting them off requires a real superuser; drop the role and re-run, or fix it from the platform console.',
+      r.rolsuper, r.rolbypassrls, r.rolreplication;
+  END IF;
+END
+$$;
 
 -- ---------------------------------------------------------------------------
 -- 2. Schema and sequence access

@@ -273,9 +273,16 @@ export async function destroyWorld(world) {
 
   if (subjectIds.length) {
     // DeletionCertificate relates to the DSAR request, not to the purge job, so
-    // the requests are the handle for all of it. Everything below cascades from
-    // DsarRequest, but it is spelled out to keep teardown independent of which
-    // FKs happen to carry ON DELETE CASCADE today.
+    // the requests are the handle for all of it.
+    //
+    // Teardown deliberately does NOT delete deletion_certificates. The app role
+    // has no DELETE on that table — it is evidence, and the whole point of
+    // provision-app-role.sql is that nothing running as the application can
+    // remove it. A teardown that deleted it only ever worked because the old
+    // connection was Supabase's `postgres`, which holds BYPASSRLS. Certificates
+    // are reached by the ON DELETE CASCADE from DsarRequest instead; referential
+    // actions run as the constraint, not as the caller, so cleanup still
+    // completes without the privilege.
     const requests = await prisma.dsarRequest.findMany({
       where: { subjectId: { in: subjectIds } },
       select: { id: true },
@@ -283,7 +290,6 @@ export async function destroyWorld(world) {
     const requestIds = requests.map((r) => r.id)
 
     if (requestIds.length) {
-      await prisma.deletionCertificate.deleteMany({ where: { dsarRequestId: { in: requestIds } } })
       await prisma.dsarEvidence.deleteMany({ where: { dsarRequestId: { in: requestIds } } })
     }
 
