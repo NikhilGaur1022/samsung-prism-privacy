@@ -4,7 +4,8 @@
 gate is green (53/53), media is encrypted at rest, and the database has been
 cleaned of test residue.
 
-**Three things remain.** They are listed in §2 in the order they should be done.
+**Two things remain** — §2.2 and §2.3, both blocked on this machine only (no
+elevation, no Docker). §2.1 is done.
 None of them is a feature. Do them, verify, stop.
 
 > The previous handoff said the API listens on **3000**. It does not — `.env` sets
@@ -25,7 +26,7 @@ Do not re-verify these. They were run and observed this session.
 | Gate | `53/53`, exit 0, under sealed media |
 | Portals | both build clean |
 | `/health/deep` | `{"postgres":true,"qdrant":true,"redis":true}` on **:4000** |
-| Preflight (dev) | 16 checks — 14 pass, 1 warn (`db-role`), 1 fail (Redis version) |
+| Preflight (dev) | 17 checks — 16 pass, 1 fail (Redis version, §2.2) |
 | Database | 3 subjects (the owner's own `niga` accounts) + their 20 enrollments, 1 admin. Zero projects, sessions, photos, links |
 | Media | `MEDIA_KEK` set, 356 blobs swept and sealed, `MEDIA_REQUIRE_SEALED=on` |
 
@@ -127,53 +128,88 @@ on this machine. See §2.3.
 
 ---
 
+### The role switch exposed the whole database to the anon key
+
+The finding §2.1 was written about was real but not the worst one. Taking away
+`BYPASSRLS` made two things visible that had been masked for the life of the
+project.
+
+**`anon` and `authenticated` held full DML on all 30 tables in `public`, and
+only 6 of the 30 have RLS enabled at all.** Supabase publishes everything in
+`public` through PostgREST, and the `anon` key that reaches it is public by
+construction — it ships inside the portal bundles. Photos, sessions, projects,
+`photo_subjects` and `subject_keys` were readable *and writable* with a key that
+is not a secret, entirely around the API, its RBAC and its access logging.
+
+Nothing in this system uses PostgREST — there is no `@supabase/supabase-js`
+client in either portal, every read goes through Prisma — so the grants were
+revoked outright, along with the default privileges that would otherwise
+re-grant them on every table a future migration adds. `preflight` now fails on
+`postgrest-exposure` if either role regains a single table privilege.
+`service_role` is left alone: that key is secret, unlike `anon`.
+
+**`data_subjects`, `session_handoffs` and `subject_face_enrollments` had RLS
+enabled with zero policies.** RLS on with no policy denies everything, so every
+insert into `data_subjects` failed with `42501` the moment the app stopped
+bypassing RLS — 37 of 53 tests. They are ordinary application tables whose
+authorization lives in `requireRole` and the service layer, so they were given a
+permissive policy rather than having RLS switched off. If a `GRANT ... TO anon`
+ever reappears — one dashboard click — the policy still stands between it and
+the rows.
+
+Both are `20260728000001_lock_down_public_grants`.
+
+### `provision-app-role.sql` could not have run as written
+
+It set `NOSUPERUSER NOBYPASSRLS` explicitly. Postgres requires SUPERUSER to set
+either attribute *in either direction*, and Supabase's `postgres` is not a
+superuser — it holds `BYPASSRLS` and `CREATEROLE` but not `rolsuper`. The
+statement failed with `42501` even though it was a no-op. Both attributes
+default to off on a new role, so the file now asserts them and raises if they
+are ever on, which is the stronger form anyway: it also catches a `prism_app`
+that already exists and was granted something it should not have.
+
+### The handoff batch over-reported its own link count
+
+`finalizeSession` built its link list per cluster and deduplicated only within
+one. Clustering routinely splits one person across several clusters and tagging
+can point all of them at the same subject, so the same `(photo, subject)` pair
+was pushed more than once. `createMany(skipDuplicates)` collapsed them to one
+row while `SessionHandoff.linkCount` recorded `links.length` — the *candidate*
+count. The emitted batch claimed 6 links where the table held 3, and `linkCount`
+is what the downstream consumer reconciles against.
+
+This is why the assertion failed intermittently rather than always: it depended
+on whether clustering happened to split someone on that run. Worth knowing when
+reading a flaky failure in this suite — the flakiness was in the data, not the
+test.
+
 ## 2. What is left — do these in order
 
-### 2.1 Provision the least-privilege database role — **the real remaining gap**
+### 2.1 The least-privilege database role — **done**
 
-RLS is enabled *and forced* on `audit_log`, `access_events` and
-`deletion_certificates`, so those tables are append-only — but only against roles
-RLS applies to. Supabase's `postgres` role holds `BYPASSRLS`, which ignores RLS
-unconditionally, `FORCE` included. Connecting the application as `postgres` means
-the policies are all present, all correct, and all skipped.
+Run and verified this session. The application now connects as `prism_app`:
+`rolsuper` and `rolbypassrls` both false, no `UPDATE/DELETE/TRUNCATE` on
+`audit_log`, `access_events` or `deletion_certificates`. `npm run preflight`
+reports `db-role: ok`; `node backend/scripts/verify-app-role.js` attempts each
+forbidden write and requires `42501` specifically. Gate is **53/53** on the new
+role.
 
-This is not theoretical. `tests/e2e/world.js:286` calls
-`prisma.deletionCertificate.deleteMany(...)` against a forced append-only table
-**and it succeeds**. Until this is fixed, "the compliance ledger cannot be edited"
-is not a true statement about this system.
+Two things had to change in the remedy itself, and doing it uncovered a larger
+hole than the one it was written for. Both are described in §1.
 
-The remedy is written and committed but has never been run:
-`backend/scripts/sql/provision-app-role.sql`. It creates `prism_app` with
-`NOSUPERUSER NOBYPASSRLS`, grants ordinary DML, and revokes
-`UPDATE/DELETE/TRUNCATE` on the three evidentiary tables so the guarantee does not
-rest on RLS alone.
+If you have to provision another environment:
 
 ```bash
 node -e "console.log(require('crypto').randomBytes(24).toString('base64url'))"
-psql "$ADMIN_DATABASE_URL" -v password="'<generated>'" -f backend/scripts/sql/provision-app-role.sql
+cd backend && node scripts/run-sql.js scripts/sql/provision-app-role.sql -v "password='<generated>'"
 ```
 
-Then repoint **both** `DATABASE_URL` and `DIRECT_URL` at `prism_app` and confirm:
-
-```sql
-SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user;  -- (f, f)
-```
-
-`npm run preflight` must then report `db-role: PASS`.
-
-**Three things to expect, none of which is a regression:**
-
-- `world.js` teardown will start failing on `deletionCertificate.deleteMany`.
-  **That is the control working.** Fix it by narrowing the teardown so it stops
-  deleting evidence — *never* by re-granting the privilege.
-- `prisma migrate deploy` may need the admin role, not `prism_app`. Keep the
-  admin URL available for migrations.
-- If `psql` is not installed, `mcp__supabase__execute_sql` can run the file's
-  statements, but it does not support `psql`'s `\set` / `:'password'`
-  interpolation — substitute the password literal by hand and do not commit it.
-
-Re-run the full gate afterwards. This is the one change here that can plausibly
-break a passing suite.
+`run-sql.js` exists because `psql` is not installed on these machines and the
+Supabase MCP server needs an access token that was not present. Point
+`DATABASE_URL` **and** `DIRECT_URL` at `prism_app`, keep `ADMIN_DATABASE_URL`
+pointing at the owner — `prisma migrate deploy` and `scripts/sql/*` need it and
+`prism_app` is deliberately not allowed to run them.
 
 ### 2.2 Redis ≥ 6.2 for the team
 
@@ -377,8 +413,10 @@ workers/     recognition · redaction · purge · retention
 
 | Script | Purpose |
 |---|---|
-| `preflight.js` | the 16 checks; fatal only under `NODE_ENV=production` |
-| `sql/provision-app-role.sql` | §2.1 — **not yet run** |
+| `preflight.js` | the 17 checks; fatal only under `NODE_ENV=production` |
+| `sql/provision-app-role.sql` | §2.1 — run; re-runnable per environment |
+| `run-sql.js` | applies a `.sql` file without `psql`; understands `-v name=value` and `:'name'` |
+| `verify-app-role.js` | proves the connected role cannot edit the evidentiary tables |
 | `migrate-media-encrypt.js` | the sealing sweep; idempotent, resumable |
 | `make-e2e-fixtures.js` | rebuilds the gitignored `*.jpg` fixtures; unseals as it reads |
 
@@ -390,7 +428,8 @@ workers/     recognition · redaction · purge · retention
 ```
 
 `…_rls_audit_access` enables and forces RLS on the three evidentiary tables — the
-guarantee §2.1 is about.
+guarantee §2.1 is about. `20260728000001_lock_down_public_grants` revokes
+PostgREST access and gives the three policy-less RLS tables a policy.
 
 ### Portals
 
@@ -433,12 +472,13 @@ test *is* this table) · `03_FILE_IMPLEMENTATION_PLAN.md` ·
 ## 10. Sign-off
 
 ```
-[ ] 2.1  provision-app-role.sql run; DATABASE_URL + DIRECT_URL → prism_app
-[ ]      SELECT rolsuper, rolbypassrls → (f, f)
-[ ]      preflight db-role → PASS
-[ ]      world.js teardown narrowed, no longer deletes deletion_certificates
-[ ]      npm test → 53/53 after the role switch
-[ ] 2.2  Redis ≥6.2 on every developer machine
+[x] 2.1  provision-app-role.sql run; DATABASE_URL + DIRECT_URL → prism_app
+[x]      SELECT rolsuper, rolbypassrls → (f, f)
+[x]      preflight db-role → ok
+[x]      world.js teardown narrowed, no longer deletes deletion_certificates
+[x]      npm test → 53/53 after the role switch
+[x]      anon/authenticated revoked; preflight postgrest-exposure → ok
+[ ] 2.2  Redis ≥6.2 on every developer machine   ← needs an elevated shell
 [ ] 2.3  image-pii-worker image built; /health ok; a real photo through /detect-pii
 [ ] 3    manual pass, all five checks
 ```

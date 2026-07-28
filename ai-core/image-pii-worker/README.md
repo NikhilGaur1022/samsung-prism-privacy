@@ -16,9 +16,13 @@ python -m spacy download en_core_web_sm
 
 The `spacy download` step is required — Presidio's `AnalyzerEngine` needs an
 NLP engine for tokenization even though none of the custom Indian recognizers
-here are NER-based. `rapidocr-onnxruntime` also downloads its ONNX detection/
-recognition/classification models to a local cache on first use (first
-`/detect-pii` call will be slower while that happens).
+here are NER-based. A missing model is a hard failure on the first request
+rather than at boot, which is why the Dockerfile bakes it in at build time.
+
+`rapidocr-onnxruntime` needs no download: its detection, recognition and
+classification ONNX weights ship inside the wheel, verified by inspecting the
+installed package. (This paragraph previously claimed they are fetched to a
+cache on first use. They are not, and no model volume is mounted for them.)
 
 ## Run
 
