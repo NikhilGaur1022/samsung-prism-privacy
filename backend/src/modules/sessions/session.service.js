@@ -773,10 +773,21 @@ export async function finalizeSession(sessionId, admin) {
     .filter((id) => id && !consentBySubject.has(id))
 
   const links = []
+  const linkKeys = new Set()
   for (const cluster of tagged) {
     const consentId = consentBySubject.get(cluster.taggedSubjectId)
     if (!consentId) continue
     for (const photoId of new Set(cluster.faces.map((f) => f.photoId))) {
+      // Deduplicated across clusters, not just within one. Clustering routinely
+      // splits a single person into several clusters, and tagging can point all
+      // of them at the same subject — so the same (photo, subject) pair arrives
+      // more than once. createMany(skipDuplicates) collapses those to one row,
+      // so counting candidates here would publish a linkCount the table never
+      // held, and linkCount is what the downstream consumer reconciles the
+      // batch against.
+      const key = `${photoId}:${cluster.taggedSubjectId}`
+      if (linkKeys.has(key)) continue
+      linkKeys.add(key)
       links.push({ photoId, subjectId: cluster.taggedSubjectId, consentId })
     }
   }
