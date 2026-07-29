@@ -265,11 +265,18 @@ CUSTOM_RECOGNIZERS = [
     SecretRecognizer,
 ]
 
-# Entities this service asks the analyzer to look for. PHONE_NUMBER is
-# Presidio's built-in recognizer (backed by the `phonenumbers` library),
-# everything else is one of the custom recognizers above.
+# Entities this service asks the analyzer to look for. This is an allow-list,
+# not a filter: AnalyzerEngine loads its built-in recognizers regardless, but
+# only entities named here are ever requested, so a built-in absent from this
+# list is loaded and never consulted. PHONE_NUMBER and EMAIL_ADDRESS are those
+# built-ins; everything else is one of the custom recognizers above.
 PII_ENTITIES = [
     "PHONE_NUMBER",
+    # An email address printed on a photographed document is personal data
+    # under the DPDP Act as much as an Aadhaar is. It was missing here while
+    # Presidio's EmailRecognizer sat loaded and idle, so an email on a form or
+    # an ID card was OCR'd, ignored, and published unblurred.
+    "EMAIL_ADDRESS",
     "IN_AADHAAR",
     "IN_PAN",
     "IN_GSTIN",

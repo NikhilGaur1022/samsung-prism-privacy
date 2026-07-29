@@ -16,6 +16,8 @@ function NewTemplateForm({ onCreated }) {
   const [name, setName] = useState('')
   const [purpose, setPurpose] = useState('')
   const [body, setBody] = useState('')
+  const [retention, setRetention] = useState('')
+  const [dataTypes, setDataTypes] = useState('')
   const [grievanceContact, setGrievanceContact] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
@@ -29,11 +31,17 @@ function NewTemplateForm({ onCreated }) {
         name: name.trim(),
         purpose: purpose.trim(),
         bodyByLocale: { en: body.trim() },
+        retention: retention.trim() || undefined,
+        dataTypes: dataTypes.trim()
+          ? dataTypes.split(',').map((t) => t.trim()).filter(Boolean)
+          : undefined,
         grievanceContact: grievanceContact.trim() || undefined,
       })
       setName('')
       setPurpose('')
       setBody('')
+      setRetention('')
+      setDataTypes('')
       setGrievanceContact('')
       setOpen(false)
       onCreated()
@@ -84,6 +92,27 @@ function NewTemplateForm({ onCreated }) {
             onChange={(e) => setBody(e.target.value)}
             required
           />
+        </label>
+        <label className="mt-4 block text-sm font-semibold text-ink">
+          Retention period
+          <input
+            className={FIELD_CLASS}
+            value={retention}
+            onChange={(e) => setRetention(e.target.value)}
+            placeholder="e.g. 90 days after project close"
+          />
+        </label>
+        <label className="mt-4 block text-sm font-semibold text-ink">
+          Data types disclosed (comma-separated)
+          <input
+            className={FIELD_CLASS}
+            value={dataTypes}
+            onChange={(e) => setDataTypes(e.target.value)}
+            placeholder="e.g. photo, face, hands"
+          />
+          <span className="mt-1 block text-xs font-medium text-ink-faint">
+            A project can only be submitted for approval if its data types are a subset of this list.
+          </span>
         </label>
         <label className="mt-4 block text-sm font-semibold text-ink">
           Grievance contact
@@ -173,6 +202,9 @@ export default function ConsentTemplates() {
                   <p className="mt-0.5 truncate text-xs font-medium text-ink-faint">
                     v{t.version} · {t.retention ?? 'no retention set'}
                     {t.publishedAt && ` · published ${new Date(t.publishedAt).toLocaleDateString()}`}
+                  </p>
+                  <p className="mt-0.5 truncate text-xs text-ink-faint">
+                    {t.dataTypes?.length ? t.dataTypes.join(', ') : 'no data types disclosed'}
                   </p>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">

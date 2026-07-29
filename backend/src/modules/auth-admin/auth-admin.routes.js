@@ -20,3 +20,12 @@ authAdminRoutes.post(
   requireRole('super_admin'),
   authAdminController.invite,
 )
+
+// Backs the dataOwner's agent-assignment picker — needs to see who is a
+// collectionAgent without the full admin-management surface super_admin gets.
+authAdminRoutes.get(
+  '/users',
+  requireAdminAuth,
+  requireRole('dataOwner', 'super_admin'),
+  authAdminController.listUsers,
+)

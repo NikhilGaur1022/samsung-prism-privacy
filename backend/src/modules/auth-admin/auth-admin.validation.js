@@ -25,3 +25,7 @@ export const resetPasswordSchema = z.object({
   token: z.string().min(1),
   newPassword: z.string().min(8),
 })
+
+export const listAdminsQuerySchema = z.object({
+  role: z.enum(ADMIN_ROLES).optional(),
+})

@@ -118,6 +118,11 @@ export function resetPassword(token, newPassword) {
   })
 }
 
+export function listAdmins(role) {
+  const query = new URLSearchParams(role ? { role } : {}).toString()
+  return request(`/auth/admin/users${query ? `?${query}` : ''}`)
+}
+
 // --- Collection sessions -----------------------------------------------------
 
 export function listProjects() {

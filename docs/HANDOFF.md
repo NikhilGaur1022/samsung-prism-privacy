@@ -78,10 +78,11 @@ optional — that guard is what makes the fixtures block the rebuild.
 `onDelete: Cascade`, so removing an admin who ran a session takes the session, its
 photos and every derived row with it. `reset-bootstrap-admin.js` refuses to run in
 that case rather than guessing. `Project.owner` is `SetNull`, so projects survive
-the delete as orphans — which is why **4 `E2E Project <hash>` rows now sit in the
-database with no owner.** They are gate residue and should be removed before
-anything ships; they were left in place because the authorisation given covered
-`admin_users` only.
+the delete as orphans. That left 4 `E2E Project <hash>` rows with no owner; they
+were checked for dependents — 0 assignments, 0 consents, 0 sessions, 0 retention
+policies, so nothing cascaded — backed up to
+`scratchpad/backup-orphan-projects-*.json`, and deleted. **`projects` is now
+empty**, and so is `sessions`, `photos` and `photo_subjects`.
 
 If the accept link is lost, delete the admin row and re-run
 `npm run bootstrap-admin -- <email>`.
@@ -99,8 +100,17 @@ OTP/auth/refresh tokens. Kept the owner's 3 `niga` subjects and their 20
 enrollments. Two orphaned Qdrant collections dropped.
 
 `audit_log` (731) and `access_events` (142) were **not** touched — they are
-append-only. Backup of every table before the delete:
-`scratchpad/backup-pre-cleanup.json`.
+append-only.
+
+> **That delete has no backup.** This section previously claimed one at
+> `scratchpad/backup-pre-cleanup.json`. Searched on 2026-07-29: the file is not in
+> `scratchpad/`, not anywhere under the project, not under `~/Desktop` or
+> `~/Downloads`, and `git log --all -- scratchpad/backup-pre-cleanup.json` returns
+> nothing, so it was never committed either. Either it was never written or it was
+> removed. **Those rows are gone and cannot be restored from a dump.** What does
+> survive is the ledger: `audit_log` and `access_events` still describe the
+> deleted objects, because they are append-only and were deliberately excluded
+> from the delete. Treat that as the record of what was there, not as a way back.
 
 ### Media encryption was turned on (§7.3 of the old handoff — done)
 
@@ -313,13 +323,22 @@ Both are consequences of the container now existing, and neither is hypothetical
 
 #### Two findings from the verification
 
-**An email address is not redacted.** `ravi.sharma@example.com` on the same card
-was not detected. `PII_ENTITIES` in `pii_recognizers.py` is an allow-list and
-`EMAIL_ADDRESS` is not on it, so Presidio's built-in email recognizer is loaded
-but never consulted. An email printed on a photographed document is personal data
-and currently survives redaction unblurred. One line fixes it. It was left alone
-because widening what gets blurred is a behaviour change, not part of §2.3 —
-decide, then either add it or write down why not.
+**An email address was not redacted — now fixed.** `ravi.sharma@example.com` on
+the first pass was not detected. `PII_ENTITIES` in `pii_recognizers.py` is an
+allow-list, not a filter: `AnalyzerEngine` loads its built-in recognizers either
+way, but only entities named in that list are ever requested, so Presidio's
+`EmailRecognizer` sat loaded and never consulted. An email printed on a
+photographed document is personal data under the DPDP Act as much as an Aadhaar
+is, and it was being OCR'd, ignored and published unblurred.
+
+`EMAIL_ADDRESS` was added to the list, the image rebuilt, and the same card
+re-run: **8 regions, 8 entities**, with `EMAIL_ADDRESS  ravi.sharma@example.com`
+now among them. `UPI_ID` is unaffected — `ravi.sharma@okhdfcbank` has no TLD, so
+`EmailRecognizer` does not claim it and the two recognizers do not collide.
+
+If another built-in is ever wanted, adding the recognizer is not enough; it has to
+be named in `PII_ENTITIES` too, or it will be loaded and silently unused in
+exactly this way.
 
 **A phone number also matches as an Aadhaar, and that is intended.** The container
 OCRs `+91 98765 43210` without its spaces, leaving the 12-digit run `919876543210`.
@@ -579,9 +598,17 @@ test *is* this table) · `03_FILE_IMPLEMENTATION_PLAN.md` ·
 **Rollback.** The delivery is four commits on `main`: `165f9d1` (waves 0–6),
 `927677f` (export DEK), `04f56b6` (retention sweep), plus index-header chores.
 `git revert` undoes the code cleanly. Two things do **not** revert with it and must
-be planned separately: the `MEDIA_KEK` sweep (re-encrypted objects need the KEK —
-never discard a KEK that has encrypted anything) and the row deletions (backup at
-`scratchpad/backup-pre-cleanup.json`).
+be planned separately:
+
+- the `MEDIA_KEK` sweep — re-encrypted objects need the KEK, so never discard a
+  KEK that has encrypted anything;
+- **the row deletions, which are irreversible.** The backup this section used to
+  point at does not exist (see §1). Later deletes do have backups —
+  `scratchpad/backup-admins-*.json` and `scratchpad/backup-orphan-projects-*.json`
+  — but `scratchpad/` is gitignored, so those live on one machine only and are not
+  part of the delivery. If this needs to survive a laptop, copy them somewhere
+  durable; do not assume a clone has them.
+
 
 ### Definition of done
 

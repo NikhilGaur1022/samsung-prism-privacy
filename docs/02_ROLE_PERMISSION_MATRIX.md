@@ -32,6 +32,7 @@ Enforcement contract: **every rule below is enforced server-side in `requireRole
 | `POST /projects/:id/reject` † | ✗ | ✓ | ✗ | ✗ | ✗ | ✓ |
 | `GET /projects` | ✗ | ✓ all (meta) | ✓ own | ✓ assigned | ✓ meta | ✓ |
 | `POST /projects/:id/assignments` † | ✗ | ✗ | ✓ own | ✗ | ✗ | ✓ |
+| `GET /auth/admin/users?role=` | ✗ | ✗ | ✓ (agent picker) | ✗ | ✗ | ✓ |
 | `GET/POST /consent-templates` † | read rendered | ✓ CRUD | ✓ read | ✓ read | ✗ | ✓ |
 | `GET /projects/:id/sessions` | ✗ | ✓ | ✓ own | ✗ | ✓ | ✓ |
 | `GET /projects/:id/handoffs` | ✗ | ✓ | ✓ own | ✗ | ✓ | ✓ |

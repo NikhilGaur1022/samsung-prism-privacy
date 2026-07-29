@@ -55,6 +55,7 @@ const MATRIX = {
   'POST /auth/admin/logout': A(...ALL),
   'GET /auth/admin/me': A(...ROLES),
   'POST /auth/admin/invite': A('super_admin'),
+  'GET /auth/admin/users': A('dataOwner', 'super_admin'),
 
   // --- join (data principal only) ---
   'GET /api/v1/join/:token': A(...ALL),

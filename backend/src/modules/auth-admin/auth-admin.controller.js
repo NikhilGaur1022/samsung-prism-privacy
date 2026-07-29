@@ -5,6 +5,7 @@ import {
   acceptInviteSchema,
   requestResetSchema,
   resetPasswordSchema,
+  listAdminsQuerySchema,
 } from './auth-admin.validation.js'
 import { setAdminAuthCookies, clearAdminAuthCookies, ADMIN_REFRESH_COOKIE } from '../../lib/cookies.js'
 import { ApiError } from '../../middleware/errorHandler.js'
@@ -64,6 +65,15 @@ export async function me(req, res, next) {
   try {
     const result = await authAdminService.getMe(req.admin.id)
     res.json(result)
+  } catch (err) {
+    next(err)
+  }
+}
+
+export async function listUsers(req, res, next) {
+  try {
+    const { role } = listAdminsQuerySchema.parse(req.query)
+    res.json({ items: await authAdminService.listAdmins({ role }) })
   } catch (err) {
     next(err)
   }

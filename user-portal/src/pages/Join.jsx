@@ -44,6 +44,7 @@ export default function Join() {
 
   const signedIn = useRef(false)
   const templateId = useRef(null)
+  const noticeBodyRef = useRef(null)
 
   useEffect(() => {
     getJoinInvite(token).then(setInvite).catch(setError)
@@ -124,6 +125,26 @@ export default function Join() {
     const el = e.currentTarget
     if (el.scrollHeight - el.scrollTop - el.clientHeight < 8) setScrolledToBottom(true)
   }
+
+  // A notice short enough to fit inside max-h-64 never overflows, so onScroll
+  // never fires and the agree button would stay disabled with no way to proceed.
+  // Nothing to scroll to means the subject has already seen all of it. The
+  // observer covers late layout shifts (web fonts) that shrink the box after the
+  // first paint; changeLocale clears notice, which re-runs this for the new one.
+  useEffect(() => {
+    const el = noticeBodyRef.current
+    if (!notice || !el) return
+
+    const checkOverflow = () => {
+      if (el.scrollHeight - el.clientHeight < 8) setScrolledToBottom(true)
+    }
+    checkOverflow()
+
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(checkOverflow)
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [notice])
 
   if (error && !invite) {
     return (
@@ -293,6 +314,7 @@ export default function Join() {
               )}
 
               <div
+                ref={noticeBodyRef}
                 onScroll={handleNoticeScroll}
                 className="mt-3 max-h-64 overflow-y-auto rounded-card border border-border bg-surface p-4"
               >

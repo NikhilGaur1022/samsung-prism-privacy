@@ -185,6 +185,17 @@ export async function getMe(adminId) {
   return { id: admin.id, email: admin.email, role: admin.role }
 }
 
+// Used by dataOwner to pick who to assign to a project. Only ACTIVE admins are
+// returned — an INVITED or DISABLED admin can't be assigned (assignAgent
+// enforces the same rule), so surfacing them here would just be a dead end.
+export async function listAdmins({ role } = {}) {
+  return prisma.adminUser.findMany({
+    where: { status: 'ACTIVE', role: role ?? undefined },
+    orderBy: { email: 'asc' },
+    select: { id: true, email: true, role: true },
+  })
+}
+
 export async function refreshSession(rawRefreshToken) {
   const { raw, adminUserId } = await rotateRefreshToken(rawRefreshToken, 'adminUserId')
 
