@@ -375,6 +375,13 @@ export function listProjectHandoffs(projectId) {
   return request(`/api/v1/projects/${projectId}/handoffs`)
 }
 
+// The frame index for a role that may read a session's redacted derivatives but
+// not the session record itself (dataOwner own-project, dataAdmin). Pair with
+// mediaUrl.redacted — getSession would 403 for these roles.
+export function listSessionPhotos(sessionId) {
+  return request(`/api/v1/sessions/${sessionId}/photos`)
+}
+
 export function getProjectReport(projectId) {
   return request(`/api/v1/projects/${projectId}/report`)
 }

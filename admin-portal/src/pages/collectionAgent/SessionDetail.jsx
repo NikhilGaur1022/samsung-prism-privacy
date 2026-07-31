@@ -587,8 +587,16 @@ export default function SessionDetail() {
               <div className="mt-3 grid grid-cols-3 gap-2 sm:grid-cols-4">
                 {session.photos.map((photo) => (
                   <div key={photo.id} className="group relative overflow-hidden rounded-lg bg-canvas">
+                    {/* The agent's basis for the raw original expires at ARCHIVE, so
+                        /file 403s from then on and this grid rendered as a wall of
+                        broken thumbnails — which read as "my photos are gone". The
+                        redacted derivative is what the role is still entitled to. */}
                     <img
-                      src={mediaUrl.photo(sessionId, photo.id)}
+                      src={
+                        session.status === 'ARCHIVED'
+                          ? mediaUrl.redacted(sessionId, photo.id)
+                          : mediaUrl.photo(sessionId, photo.id)
+                      }
                       alt=""
                       loading="lazy"
                       className="aspect-square w-full object-cover"

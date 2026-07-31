@@ -169,25 +169,6 @@ sessionRoutes.get(
 )
 
 sessionRoutes.get(
-  '/:sessionId/photos/:photoId/redacted',
-  logAccess('REDACTED_PHOTO', (req) => req.params.photoId, { purpose: 'COLLECTION' }),
-  async (req, res, next) => {
-    try {
-      sendMedia(
-        res,
-        await sessionService.readRedactedPhoto(
-          uuid.parse(req.params.sessionId),
-          uuid.parse(req.params.photoId),
-          req.admin,
-        ),
-      )
-    } catch (err) {
-      next(err)
-    }
-  },
-)
-
-sessionRoutes.get(
   '/:sessionId/faces/:faceId/crop',
   logAccess('FACE_CROP', (req) => req.params.faceId, { purpose: 'TAGGING' }),
   async (req, res, next) => {
@@ -337,6 +318,64 @@ sessionRoutes.post('/:sessionId/finalize', async (req, res, next) => {
     next(err)
   }
 })
+
+// ---------------------------------------------------------------------------
+// Redacted media (matrix §B)
+// ---------------------------------------------------------------------------
+// Its own router for the same reason break-glass has one: these two routes admit
+// dataOwner and dataAdmin, and sessionRoutes' router-level floor is
+// collectionAgent-only. Widening that floor would have opened tagging, finalize
+// and the raw-original route to them at the same time.
+//
+// Matrix §B grants `/sessions/:id/photos/:pid/redacted` to "dataOwner ✓ own
+// project" and "dataAdmin ✓", but the route only ever existed behind the agent
+// floor — so once an agent finalized, the redacted set that is the whole point of
+// the pipeline was reachable by nobody. That is what this closes.
+//
+// dpo is deliberately absent: §A says the role "cannot see any personal data",
+// and a blurred bystander is still a photograph of the consented subject.
+export const sessionMediaRoutes = Router()
+
+const mediaReaders = [
+  requireAdminAuth,
+  requireRole('collectionAgent', 'dataOwner', 'dataAdmin', 'super_admin'),
+]
+
+// The frame index. Oversight roles cannot call GET /:sessionId (matrix §B denies
+// them the session record and its roster), so without this they had ids for
+// nothing and no way to enumerate what to render.
+sessionMediaRoutes.get('/:sessionId/photos', ...mediaReaders, async (req, res, next) => {
+  try {
+    res.json(
+      await sessionService.listSessionPhotosForOversight(
+        uuid.parse(req.params.sessionId),
+        req.admin,
+      ),
+    )
+  } catch (err) {
+    next(err)
+  }
+})
+
+sessionMediaRoutes.get(
+  '/:sessionId/photos/:photoId/redacted',
+  ...mediaReaders,
+  logAccess('REDACTED_PHOTO', (req) => req.params.photoId, { purpose: 'COLLECTION' }),
+  async (req, res, next) => {
+    try {
+      sendMedia(
+        res,
+        await sessionService.readRedactedPhoto(
+          uuid.parse(req.params.sessionId),
+          uuid.parse(req.params.photoId),
+          req.admin,
+        ),
+      )
+    } catch (err) {
+      next(err)
+    }
+  },
+)
 
 // ---------------------------------------------------------------------------
 // Break-glass raw media (matrix §C)

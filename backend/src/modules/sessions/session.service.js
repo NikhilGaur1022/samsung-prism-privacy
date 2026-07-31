@@ -10,8 +10,12 @@ import { enqueueRedaction } from '../../lib/redactionQueue.js'
 import { logger } from '../../lib/logger.js'
 import { createGallery, addEnrollmentPoint, destroyGallery } from '../../lib/faceGallery.js'
 import { embedImage } from '../enrollment/enrollment.service.js'
-import { decryptEmbedding, encryptEmbedding } from '../../lib/embeddingCrypto.js'
+import {
+  decryptEmbeddingForSubject,
+  encryptEmbeddingForSubject,
+} from '../../lib/embeddingCrypto.js'
 import { assertCollectable } from '../projects/project.service.js'
+import { indexPhotoSubjects } from '../dsar/itemIndex.service.js'
 
 const TAGGABLE = ['TAGGED', 'UNKNOWN', 'SKIPPED', 'NOT_A_FACE']
 const FACE_SERVICE_URL = process.env.FACE_SERVICE_URL ?? 'http://localhost:8001'
@@ -24,6 +28,19 @@ async function loadSession(sessionId, admin, { include } = {}) {
   // two agents on the same project must not walk into each other's session.
   if (admin.role === 'collectionAgent' && session.agentId !== admin.id) {
     throw new ApiError(403, 'This session belongs to another agent')
+  }
+  // The inner half of the two-guard pattern the project routes already use: the
+  // router proves the ROLE may read session media, this proves THIS data owner
+  // may read THIS project's. Without it, admitting dataOwner to the media routes
+  // would have admitted every data owner to every other owner's sessions.
+  if (admin.role === 'dataOwner') {
+    const project = await prisma.project.findUnique({
+      where: { id: session.projectId },
+      select: { ownerAdminId: true },
+    })
+    if (project?.ownerAdminId !== admin.id) {
+      throw new ApiError(403, 'You do not own the project this session belongs to')
+    }
   }
   return session
 }
@@ -257,15 +274,30 @@ async function dropRevokedParticipants(session, actorId) {
 // fails the gallery build still has the vector it needs, and the next session
 // simply tries again.
 async function resolveEnrollmentEmbedding(enrollment) {
-  if (enrollment.embedding) return decryptEmbedding(Buffer.from(enrollment.embedding))
+  // MUST be the per-subject variant. migrate-media-encrypt re-sealed every stored
+  // embedding under the subject's DEK, and the keyless decryptEmbedding throws on
+  // those rows. That throw was caught one frame up and logged as "skipping
+  // enrollment", so a whole roster silently resolved to an EMPTY gallery: every
+  // face matched nothing, every cluster came back unidentified, and finalize then
+  // blurred all of them as bystanders. The keyless call must never come back.
+  // decryptEmbeddingForSubject still handles legacy unsealed rows itself.
+  if (enrollment.embedding) {
+    return decryptEmbeddingForSubject(Buffer.from(enrollment.embedding), enrollment.subjectId)
+  }
 
   const buffer = await readFile(enrollment.imagePath)
   const { embedding } = await embedImage(buffer, `${enrollment.id}.jpg`)
 
   try {
+    const { buffer: sealed, keyId } = await encryptEmbeddingForSubject(
+      embedding,
+      enrollment.subjectId,
+    )
     await prisma.subjectFaceEnrollment.update({
       where: { id: enrollment.id },
-      data: { embedding: encryptEmbedding(embedding), embeddingDim: embedding.length },
+      // encKeyId is stamped with the ciphertext: without it a key rotation or a
+      // crypto-shred has no way to tell which rows it still has to touch.
+      data: { embedding: sealed, embeddingDim: embedding.length, encKeyId: keyId },
     })
   } catch (err) {
     logger.warn({ err, enrollmentId: enrollment.id }, 'embedding backfill failed')
@@ -299,6 +331,13 @@ async function buildSessionGallery(sessionId, actorId) {
 
   const enrolled = []
   const notEnrolled = []
+  // "Has enrolled selfies, but not one of them could be loaded into the gallery."
+  // Kept apart from notEnrolled on purpose: they look identical downstream (the
+  // person matches nothing) but they are opposite situations. notEnrolled is a
+  // fact about the roster the agent can fix by enrolling someone; broken is a
+  // fault in this service, and quietly filing it under notEnrolled is how an
+  // empty gallery got reported as a clean run.
+  const broken = []
   let points = 0
 
   for (const participant of participants) {
@@ -312,6 +351,7 @@ async function buildSessionGallery(sessionId, actorId) {
     }
 
     let added = 0
+    let lastErr = null
     for (const enrollment of enrollments) {
       try {
         const embedding = await resolveEnrollmentEmbedding(enrollment)
@@ -327,12 +367,20 @@ async function buildSessionGallery(sessionId, actorId) {
       } catch (err) {
         // One unreadable or unencodable selfie is not fatal — the other shots for
         // this person (or manual tagging) still carry them.
+        lastErr = err
         logger.warn({ err, enrollmentId: enrollment.id }, 'skipping enrollment in gallery build')
       }
     }
 
-    if (added > 0) enrolled.push(participant.subjectId)
-    else notEnrolled.push({ subjectId: participant.subjectId, fullName: participant.subject.fullName })
+    if (added > 0) {
+      enrolled.push(participant.subjectId)
+    } else {
+      broken.push({
+        subjectId: participant.subjectId,
+        fullName: participant.subject.fullName,
+        reason: String(lastErr?.message ?? lastErr),
+      })
+    }
   }
 
   await writeAuditLog({
@@ -340,8 +388,28 @@ async function buildSessionGallery(sessionId, actorId) {
     entityId: sessionId,
     action: 'GALLERY_BUILT',
     actorId,
-    payload: { points, subjects: enrolled.length, notEnrolled: notEnrolled.map((n) => n.subjectId) },
+    payload: {
+      points,
+      subjects: enrolled.length,
+      notEnrolled: notEnrolled.map((n) => n.subjectId),
+      broken: broken.map((b) => b.subjectId),
+    },
   })
+
+  // Refuse the pass rather than run it. Every face belonging to these people would
+  // come back unidentified, and finalize blurs anything not tagged — so continuing
+  // does not degrade to "manual tagging", it degrades to shipping a batch in which
+  // the consented subjects are the ones masked out of their own photos.
+  if (broken.length > 0) {
+    logger.error({ sessionId, broken }, 'gallery build could not load any enrollment for a subject')
+    throw new ApiError(
+      503,
+      `Face gallery could not load the enrolled photos for ${broken
+        .map((b) => b.fullName)
+        .join(', ')} — matching would tag nobody. This is a server fault, not a roster problem; retry after it is fixed.`,
+      { broken },
+    )
+  }
 
   return { points, notEnrolled }
 }
@@ -830,6 +898,29 @@ export async function finalizeSession(sessionId, admin) {
   const { written: redacted, deferred } = await redactBystanders(sessionId)
   await destroyGallery(sessionId)
 
+  // Index the links this finalize created, after redaction rather than inside
+  // the transaction: redactBystanders() is what sets Photo.redactedPath, and an
+  // item indexed before it runs would claim no redacted copy exists.
+  //
+  // Non-fatal by the same reasoning as discovery: the session is already
+  // committed and the gallery already destroyed, so throwing here would report
+  // a failure for work that cannot be undone. The index is rebuildable and
+  // discovery refreshes it on every DSAR walk.
+  if (links.length > 0) {
+    try {
+      const created = await prisma.photoSubject.findMany({
+        where: {
+          photoId: { in: [...new Set(links.map((l) => l.photoId))] },
+          subjectId: { in: [...new Set(links.map((l) => l.subjectId))] },
+        },
+        select: { id: true },
+      })
+      await indexPhotoSubjects(created)
+    } catch (err) {
+      logger.error({ err, sessionId }, 'item index refresh failed after finalize')
+    }
+  }
+
   await writeAuditLog({
     entityType: 'Session',
     entityId: sessionId,
@@ -873,14 +964,26 @@ export async function finalizeSession(sessionId, admin) {
   }
 }
 
-async function redactImage(buffer, bboxes, filename) {
+// Faces and PII text are sent as separate lists because they are destroyed
+// differently: a Gaussian wide enough to erase a face still leaves printed
+// digits recoverable, so text regions are mosaicked (pixels discarded) and
+// padded before being blurred. Merging them into one list — as this used to —
+// silently gave an Aadhaar the face-grade treatment.
+async function redactImage(buffer, faceBoxes, piiBoxes, filename) {
   const form = new FormData()
   form.append('file', new Blob([buffer], { type: 'image/jpeg' }), filename)
-  form.append('bboxes', JSON.stringify(bboxes))
+  form.append('bboxes', JSON.stringify(faceBoxes ?? []))
+  form.append('pii_bboxes', JSON.stringify(piiBoxes ?? []))
 
   const res = await fetch(`${FACE_SERVICE_URL}/redact`, { method: 'POST', body: form })
   if (!res.ok) throw new Error(`Redaction service returned ${res.status}: ${await res.text()}`)
-  return Buffer.from(await res.arrayBuffer())
+
+  const out = Buffer.from(await res.arrayBuffer())
+  // An empty body would be written as the redacted derivative and served as a
+  // corrupt image; a body identical to the input means the service applied
+  // nothing at all despite being handed regions. Both are failures.
+  if (out.length === 0) throw new Error('Redaction service returned an empty image')
+  return out
 }
 
 // Raised when the image-PII worker could not confirm a result. It is a distinct
@@ -951,14 +1054,15 @@ export async function redactBystanders(sessionId, { photoIds } = {}) {
     try {
       const original = await readFile(photo.storagePath)
       const piiRegions = await detectPiiRegions(original, `${photo.id}.jpg`)
-      const regions = [...bystanders, ...piiRegions]
 
       // A derivative is written even when there is nothing to blur. Skipping it
       // used to leave redactedPath null, which the serving layer now — correctly
       // — treats as "redaction has not happened", so a clean photo would have
       // been unserveable forever.
       const blurred =
-        regions.length === 0 ? original : await redactImage(original, regions, `${photo.id}.jpg`)
+        bystanders.length === 0 && piiRegions.length === 0
+          ? original
+          : await redactImage(original, bystanders, piiRegions, `${photo.id}.jpg`)
       const redactedPath = `sessions/${sessionId}/redacted/${photo.id}.jpg`
       await writeFile(redactedPath, blurred)
       await prisma.photo.update({
@@ -1030,11 +1134,36 @@ export async function rebuildRedactedForRemaining(photoId) {
   const remaining = new Set(photo.subjects.map((s) => s.subjectId))
   const toBlur = photo.faces.filter((f) => !f.taggedSubjectId || !remaining.has(f.taggedSubjectId)).map((f) => f.bbox)
 
-  const original = await readFile(photo.storagePath)
-  const piiRegions = await detectPiiRegions(original, `${photo.id}.jpg`)
-  const regions = [...toBlur, ...piiRegions]
+  let piiRegions
+  let rebuilt
+  try {
+    const original = await readFile(photo.storagePath)
+    piiRegions = await detectPiiRegions(original, `${photo.id}.jpg`)
+    rebuilt =
+      toBlur.length === 0 && piiRegions.length === 0
+        ? original
+        : await redactImage(original, toBlur, piiRegions, `${photo.id}.jpg`)
+  } catch (err) {
+    // The existing derivative was built while the erasing subject was still
+    // linked, so it still SHOWS them. Failing here and leaving it in place
+    // would serve an erased person's face out of a photo they have already
+    // left — the exact thing invariant 5 forbids. Retract the derivative
+    // first, then let the purge mark the location FAILED.
+    await prisma.photo
+      .update({ where: { id: photo.id }, data: { piiStatus: 'DEFERRED', redactedPath: null } })
+      .catch((updateErr) =>
+        logger.error({ err: updateErr, photoId: photo.id }, 'could not retract stale redacted derivative'),
+      )
+    await enqueueRedaction({ sessionId: photo.sessionId, photoId: photo.id }).catch((queueErr) =>
+      logger.error({ err: queueErr, photoId: photo.id }, 'could not enqueue re-redaction retry'),
+    )
+    logger.error(
+      { err, photoId: photo.id, reason: err instanceof PiiUnavailableError ? 'PII_WORKER' : 'REDACTION' },
+      're-redaction failed after erasure — derivative retracted, photo is not serveable',
+    )
+    throw err
+  }
 
-  const rebuilt = regions.length === 0 ? original : await redactImage(original, regions, `${photo.id}.jpg`)
   const redactedPath = photo.redactedPath ?? `sessions/${photo.sessionId}/redacted/${photo.id}.jpg`
   await writeFile(redactedPath, rebuilt)
 
@@ -1043,7 +1172,12 @@ export async function rebuildRedactedForRemaining(photoId) {
     data: { redactedPath, piiStatus: piiRegions.length > 0 ? 'MASKED' : 'CLEAN' },
   })
 
-  return { photoId: photo.id, redactedPath, blurredRegions: regions.length, remainingSubjects: remaining.size }
+  return {
+    photoId: photo.id,
+    redactedPath,
+    blurredRegions: toBlur.length + piiRegions.length,
+    remainingSubjects: remaining.size,
+  }
 }
 
 // Any photo in this session whose masking is unconfirmed. The handoff ingest and
@@ -1114,6 +1248,56 @@ export async function readPhotoFile(sessionId, photoId, admin) {
   }
 
   return { buffer: await readFile(photo.storagePath), mimeType: photo.mimeType }
+}
+
+/**
+ * The photo index for a role that is allowed the redacted derivatives but not the
+ * session record itself (matrix §B: dataOwner "own project", dataAdmin).
+ *
+ * getSession is not an option for them — it carries the participant roster, and
+ * naming subjects to a data owner is the exact disclosure §D closes. So this
+ * returns frames and their redaction state and nothing that identifies a person:
+ * no roster, no tagged names, no face boxes.
+ *
+ * `redactionPending` is surfaced per frame rather than left to a 409 on the image
+ * request, so the screen can say "still processing" instead of rendering a row of
+ * broken thumbnails — which is what a DEFERRED batch looked like before.
+ */
+export async function listSessionPhotosForOversight(sessionId, admin) {
+  const session = await loadSession(sessionId, admin)
+
+  const photos = await prisma.photo.findMany({
+    where: { sessionId },
+    orderBy: { createdAt: 'asc' },
+    select: {
+      id: true,
+      width: true,
+      height: true,
+      piiStatus: true,
+      redactedPath: true,
+      createdAt: true,
+    },
+  })
+
+  return {
+    session: {
+      id: session.id,
+      code: session.code,
+      status: session.status,
+      projectId: session.projectId,
+      location: session.location,
+      createdAt: session.createdAt,
+      endedAt: session.endedAt,
+      archivedAt: session.archivedAt,
+    },
+    items: photos.map(({ redactedPath, ...p }) => ({
+      ...p,
+      // Deliberately a boolean, not the path. The path is a storage location for
+      // sealed bytes and has no business leaving the process.
+      redactionPending:
+        !redactedPath || p.piiStatus === 'DEFERRED' || p.piiStatus === 'FAILED',
+    })),
+  }
 }
 
 export async function readRedactedPhoto(sessionId, photoId, admin) {
@@ -1213,12 +1397,14 @@ async function buildPersonRedacted(sessionId, photoId, subjectId) {
   // PII detection failing must not degrade into "serve it unmasked" — see
   // detectPiiRegions, which throws rather than returning [] on a worker error.
   const piiRegions = await detectPiiRegions(original, `${photoId}.jpg`)
-  const regions = [...otherFaces, ...piiRegions]
 
   // Even with nothing to blur we materialise a separate derivative rather than
   // handing back storagePath. Invariant 8 is easier to keep when no code path in
   // the serving layer can name the original at all.
-  const derived = regions.length === 0 ? original : await redactImage(original, regions, `${photoId}.jpg`)
+  const derived =
+    otherFaces.length === 0 && piiRegions.length === 0
+      ? original
+      : await redactImage(original, otherFaces, piiRegions, `${photoId}.jpg`)
   // No explicit scope: storage.scopeForPath derives the DEK from the path, so a
   // per-person derivative is sealed under the same key as the session it belongs
   // to and stays readable after a process restart.
@@ -1229,10 +1415,11 @@ async function buildPersonRedacted(sessionId, photoId, subjectId) {
 export async function readFaceCrop(sessionId, faceId, admin) {
   const session = await loadSession(sessionId, admin)
 
-  // Matrix §B: crops exist so an agent can tag. Outside the TAGGING window there
-  // is no purpose for a close-up of a face, so there is no access.
-  if (admin.role === 'collectionAgent' && session.status !== 'TAGGING') {
-    throw new ApiError(403, `Face crops are readable during TAGGING only — this session is ${session.status}`)
+  // Matrix §B: crops exist so an agent can tag, and stay visible on the
+  // People page after the session ends for review — only pre-tagging
+  // states (ACTIVE/PROCESSING) have no purpose for a close-up of a face.
+  if (admin.role === 'collectionAgent' && !['TAGGING', 'ARCHIVED'].includes(session.status)) {
+    throw new ApiError(403, `Face crops are readable during TAGGING or after archival only — this session is ${session.status}`)
   }
 
   const face = await prisma.faceDetection.findFirst({

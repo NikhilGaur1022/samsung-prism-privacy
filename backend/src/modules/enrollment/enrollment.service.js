@@ -3,8 +3,8 @@ import sharp from 'sharp'
 import { prisma } from '../../config/prisma.js'
 import { ApiError } from '../../middleware/errorHandler.js'
 import { writeAuditLog } from '../../lib/auditLog.js'
-import { writeFile, deleteFile } from '../../lib/storage.js'
-import { encryptEmbedding } from '../../lib/embeddingCrypto.js'
+import { writeFile, readFile, deleteFile } from '../../lib/storage.js'
+import { encryptEmbeddingForSubject } from '../../lib/embeddingCrypto.js'
 
 const FACE_SERVICE_URL = process.env.FACE_SERVICE_URL ?? 'http://localhost:8001'
 const MIN_DET_SCORE = Number(process.env.FACE_ENROLL_MIN_DET_SCORE ?? 0.7)
@@ -89,6 +89,16 @@ export async function createEnrollment({ subjectId, file, source, capturedBy = n
   // meant one face-service round trip per enrollment per session and a hard
   // dependency on the worker being up before a gallery could exist at all. It is
   // encrypted at rest, never selected by any endpoint, and cleared on delete.
+  // Sealed under the subject's own DEK, not the global key, and stamped with the
+  // keyId that sealed it. Two reasons it must be this variant: destroying that DEK
+  // is what crypto-shreds the biometric on erasure, and the gallery build reads it
+  // back with decryptEmbeddingForSubject — a globally-keyed row written here would
+  // be readable, but it would not be shreddable.
+  const { buffer: sealedEmbedding, keyId } = await encryptEmbeddingForSubject(
+    result.embedding,
+    subjectId,
+  )
+
   const enrollment = await prisma.subjectFaceEnrollment.create({
     data: {
       subjectId,
@@ -100,8 +110,9 @@ export async function createEnrollment({ subjectId, file, source, capturedBy = n
       source,
       capturedBy,
       pose: pose ?? null,
-      embedding: encryptEmbedding(result.embedding),
+      embedding: sealedEmbedding,
       embeddingDim: result.embedding.length,
+      encKeyId: keyId,
     },
   })
 
@@ -236,10 +247,16 @@ export async function deleteAllEnrollments(subjectId, actorId, reason) {
   return { count: live.length }
 }
 
+// Returns the DECRYPTED bytes, never a path. Enrollment selfies are sealed on
+// disk by storage.writeFile (magic 'PRSM' + AES-GCM envelope), so handing the
+// route a path meant res.sendFile streamed the ciphertext out under
+// Content-Type: image/jpeg — every thumbnail in both portals rendered as a
+// broken image. Same rule as session media: media leaves this process as a
+// buffer that went through readFile, or it does not leave.
 export async function readEnrollmentImage(subjectId, enrollmentId) {
   const enrollment = await prisma.subjectFaceEnrollment.findFirst({
     where: { id: enrollmentId, subjectId, deletedAt: null },
   })
   if (!enrollment) throw new ApiError(404, 'Enrollment not found')
-  return { path: enrollment.imagePath, mimeType: 'image/jpeg' }
+  return { buffer: await readFile(enrollment.imagePath), mimeType: 'image/jpeg' }
 }

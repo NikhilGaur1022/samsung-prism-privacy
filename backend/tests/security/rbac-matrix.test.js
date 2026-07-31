@@ -104,7 +104,20 @@ const MATRIX = {
   'POST /api/v1/sessions/:sessionId/photos': A('collectionAgent', 'super_admin'),
   'DELETE /api/v1/sessions/:sessionId/photos/:photoId': A('collectionAgent', 'super_admin'),
   'GET /api/v1/sessions/:sessionId/photos/:photoId/file': A('collectionAgent', 'super_admin'),
-  'GET /api/v1/sessions/:sessionId/photos/:photoId/redacted': A('collectionAgent', 'super_admin'),
+  // Matrix §B: "dataOwner ✓ own project", "dataAdmin ✓". The per-project scope for
+  // dataOwner is asserted in loadSession, not here — this list is the role floor.
+  'GET /api/v1/sessions/:sessionId/photos': A(
+    'collectionAgent',
+    'dataOwner',
+    'dataAdmin',
+    'super_admin',
+  ),
+  'GET /api/v1/sessions/:sessionId/photos/:photoId/redacted': A(
+    'collectionAgent',
+    'dataOwner',
+    'dataAdmin',
+    'super_admin',
+  ),
   'GET /api/v1/sessions/:sessionId/faces/:faceId/crop': A('collectionAgent', 'super_admin'),
   'POST /api/v1/sessions/:sessionId/end': A('collectionAgent', 'super_admin'),
   'GET /api/v1/sessions/:sessionId/clusters': A('collectionAgent', 'super_admin'),

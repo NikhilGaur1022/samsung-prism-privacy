@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Camera, Check, RotateCcw, Upload, Zap } from 'lucide-react'
 
-// Five angles, not a 180° sweep: buffalo_l degrades past roughly ±45° yaw, so a
+// Three angles, not five: the backend caps a subject at MAX_PER_SUBJECT (3)
+// photos, so UP/DOWN were unreachable — the request was rejected as "max photos"
+// before it ever got stored. buffalo_l also degrades past roughly ±45° yaw, so a
 // profile shot costs storage and buys nothing.
 export const POSES = [
   { key: 'FRONT', label: 'Look straight ahead', hint: 'Face the camera, eyes level.' },
   { key: 'LEFT', label: 'Turn slightly to your left', hint: 'About a quarter turn — not a full profile.' },
   { key: 'RIGHT', label: 'Turn slightly to your right', hint: 'About a quarter turn — not a full profile.' },
-  { key: 'UP', label: 'Tilt your chin up a little', hint: 'Just enough to change the angle.' },
-  { key: 'DOWN', label: 'Tilt your chin down a little', hint: 'Keep your eyes on the camera.' },
 ]
 
 // Client-side quality gate — tune here. The backend still validates det_score
@@ -16,9 +16,58 @@ export const POSES = [
 // bad frames and give auto-capture something to pause on.
 const BRIGHTNESS_MIN = 50
 const BRIGHTNESS_MAX = 230
-const QUALITY_SAMPLE_SIZE = 64 // px, downscaled square-ish sample for the luma pass
-const QUALITY_POLL_MS = 500
-const AUTO_COUNTDOWN_SECONDS = 3
+const QUALITY_SAMPLE_SIZE = 64 // px wide, enough for a luma average
+const SHARPNESS_SAMPLE_SIZE = 200 // px wide — 64px has no high-frequency detail left to measure
+const SHARPNESS_VAR_MIN = 14 // variance-of-Laplacian on 0..255 grey; below this the frame is soft/motion-blurred
+
+const DETECT_INTERVAL_MS = 150 // landmarker poll rate; full rAF-rate inference is wasted work
+const HOLD_MS = 550 // continuous all-checks-pass time required before firing
+const FACE_LANDMARKER_NUM_FACES = 2 // 2, not 1 — we need to *see* a second face to reject it
+
+// Pinned to the installed @mediapipe/tasks-vision so the WASM ABI matches the JS wrapper.
+const MEDIAPIPE_WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.0/wasm'
+const FACE_LANDMARKER_MODEL_URL =
+  'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task'
+
+// Yaw bands per pose, in degrees, expressed from the *user's* point of view
+// (which is what the mirrored preview shows them).
+//
+// YAW_SIGN maps the transformation matrix's rotation sense onto that point of
+// view. The matrix is derived from the unmirrored <video> frame, so the sign
+// depends on both the decomposition axis order and the front-camera geometry —
+// verify on-device and flip this to -1 if "turn left" only ever satisfies the
+// RIGHT band.
+const YAW_SIGN = 1
+const POSE_YAW = {
+  FRONT: { min: -10, max: 10 },
+  LEFT: { min: 12, max: 35 },
+  RIGHT: { min: -35, max: -12 },
+}
+
+function decomposeMatrix(m) {
+  // m is a 16-element column-major 4x4; r(row, col) reads the rotation block.
+  const r = (row, col) => m[col * 4 + row]
+  const sy = Math.hypot(r(0, 0), r(1, 0))
+  const deg = (rad) => (rad * 180) / Math.PI
+  if (sy < 1e-6) {
+    return { yaw: deg(Math.atan2(-r(2, 0), sy)), pitch: deg(Math.atan2(-r(1, 2), r(1, 1))), roll: 0 }
+  }
+  return {
+    yaw: deg(Math.atan2(-r(2, 0), sy)),
+    pitch: deg(Math.atan2(r(2, 1), r(2, 2))),
+    roll: deg(Math.atan2(r(1, 0), r(0, 0))),
+  }
+}
+
+function yawMessage(poseKey, yaw) {
+  const band = POSE_YAW[poseKey]
+  if (!band) return null
+  if (yaw >= band.min && yaw <= band.max) return null
+  if (poseKey === 'FRONT') return 'Look straight at the camera'
+  const overTurned = Math.abs(yaw) > Math.max(Math.abs(band.min), Math.abs(band.max))
+  if (overTurned) return 'Turn back towards the camera a little'
+  return poseKey === 'LEFT' ? 'Turn a bit more to your left' : 'Turn a bit more to your right'
+}
 
 // getUserMedia needs HTTPS or localhost — over a LAN IP it silently yields nothing,
 // so the file input is always rendered rather than offered only as a fallback.
@@ -32,18 +81,23 @@ export default function SelfieCapture({ poses = POSES, captured = [], onCapture,
   const [active, setActive] = useState(null)
 
   // Auto-capture: walks the remaining poses unattended, pausing on the first
-  // rejection (backend or client quality gate) instead of blasting through five.
+  // rejection (backend or client quality gate) instead of blasting through them.
   const [auto, setAuto] = useState(false)
   const [autoPaused, setAutoPaused] = useState(false)
-  const [countdown, setCountdown] = useState(null)
   const [blockMsg, setBlockMsg] = useState(null)
   const [quality, setQuality] = useState(null)
+  const [hold, setHold] = useState(0) // 0..1 readiness-hold progress
 
-  const countdownTimerRef = useRef(null)
-  const qualityIntervalRef = useRef(null)
+  const rafRef = useRef(null)
+  const lastDetectRef = useRef(0)
+  const lastVideoTimeRef = useRef(-1)
+  const holdStartRef = useRef(null)
+  const firingRef = useRef(false)
   const autoPendingRef = useRef(null) // pose key currently awaiting an onCapture result in auto mode
-  const faceDetectorRef = useRef(null)
-  const detectingRef = useRef(false)
+  const landmarkerRef = useRef(null)
+  const landmarkerLoadRef = useRef(/** @type {Promise<void> | null} */ (null))
+  const sharpnessCanvasRef = useRef(null)
+  const lumaCanvasRef = useRef(null)
 
   const done = new Set(captured)
   const next = poses.find((p) => !done.has(p.key)) ?? null
@@ -56,22 +110,20 @@ export default function SelfieCapture({ poses = POSES, captured = [], onCapture,
     setOn(false)
     setAuto(false)
     setAutoPaused(false)
-    setCountdown(null)
     setBlockMsg(null)
     setQuality(null)
+    setHold(0)
     autoPendingRef.current = null
-    if (countdownTimerRef.current) {
-      clearTimeout(countdownTimerRef.current)
-      countdownTimerRef.current = null
-    }
-    if (qualityIntervalRef.current) {
-      clearInterval(qualityIntervalRef.current)
-      qualityIntervalRef.current = null
+    holdStartRef.current = null
+    firingRef.current = false
+    if (rafRef.current) {
+      cancelAnimationFrame(rafRef.current)
+      rafRef.current = null
     }
   }, [])
 
   // Without this the camera light stays on after the user navigates away, and
-  // the countdown/quality-poll timers would keep firing into an unmounted tree.
+  // the readiness loop would keep polling into an unmounted tree.
   useEffect(() => stop, [stop])
 
   // The <video> is mounted only once `on` is true, so srcObject cannot be set
@@ -101,65 +153,126 @@ export default function SelfieCapture({ poses = POSES, captured = [], onCapture,
     }
   }
 
-  // Downscaled luma read for brightness, plus a best-effort FaceDetector pass.
-  // FaceDetector is Chrome/Android-only and unsupported everywhere else — when
-  // it's missing we skip face checks silently and let the backend catch it.
-  const analyzeFrame = useCallback(async (video) => {
-    if (!video || !video.videoWidth) return null
-    const canvas = document.createElement('canvas')
-    const w = QUALITY_SAMPLE_SIZE
-    const h = Math.max(1, Math.round((video.videoHeight / video.videoWidth) * w))
-    canvas.width = w
+  // MediaPipe is fetched from a CDN, so it can simply not arrive: offline, a
+  // blocked CDN, no WebGL. A failed load degrades to brightness+blur-only
+  // gating (backend still validates face count and det_score) rather than
+  // taking the whole enrollment screen down.
+  const loadLandmarker = useCallback(() => {
+    landmarkerLoadRef.current ??= (async () => {
+      try {
+        const { FaceLandmarker, FilesetResolver } = await import('@mediapipe/tasks-vision')
+        const fileset = await FilesetResolver.forVisionTasks(MEDIAPIPE_WASM_URL)
+        landmarkerRef.current = await FaceLandmarker.createFromOptions(fileset, {
+          baseOptions: { modelAssetPath: FACE_LANDMARKER_MODEL_URL, delegate: 'GPU' },
+          runningMode: 'VIDEO',
+          numFaces: FACE_LANDMARKER_NUM_FACES,
+          outputFaceBlendshapes: false,
+          outputFacialTransformationMatrixes: true,
+        })
+      } catch {
+        landmarkerRef.current = null // degraded mode
+      }
+    })()
+    return landmarkerLoadRef.current
+  }, [])
+
+  useEffect(() => {
+    if (on) loadLandmarker()
+  }, [on, loadLandmarker])
+
+  useEffect(
+    () => () => {
+      landmarkerRef.current?.close?.()
+      landmarkerRef.current = null
+    },
+    [],
+  )
+
+  const sampleTo = (canvasRef, video, width) => {
+    const canvas = (canvasRef.current ??= document.createElement('canvas'))
+    const h = Math.max(1, Math.round((video.videoHeight / video.videoWidth) * width))
+    canvas.width = width
     canvas.height = h
-    const ctx = canvas.getContext('2d')
-    ctx.drawImage(video, 0, 0, w, h)
-    const { data } = ctx.getImageData(0, 0, w, h)
+    const ctx = canvas.getContext('2d', { willReadFrequently: true })
+    ctx.drawImage(video, 0, 0, width, h)
+    return { data: ctx.getImageData(0, 0, width, h).data, w: width, h }
+  }
+
+  const measureBrightness = (video) => {
+    const { data } = sampleTo(lumaCanvasRef, video, QUALITY_SAMPLE_SIZE)
     let sum = 0
     for (let i = 0; i < data.length; i += 4) {
       sum += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]
     }
-    const brightness = sum / (data.length / 4)
+    return sum / (data.length / 4)
+  }
 
+  // Variance of the Laplacian: a sharp frame has lots of high-frequency edge
+  // energy, a blurred one has almost none. Needs a big enough sample to have
+  // any high frequencies left to measure at all.
+  const measureSharpness = (video) => {
+    const { data, w, h } = sampleTo(sharpnessCanvasRef, video, SHARPNESS_SAMPLE_SIZE)
+    const grey = new Float32Array(w * h)
+    for (let i = 0, p = 0; i < data.length; i += 4, p += 1) {
+      grey[p] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]
+    }
+    let sum = 0
+    let sumSq = 0
+    let n = 0
+    for (let y = 1; y < h - 1; y += 1) {
+      for (let x = 1; x < w - 1; x += 1) {
+        const i = y * w + x
+        const lap = 4 * grey[i] - grey[i - 1] - grey[i + 1] - grey[i - w] - grey[i + w]
+        sum += lap
+        sumSq += lap * lap
+        n += 1
+      }
+    }
+    if (!n) return 0
+    const mean = sum / n
+    return sumSq / n - mean * mean
+  }
+
+  // Synchronous, so the readiness loop can run it inline: detectForVideo is a
+  // blocking call, and both pixel passes read from an offscreen canvas.
+  const evaluateFrame = useCallback((video, poseKey) => {
+    if (!video || !video.videoWidth) return null
+
+    const brightness = measureBrightness(video)
     if (brightness < BRIGHTNESS_MIN) return { ok: false, message: 'Too dark — move to better light' }
     if (brightness > BRIGHTNESS_MAX) return { ok: false, message: 'Too bright — reduce glare' }
 
-    if (typeof window !== 'undefined' && window.FaceDetector && !detectingRef.current) {
-      detectingRef.current = true
-      try {
-        faceDetectorRef.current ??= new window.FaceDetector({ fastMode: true })
-        const faces = await faceDetectorRef.current.detect(video)
-        if (faces.length === 0) return { ok: false, message: 'No face detected — center your face' }
-        if (faces.length > 1) return { ok: false, message: 'Only one person in frame' }
-      } catch {
-        // Best-effort only — the backend still validates det_score and face count.
-      } finally {
-        detectingRef.current = false
-      }
+    if (measureSharpness(video) < SHARPNESS_VAR_MIN) {
+      return { ok: false, message: 'Too blurry — hold still' }
     }
+
+    const landmarker = landmarkerRef.current
+    if (!landmarker) return { ok: true, message: 'Ready' } // degraded: no face/angle gating
+
+    let result
+    try {
+      // detectForVideo rejects non-monotonic timestamps; skip repeat frames.
+      const t = video.currentTime
+      if (t === lastVideoTimeRef.current) return null
+      lastVideoTimeRef.current = t
+      result = landmarker.detectForVideo(video, performance.now())
+    } catch {
+      return { ok: true, message: 'Ready' } // inference died mid-session — fall back rather than block
+    }
+
+    const matrices = result?.facialTransformationMatrixes ?? []
+    const faceCount = result?.faceLandmarks?.length ?? 0
+    if (faceCount === 0) return { ok: false, message: 'No face detected — center your face' }
+    if (faceCount > 1) return { ok: false, message: 'Only one person in frame' }
+
+    const matrix = matrices[0]?.data
+    if (!matrix) return { ok: true, message: 'Ready' }
+    const { yaw } = decomposeMatrix(matrix)
+    const message = yawMessage(poseKey, YAW_SIGN * yaw)
+    if (message) return { ok: false, message }
 
     return { ok: true, message: 'Ready' }
   }, [])
-
-  // Live readiness pill: polls while the camera is on and idle so the user
-  // gets feedback before pressing capture, not just after a rejection.
-  useEffect(() => {
-    if (!on || busy || countdown !== null) {
-      setQuality(null)
-      return
-    }
-    let cancelled = false
-    const tick = async () => {
-      const result = await analyzeFrame(videoRef.current)
-      if (!cancelled) setQuality(result)
-    }
-    tick()
-    qualityIntervalRef.current = setInterval(tick, QUALITY_POLL_MS)
-    return () => {
-      cancelled = true
-      clearInterval(qualityIntervalRef.current)
-      qualityIntervalRef.current = null
-    }
-  }, [on, busy, countdown, analyzeFrame])
 
   const send = async (blob) => {
     if (!current) return
@@ -176,22 +289,20 @@ export default function SelfieCapture({ poses = POSES, captured = [], onCapture,
     if (!blob) return
 
     setPreview(URL.createObjectURL(blob))
-    // The stream stays up between poses — stopping and restarting it five times
+    // The stream stays up between poses — stopping and restarting it three times
     // is a permission-prompt-shaped way to lose people halfway through.
     await send(blob)
     setPreview(null)
   }
 
-  // triggerAutoShot is memoized for the countdown-timer effect below; capturing
-  // captureAndSend through a ref (instead of a useCallback dep) keeps it stable
-  // across renders that don't actually change the pose being captured.
   const captureAndSendRef = useRef(captureAndSend)
   captureAndSendRef.current = captureAndSend
 
   const shoot = async () => {
     const video = videoRef.current
     if (!video) return
-    const result = await analyzeFrame(video)
+    await loadLandmarker()
+    const result = evaluateFrame(video, current?.key)
     if (result && !result.ok) {
       setBlockMsg(result.message)
       return
@@ -200,70 +311,107 @@ export default function SelfieCapture({ poses = POSES, captured = [], onCapture,
     await captureAndSend(video)
   }
 
-  // One state-machine effect for auto mode: it either resolves a capture that
-  // just finished, or — once idle — arms the countdown for the next pose.
-  // Splitting those into the same effect (rather than two effects racing on
-  // `busy`) keeps a rejection from being immediately overwritten by a fresh
-  // countdown before `autoPaused` has actually committed.
-  useEffect(() => {
-    if (!auto || !on) return
+  const triggerAutoShot = useCallback(async () => {
+    const video = videoRef.current
+    const pose = next
+    if (!video || !pose) return
+    setBlockMsg(null)
+    setActive(pose.key)
+    autoPendingRef.current = pose.key
+    await captureAndSendRef.current(video)
+  }, [next])
 
-    if (autoPendingRef.current) {
-      if (busy) return
-      const pending = autoPendingRef.current
-      autoPendingRef.current = null
-      if (error || !captured.includes(pending)) {
-        setAutoPaused(true)
-      }
+  const triggerAutoShotRef = useRef(triggerAutoShot)
+  triggerAutoShotRef.current = triggerAutoShot
+
+  // Everything the readiness loop needs to read without being re-created (and
+  // thereby restarting the rAF chain) on every render.
+  const gateRef = useRef(null)
+  gateRef.current = {
+    poseKey: current?.key ?? null,
+    armed: auto && !autoPaused && !busy && !complete && !preview,
+    idle: !busy && !complete && !preview,
+  }
+
+  // Continuous readiness loop, FaceID-style: no countdown, no fixed delay. It
+  // polls the landmarker on a throttle and accumulates hold time for as long as
+  // every check passes at once; any failure zeroes the progress and the user
+  // simply keeps going — only a real capture rejection pauses auto mode.
+  useEffect(() => {
+    if (!on) {
+      setHold(0)
+      holdStartRef.current = null
       return
     }
+    lastDetectRef.current = 0
+    lastVideoTimeRef.current = -1
 
-    if (autoPaused || busy || complete || preview || countdown !== null) return
-    setCountdown(AUTO_COUNTDOWN_SECONDS)
-  }, [auto, on, autoPaused, busy, complete, preview, countdown, captured, error])
+    const loop = (ts) => {
+      rafRef.current = requestAnimationFrame(loop)
+      if (ts - lastDetectRef.current < DETECT_INTERVAL_MS) return
+      lastDetectRef.current = ts
+
+      const gate = gateRef.current
+      if (!gate.idle || firingRef.current || autoPendingRef.current) {
+        holdStartRef.current = null
+        setHold(0)
+        setQuality(null)
+        return
+      }
+
+      const result = evaluateFrame(videoRef.current, gate.poseKey)
+      if (!result) return // frame not ready / duplicate — keep the last reading
+      setQuality(result)
+
+      if (!result.ok) {
+        holdStartRef.current = null
+        setHold(0)
+        return
+      }
+
+      holdStartRef.current ??= ts
+      const progress = Math.min(1, (ts - holdStartRef.current) / HOLD_MS)
+      setHold(progress)
+
+      if (progress >= 1 && gate.armed) {
+        holdStartRef.current = null
+        setHold(0)
+        firingRef.current = true
+        Promise.resolve(triggerAutoShotRef.current()).finally(() => {
+          firingRef.current = false
+        })
+      }
+    }
+
+    rafRef.current = requestAnimationFrame(loop)
+    return () => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current)
+      rafRef.current = null
+    }
+  }, [on, evaluateFrame])
+
+  // Resolves a capture that just finished. Only a rejection (backend error, or
+  // the photo not landing in `captured`) pauses auto mode — mid-hold check
+  // failures are handled by the loop itself.
+  useEffect(() => {
+    if (!auto || !on) return
+    if (!autoPendingRef.current || busy) return
+    const pending = autoPendingRef.current
+    autoPendingRef.current = null
+    if (error || !captured.includes(pending)) setAutoPaused(true)
+  }, [auto, on, busy, captured, error])
 
   // Stop the camera once auto mode finishes the last pose.
   useEffect(() => {
     if (auto && complete && on) stop()
   }, [auto, complete, on, stop])
 
-  const triggerAutoShot = useCallback(async () => {
-    const video = videoRef.current
-    const pose = next
-    if (!video || !pose) return
-    const result = await analyzeFrame(video)
-    if (result && !result.ok) {
-      setBlockMsg(result.message)
-      setAutoPaused(true)
-      return
-    }
-    setBlockMsg(null)
-    setActive(pose.key)
-    autoPendingRef.current = pose.key
-    await captureAndSendRef.current(video)
-  }, [next, analyzeFrame])
-
-  useEffect(() => {
-    if (countdown === null) return
-    if (countdown === 0) {
-      setCountdown(null)
-      triggerAutoShot()
-      return
-    }
-    countdownTimerRef.current = setTimeout(() => {
-      setCountdown((c) => (c === null ? null : c - 1))
-    }, 1000)
-    return () => {
-      clearTimeout(countdownTimerRef.current)
-      countdownTimerRef.current = null
-    }
-  }, [countdown, triggerAutoShot])
-
   const toggleAuto = () => {
+    holdStartRef.current = null
+    setHold(0)
     if (auto) {
       setAuto(false)
       setAutoPaused(false)
-      setCountdown(null)
       setBlockMsg(null)
       autoPendingRef.current = null
     } else {
@@ -276,6 +424,8 @@ export default function SelfieCapture({ poses = POSES, captured = [], onCapture,
   const resumeAuto = () => {
     setAutoPaused(false)
     setBlockMsg(null)
+    holdStartRef.current = null
+    setHold(0)
   }
 
   const handleFile = async (e) => {
@@ -285,6 +435,9 @@ export default function SelfieCapture({ poses = POSES, captured = [], onCapture,
   }
 
   const showResume = auto && autoPaused
+  const ringReady = hold >= 1
+  const RING_R = 46
+  const RING_C = 2 * Math.PI * RING_R
 
   return (
     <div className="rounded-card border border-border bg-canvas p-4">
@@ -346,11 +499,33 @@ export default function SelfieCapture({ poses = POSES, captured = [], onCapture,
               className={`${on ? 'absolute inset-0 h-full w-full' : 'aspect-video w-full'} bg-black object-contain`}
             />
           )}
-          {auto && countdown !== null && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 bg-black/60 text-center text-white">
-              <p className="text-sm font-bold">{current?.label}</p>
-              <p className="text-xs font-medium text-white/80">{current?.hint}</p>
-              <p className="mt-1 text-4xl font-black tabular-nums">{countdown}</p>
+          {/* Face-ID style hold ring: fills as the frame stays good, snaps to the
+              ready colour when the hold completes and the shot fires. */}
+          {on && !preview && !complete && (
+            <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+              <svg viewBox="0 0 100 100" className="h-[86%] max-h-full -rotate-90">
+                <circle
+                  cx="50"
+                  cy="50"
+                  r={RING_R}
+                  fill="none"
+                  strokeWidth="3"
+                  className="stroke-white/25"
+                />
+                <circle
+                  cx="50"
+                  cy="50"
+                  r={RING_R}
+                  fill="none"
+                  strokeWidth="4"
+                  strokeLinecap="round"
+                  strokeDasharray={RING_C}
+                  strokeDashoffset={RING_C * (1 - hold)}
+                  className={`transition-[stroke-dashoffset] duration-150 ${
+                    ringReady ? 'stroke-success' : 'stroke-brand'
+                  }`}
+                />
+              </svg>
             </div>
           )}
         </div>

@@ -51,6 +51,7 @@ Approval is a hard gate: `Session` creation must reject any project whose `statu
 | `POST /consent` | ✓ self | ✗ | ✗ | ✓ witness | ✗ | ✗ |
 | `POST /sessions/:id/photos` | ✗ | ✗ | ✗ | ✓ own ACTIVE | ✗ | ✗ |
 | `GET /sessions/:id/photos/:pid/raw` | ✓ own | ✗ | ✗ | ✓ own, pre-ARCHIVE | ⚑ | ⚑ |
+| `GET /sessions/:id/photos` (frame index) | ✗ | ✗ | ✓ own project | ✓ own | ✓ | ✓ |
 | `GET /sessions/:id/photos/:pid/redacted` | ✓ own | ✗ | ✓ own project | ✓ own | ✓ | ✓ |
 | `GET /sessions/:id/faces` (crops) | ✗ | ✗ | ✗ | ✓ TAGGING only | ✗ | ⚑ |
 | `POST /sessions/:id/finalize` | ✗ | ✗ | ✗ | ✓ own | ✗ | ✓ |

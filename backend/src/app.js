@@ -10,7 +10,11 @@ import { subjectRoutes } from './modules/subjects/subject.routes.js'
 import { authSubjectRoutes } from './modules/auth-subject/auth-subject.routes.js'
 import { authAdminRoutes } from './modules/auth-admin/auth-admin.routes.js'
 import { projectRoutes } from './modules/projects/project.routes.js'
-import { sessionRoutes, sessionBreakGlassRoutes } from './modules/sessions/session.routes.js'
+import {
+  sessionRoutes,
+  sessionBreakGlassRoutes,
+  sessionMediaRoutes,
+} from './modules/sessions/session.routes.js'
 import { consentRoutes } from './modules/consent/consent.routes.js'
 import {
   agentEnrollmentRoutes,
@@ -105,6 +109,10 @@ export function createApp() {
   // which sessionRoutes' router-level requireRole would otherwise 403 before the
   // break-glass check ever ran.
   app.use('/api/v1/sessions', sessionBreakGlassRoutes)
+  // Redacted media, mounted ahead of sessionRoutes for the same reason: it admits
+  // dataOwner and dataAdmin to the derivatives, and the agent-only floor below
+  // would 403 them first.
+  app.use('/api/v1/sessions', sessionMediaRoutes)
   app.use('/api/v1/sessions', sessionRoutes)
   app.use('/api/v1/consent', consentRoutes)
   app.use('/auth/subject', authSubjectRoutes)

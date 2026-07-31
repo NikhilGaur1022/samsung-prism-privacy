@@ -83,6 +83,7 @@ export const ROLES = {
     accessNote: ACCESS_NOTE,
     nav: [
       { label: 'DSAR Queue', icon: Inbox, path: '/dsar-queue' },
+      { label: 'Collection Sessions', icon: Camera, path: '/collection-sessions' },
       { label: 'Discovery Workspace', icon: SearchCode, path: '/discovery-workspace' },
       { label: 'Data Lineage', icon: Share2, path: '/data-lineage' },
       { label: 'Purge / Export', icon: FileText, path: '/purge-export' },

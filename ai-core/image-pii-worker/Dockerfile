@@ -16,7 +16,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # NER-based, so a missing model is a hard failure on the first request.
 RUN python -m spacy download en_core_web_sm
 
-COPY main.py pii_recognizers.py ./
+COPY main.py pii_recognizers.py redaction.py ./
+COPY tests ./tests
 
 # No model volume, unlike face-worker: rapidocr-onnxruntime ships its detection,
 # recognition and classification ONNX weights inside the wheel, so there is

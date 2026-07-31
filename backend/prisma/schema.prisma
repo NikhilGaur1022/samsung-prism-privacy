@@ -69,6 +69,8 @@ model Subject {
   dsarRequests        DsarRequest[]
   purgeJobs           PurgeJob[]
   subjectKey          SubjectKey?
+  dataItems           SubjectDataItem[]
+  importBatches       ImportBatch[]
 
   // Intake-time UX defaults ONLY. Once project_consent_matrix exists (backend-plan.md
   // Phase 2), THAT table is the sole authority for any gating/consent-check logic.
@@ -308,6 +310,7 @@ model Project {
   sessions        Session[]
   dsarRequests    DsarRequest[]
   retentionPolicies RetentionPolicy[]
+  importBatches   ImportBatch[]
 
   @@index([status])
   @@index([ownerAdminId])
@@ -471,8 +474,13 @@ enum CameraSource {
 }
 
 model Photo {
-  id           String       @id @default(uuid()) @db.Uuid
-  sessionId    String       @db.Uuid
+  id String @id @default(uuid()) @db.Uuid
+  // Null for an IMPORT: there was no capture event, so there is no session, no
+  // agent and no project to hang one on. Every consumer that reads
+  // `photo.session` must treat it as optional — an imported frame is real data
+  // about a real person and must never be silently skipped because it has no
+  // session (that would be a DSAR completeness hole, not a display bug).
+  sessionId    String?      @db.Uuid
   storagePath  String
   cameraSource CameraSource
   sha256       String
@@ -495,10 +503,13 @@ model Photo {
   // legacy blob not yet swept by scripts/migrate-media-encrypt.js.
   encKeyId  String?   @map("enc_key_id")
 
-  session  Session         @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  session  Session?        @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   faces    FaceDetection[]
   subjects PhotoSubject[]
 
+  // Postgres treats NULLs as distinct, so this stops de-duplicating the moment
+  // sessionId is null. Import de-duplication is therefore explicit in
+  // import.service.ingestItem (sha256 within the subject), not implied here.
   @@unique([sessionId, sha256])
   @@index([sessionId])
   @@map("photos")
@@ -570,15 +581,23 @@ model FaceCluster {
 // Written at finalize. This is what links a photo to a person AND to the consent
 // that permits holding it — purge/DSAR walks consentId, exactly like media_assets.
 model PhotoSubject {
-  id        String   @id @default(uuid()) @db.Uuid
-  photoId   String   @db.Uuid
-  subjectId String   @db.Uuid
-  consentId String   @db.Uuid
+  id        String @id @default(uuid()) @db.Uuid
+  photoId   String @db.Uuid
+  subjectId String @db.Uuid
+  // Null ONLY on an IMPORT link for which no live ProjectConsent existed at
+  // ingest. It is not "no lawful basis recorded" — the basis is recorded, as
+  // SubjectDataItem.meta.lawfulBasis = 'IMPORT_UNVERIFIED', and discovery and
+  // lineage surface it as such. Manufacturing a ProjectConsent row to satisfy a
+  // NOT NULL would have been the opposite: a forged consent record.
+  //
+  // The capture path is unchanged — session.service.finalizeSession still refuses
+  // to write a link without a consent id, so nothing collected can reach null here.
+  consentId String? @db.Uuid
   createdAt DateTime @default(now())
 
-  photo   Photo          @relation(fields: [photoId], references: [id], onDelete: Cascade)
-  subject Subject        @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
-  consent ProjectConsent @relation(fields: [consentId], references: [consentId], onDelete: Cascade)
+  photo   Photo           @relation(fields: [photoId], references: [id], onDelete: Cascade)
+  subject Subject         @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
+  consent ProjectConsent? @relation(fields: [consentId], references: [consentId], onDelete: Cascade)
 
   @@unique([photoId, subjectId])
   @@index([consentId])
@@ -698,6 +717,7 @@ model DsarRequest {
   evidence    DsarEvidence[]
   purgeJobs   PurgeJob[]
   certificate DeletionCertificate?
+  itemActions DsarItemAction[]
 
   @@index([status, slaDueAt])
   @@index([subjectId, createdAt])
@@ -963,4 +983,146 @@ model SubjectKey {
   subject Subject @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
 
   @@map("subject_keys")
+}
+
+// ---------------------------------------------------------------------------
+// DSAR item index — per-item discovery, actions and imports (PLAN.md phase 1)
+// ---------------------------------------------------------------------------
+
+// One value per data class the platform can hold about a person. Adding a class
+// is an enum value + one resolver in itemIndex.service.js — never a new table,
+// so discovery/action/export stay type-agnostic.
+enum DataItemType {
+  PHOTO
+}
+
+// How the item entered the system. IMPORT items have no capture-time consent
+// and are flagged meta.lawfulBasis = 'IMPORT_UNVERIFIED' unless a live
+// ProjectConsent was supplied; discovery surfaces that gap rather than hiding it.
+enum DataItemOrigin {
+  COLLECTION_SESSION
+  IMPORT
+  ENROLLMENT
+}
+
+// A PROJECTION, never the source of truth. The underlying photos/photo_subjects
+// rows remain authoritative; this index exists so "everything we hold about this
+// person" is one paged, countable query instead of a per-type fan-out. It is
+// rebuildable idempotently (itemIndex.rebuildAll) precisely so a drift here can
+// never become a second consistency problem on erasure-critical data.
+model SubjectDataItem {
+  id        String         @id @default(uuid()) @db.Uuid
+  subjectId String         @map("subject_id") @db.Uuid
+  type      DataItemType
+  origin    DataItemOrigin
+
+  // Polymorphic pointer back at the authoritative row.
+  sourceTable String @map("source_table")
+  sourceId    String @map("source_id") @db.Uuid
+
+  projectId String? @map("project_id") @db.Uuid
+  sessionId String? @map("session_id") @db.Uuid
+
+  storagePath String? @map("storage_path")
+  contentHash String? @map("content_hash")
+  capturedAt  DateTime? @map("captured_at")
+
+  // >1 means other principals appear on the same object. A DELETE on such an
+  // item is downgraded to REDACT server-side — never a client-side check.
+  sharedSubjectCount Int     @default(1) @map("shared_subject_count")
+  redactedAvailable  Boolean @default(false) @map("redacted_available")
+
+  // Soft tombstone. The index keeps the row after the source is purged so the
+  // DSAR timeline can still prove the item existed and was deleted.
+  deletedAt DateTime? @map("deleted_at")
+  indexedAt DateTime  @default(now()) @map("indexed_at")
+  meta      Json?
+
+  subject Subject         @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
+  actions DsarItemAction[]
+
+  @@unique([subjectId, type, sourceTable, sourceId])
+  @@index([subjectId, type, capturedAt])
+  @@index([subjectId, deletedAt])
+  @@map("subject_data_items")
+}
+
+enum DsarItemActionKind {
+  REDACT
+  DELETE
+  EXPORT
+}
+
+enum DsarItemActionStatus {
+  REQUESTED
+  RUNNING
+  DONE
+  FAILED
+  SKIPPED
+}
+
+// Actions are recorded before they are executed, never fire-and-forget: an
+// action with no row is an action with no audit trail. The row is written in the
+// request transaction as REQUESTED and moved to a terminal state by the worker.
+model DsarItemAction {
+  id            String               @id @default(uuid()) @db.Uuid
+  dsarRequestId String               @map("dsar_request_id") @db.Uuid
+  itemId        String               @map("item_id") @db.Uuid
+  kind          DsarItemActionKind
+  status        DsarItemActionStatus @default(REQUESTED)
+
+  requestedByAdminId String? @map("requested_by_admin_id") @db.Uuid
+  // Groups one bulk submission so a partial failure is reportable as a batch.
+  batchId            String? @map("batch_id") @db.Uuid
+  reason             String?
+  error              String?
+  // Captured before any destructive step, mirroring purge_job_locations.
+  hashBefore         String? @map("hash_before")
+
+  requestedAt DateTime  @default(now()) @map("requested_at")
+  completedAt DateTime? @map("completed_at")
+
+  request DsarRequest     @relation(fields: [dsarRequestId], references: [id], onDelete: Cascade)
+  item    SubjectDataItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  // Idempotency: a double-submitted bulk action collapses onto one row.
+  @@unique([dsarRequestId, itemId, kind])
+  @@index([dsarRequestId, status])
+  @@index([batchId])
+  @@map("dsar_item_actions")
+}
+
+enum ImportBatchStatus {
+  OPEN
+  CLOSED
+  FAILED
+}
+
+// An admin-initiated ingest of a named person's pre-existing data. Distinct from
+// a collection session because there is no capture event, no agent and no
+// capture-time consent — see DataItemOrigin.IMPORT.
+model ImportBatch {
+  id        String            @id @default(uuid()) @db.Uuid
+  subjectId String            @map("subject_id") @db.Uuid
+  type      DataItemType      @default(PHOTO)
+  projectId String?           @map("project_id") @db.Uuid
+  status    ImportBatchStatus @default(OPEN)
+
+  createdByAdminId String? @map("created_by_admin_id") @db.Uuid
+
+  itemsTotal  Int @default(0) @map("items_total")
+  itemsDone   Int @default(0) @map("items_done")
+  itemsFailed Int @default(0) @map("items_failed")
+
+  note      String?
+  closedAt  DateTime? @map("closed_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  subject Subject  @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@index([subjectId, createdAt])
+  @@index([status])
+  @@map("import_batches")
 }

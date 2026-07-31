@@ -13,6 +13,7 @@ import RequestOversight from './pages/dpo/RequestOversight'
 import SlaMonitoring from './pages/dpo/SlaMonitoring'
 import ComplianceReports from './pages/dpo/ComplianceReports'
 import DsarQueue from './pages/dataAdmin/DsarQueue'
+import CollectionSessions from './pages/dataAdmin/CollectionSessions'
 import DiscoveryWorkspace from './pages/dataAdmin/DiscoveryWorkspace'
 import DataLineage from './pages/dataAdmin/DataLineage'
 import PurgeExport from './pages/dataAdmin/PurgeExport'
@@ -33,6 +34,7 @@ import SessionDetail from './pages/collectionAgent/SessionDetail'
 import Tagging from './pages/collectionAgent/Tagging'
 import ReviewPhotos from './pages/collectionAgent/ReviewPhotos'
 import People from './pages/collectionAgent/People'
+import SessionPhotos from './pages/SessionPhotos'
 
 const PAGE_COMPONENTS = {
   '/project-approvals': ProjectApprovals,
@@ -41,6 +43,7 @@ const PAGE_COMPONENTS = {
   '/sla-monitoring': SlaMonitoring,
   '/compliance-reports': ComplianceReports,
   '/dsar-queue': DsarQueue,
+  '/collection-sessions': CollectionSessions,
   '/discovery-workspace': DiscoveryWorkspace,
   '/data-lineage': DataLineage,
   '/purge-export': PurgeExport,
@@ -68,6 +71,17 @@ export default function App() {
           <Route path="/accept-invite" element={<AcceptInvite />} />
           <Route path="/forgot-password" element={<ForgotPassword />} />
           <Route path="/reset-password" element={<ResetPassword />} />
+          {/* Oversight view of one session's redacted set. Deliberately NOT open to
+              collectionAgent — that role has SessionDetail, which shows the same
+              session with the roster and the capture controls it still needs. */}
+          <Route
+            path="/sessions/:sessionId/photos"
+            element={
+              <RequireRole allow={['dataOwner', 'dataAdmin']}>
+                <SessionPhotos />
+              </RequireRole>
+            }
+          />
           <Route
             path="/sessions/:sessionId"
             element={

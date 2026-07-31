@@ -4,7 +4,6 @@ import { requireAdminAuth } from '../../middleware/requireAdminAuth.js'
 import { requireRole } from '../../middleware/requireRole.js'
 import { requireSubjectAuth } from '../../middleware/requireSubjectAuth.js'
 import { ApiError } from '../../middleware/errorHandler.js'
-import { resolvePath } from '../../lib/storage.js'
 import * as enrollmentService from './enrollment.service.js'
 import { uuid, parsePose } from './enrollment.validation.js'
 
@@ -16,11 +15,15 @@ const upload = multer({
   },
 })
 
-function sendImage(res, { path, mimeType }) {
-  // Enrollment images are content-addressed and immutable, but they are biometric
-  // data — private cache only, never a shared/proxy cache.
+// Serving helper. The bytes arrive here already decrypted by the service and are
+// sent as a buffer — never as a path handed to res.sendFile, which would stream
+// the sealed 'PRSM' envelope straight off disk and label it image/jpeg.
+function sendImage(res, { buffer, mimeType }) {
+  // Biometric data: private cache only, never a shared/proxy cache. Immutable
+  // content, so a short private max-age is fine — the thumbnail deck re-requests
+  // every one of these on each reload.
   res.set('Cache-Control', 'private, max-age=3600')
-  res.type(mimeType).sendFile(resolvePath(path), { root: process.cwd() })
+  res.type(mimeType).send(buffer)
 }
 
 // --- Agent-facing --------------------------------------------------------------

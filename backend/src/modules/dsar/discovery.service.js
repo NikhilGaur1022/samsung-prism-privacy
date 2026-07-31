@@ -1,5 +1,6 @@
 import { prisma } from '../../config/prisma.js'
 import { fileExists } from '../../lib/storage.js'
+import { indexSubject } from './itemIndex.service.js'
 
 // Answers "everywhere this person exists", in the same L-code vocabulary the
 // privacy dataflow and the DPIA use, so a discovery result, a purge job and a
@@ -252,6 +253,21 @@ export async function runDiscovery(subjectId) {
         l.present = await fileExists(l.storagePath).catch(() => false)
       }),
   )
+
+  // The item index is a projection of exactly this walk, refreshed here so a
+  // discovery result and the index can never disagree about what is held.
+  //
+  // Deliberately non-fatal, and the one place in this module that swallows an
+  // error: the index is derived data, while runDiscovery() is what
+  // createPurgeJob() builds an erasure from. Failing the walk because a
+  // rebuildable projection could not be written would block a deletion the
+  // principal is entitled to, which is strictly worse than a stale index — and
+  // the next discovery run rebuilds it.
+  try {
+    await indexSubject(subjectId)
+  } catch (err) {
+    console.error(`[discovery] item index refresh failed for subject ${subjectId}:`, err)
+  }
 
   return {
     subjectId,
