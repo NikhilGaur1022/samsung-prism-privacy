@@ -500,6 +500,109 @@ export function getPurgeJob(requestId, purgeJobId) {
   return request(`/api/v1/dsar/${requestId}/purge-jobs/${purgeJobId}`)
 }
 
+// --- DSAR item search, actions, timeline (PLAN Phases 4–7) -------------------
+
+// Identity lookup. Exact + prefix only server-side — never fuzzy — so a UI that
+// "helpfully" widens a term here would be widening it past what the server will
+// answer, not past what it should.
+export function searchDsarSubjects(params = {}) {
+  const query = new URLSearchParams(params).toString()
+  return request(`/api/v1/dsar/subjects/search${query ? `?${query}` : ''}`)
+}
+
+// One page of the request subject's item index, plus `totals`. `totals.all`
+// ignores the filters — it is the completeness claim ("we hold N things about
+// this person"), and rendering `items.length` in its place would turn a filtered
+// view into a false "this is everything".
+export function listDsarItems(requestId, params = {}) {
+  const query = new URLSearchParams(
+    Object.entries(params).filter(([, v]) => v !== '' && v !== undefined && v !== null),
+  ).toString()
+  return request(`/api/v1/dsar/${requestId}/items${query ? `?${query}` : ''}`)
+}
+
+// `body` is `{ kind, reason, itemIds }` OR `{ kind, reason, filter }` — never
+// both; the server rejects the pair. "Select all matching" must send the FILTER,
+// not a harvested id list: the set is resolved server-side against the request's
+// own subject and capped there.
+export function requestDsarItemActions(requestId, body) {
+  return request(`/api/v1/dsar/${requestId}/items/actions`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export function listDsarItemActions(requestId, params = {}) {
+  const query = new URLSearchParams(params).toString()
+  return request(`/api/v1/dsar/${requestId}/items/actions${query ? `?${query}` : ''}`)
+}
+
+export function getDsarTimeline(requestId) {
+  return request(`/api/v1/dsar/${requestId}/timeline`)
+}
+
+// selection: 'ALL' | 'SELECTED' | { itemIds } | { filter }
+export function buildDsarPackage(requestId, selection = 'ALL') {
+  return request(`/api/v1/dsar/${requestId}/package`, {
+    method: 'POST',
+    body: JSON.stringify({ selection }),
+  })
+}
+
+// 409 while any item action is still REQUESTED or RUNNING. The caller should
+// surface that as "work is still in flight", not as a generic failure.
+export function closeDsar(requestId, note) {
+  return request(`/api/v1/dsar/${requestId}/close`, {
+    method: 'POST',
+    body: JSON.stringify({ note }),
+  })
+}
+
+// --- Import (PLAN Phase 3) ---------------------------------------------------
+
+export function createImportBatch(payload) {
+  return request('/api/v1/imports', { method: 'POST', body: JSON.stringify(payload) })
+}
+
+export function listImportBatches(params = {}) {
+  const query = new URLSearchParams(params).toString()
+  return request(`/api/v1/imports${query ? `?${query}` : ''}`)
+}
+
+export function getImportBatch(batchId) {
+  return request(`/api/v1/imports/${batchId}`)
+}
+
+export function closeImportBatch(batchId, note) {
+  return request(`/api/v1/imports/${batchId}/close`, {
+    method: 'POST',
+    body: JSON.stringify({ note }),
+  })
+}
+
+// Multipart, so it bypasses `request()` for the same reason uploadPhotos does:
+// setting Content-Type by hand stops the browser generating the boundary.
+export async function uploadImportItems(batchId, files) {
+  const form = new FormData()
+  for (const file of files) form.append('photos', file)
+
+  const res = await fetch(`${BASE_URL}/api/v1/imports/${batchId}/items`, {
+    method: 'POST',
+    credentials: 'include',
+    body: form,
+  })
+
+  const body = await res.json().catch(() => null)
+  if (!res.ok) {
+    const error = new Error(body?.error ?? `Import upload failed with status ${res.status}`)
+    error.status = res.status
+    error.details = body?.details
+    throw error
+  }
+  clearApiCache()
+  return body
+}
+
 // --- Audit -----------------------------------------------------------------
 
 export function listAudit(params = {}) {

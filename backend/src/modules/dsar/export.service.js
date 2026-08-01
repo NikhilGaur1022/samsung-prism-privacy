@@ -21,8 +21,79 @@ import { logger } from '../../lib/logger.js'
 
 const PACKAGE_TTL_DAYS = Number(process.env.DSAR_PACKAGE_TTL_DAYS ?? 30)
 
+// The archive is built in memory because storage.writeFile seals the whole blob
+// under one AES-GCM envelope — there is no partial-seal API to stream into, and
+// inventing one would put an unsealed temp file on disk, which is the thing the
+// sealed-media guarantee exists to prevent. So the cap is the mitigation: a
+// package that would exceed it fails with an instruction instead of taking the
+// API process down with it. Selective export (below) is what keeps real requests
+// under it.
+const PACKAGE_MAX_BYTES = Number(process.env.DSAR_PACKAGE_MAX_BYTES ?? 512 * 1024 * 1024)
+
 function tokenHash(token) {
   return createHash('sha256').update(token).digest('hex')
+}
+
+/**
+ * Resolves what the operator asked to package into a set of PhotoSubject link
+ * ids, or null for "everything".
+ *
+ * Selection is expressed over the ITEM INDEX rather than over photos, so the
+ * package and the item grid are describing the same objects with the same ids.
+ * The subject scope on every query is what stops an id list from another
+ * principal's grid pulling their photos into this package.
+ */
+async function resolveSelection(subjectId, dsarRequestId, selection) {
+  if (!selection || selection === 'ALL') return { linkIds: null, descriptor: { mode: 'ALL' } }
+
+  let items
+  let descriptor
+
+  if (selection === 'SELECTED') {
+    // Phase 5's EXPORT action is a marker with no side effect. This is where it
+    // acquires one: whatever the operator ticked for export, gets exported.
+    const actions = await prisma.dsarItemAction.findMany({
+      where: { dsarRequestId, kind: 'EXPORT', status: 'DONE' },
+      select: { itemId: true },
+    })
+    items = await prisma.subjectDataItem.findMany({
+      where: { id: { in: actions.map((a) => a.itemId) }, subjectId },
+      select: { sourceTable: true, sourceId: true },
+    })
+    descriptor = { mode: 'SELECTED', markedItems: actions.length }
+  } else if (Array.isArray(selection.itemIds)) {
+    items = await prisma.subjectDataItem.findMany({
+      where: { id: { in: selection.itemIds }, subjectId },
+      select: { id: true, sourceTable: true, sourceId: true },
+    })
+    if (items.length !== new Set(selection.itemIds).size) {
+      throw new ApiError(403, "Some selected items do not belong to this request's data principal")
+    }
+    descriptor = { mode: 'ITEM_IDS', itemIds: selection.itemIds }
+  } else if (selection.filter) {
+    const { type, origin, projectId, from, to } = selection.filter
+    items = await prisma.subjectDataItem.findMany({
+      where: {
+        subjectId,
+        deletedAt: null,
+        ...(type ? { type } : {}),
+        ...(origin ? { origin } : {}),
+        ...(projectId ? { projectId } : {}),
+        ...(from || to
+          ? { capturedAt: { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(to) } : {}) } }
+          : {}),
+      },
+      select: { sourceTable: true, sourceId: true },
+    })
+    descriptor = { mode: 'FILTER', filter: selection.filter }
+  } else {
+    throw new ApiError(400, "selection must be 'ALL', 'SELECTED', { itemIds } or { filter }")
+  }
+
+  return {
+    linkIds: new Set(items.filter((i) => i.sourceTable === 'photo_subjects').map((i) => i.sourceId)),
+    descriptor,
+  }
 }
 
 /**
@@ -31,15 +102,27 @@ function tokenHash(token) {
  * The archive is written through storage.writeFile under an export scope, so at
  * rest it is sealed with a key that is not the project key — destroying that key
  * crypto-shreds the package independently of everything else.
+ *
+ * `selection` narrows what goes in. It defaults to 'ALL', which is the whole
+ * subject and the behaviour every existing caller and test relies on. A narrowed
+ * package is self-describing: the manifest states the selection, how many items
+ * it covered and how many were left out, so a partial package can never be read
+ * as a complete §11 answer.
  */
-export async function buildAccessPackage(dsarRequestId, admin = null) {
+export async function buildAccessPackage(dsarRequestId, admin = null, { selection = 'ALL' } = {}) {
   const request = await prisma.dsarRequest.findUnique({ where: { id: dsarRequestId } })
   if (!request) throw new ApiError(404, 'DSAR request not found')
-  if (request.type !== 'ACCESS') {
+  // An ACCESS request produces the principal's own §11 package on any path. Any
+  // other type produces one only when a handler asked for it: a package built
+  // while working an erasure or a grievance is a handler's working copy, and it
+  // is recorded as EXPORT_PACKAGE evidence exactly like the §11 one so it cannot
+  // be produced off the record.
+  if (request.type !== 'ACCESS' && !admin) {
     throw new ApiError(400, `DSAR type ${request.type} does not produce an access package`)
   }
 
   const subjectId = request.subjectId
+  const { linkIds, descriptor } = await resolveSelection(subjectId, dsarRequestId, selection)
 
   const [subject, consents, links, enrollments, accessEvents] = await Promise.all([
     prisma.subject.findUnique({
@@ -74,6 +157,7 @@ export async function buildAccessPackage(dsarRequestId, admin = null) {
     prisma.photoSubject.findMany({
       where: { subjectId },
       select: {
+        id: true,
         photoId: true,
         consentId: true,
         createdAt: true,
@@ -86,6 +170,10 @@ export async function buildAccessPackage(dsarRequestId, admin = null) {
             takenAt: true,
             createdAt: true,
             mimeType: true,
+            // How many principals are on the frame. A shared frame is the reason
+            // the package ships a redacted derivative rather than the original,
+            // and the manifest states how many times that substitution happened.
+            _count: { select: { subjects: true } },
           },
         },
       },
@@ -106,17 +194,32 @@ export async function buildAccessPackage(dsarRequestId, admin = null) {
 
   const files = []
   const photoManifest = []
+  let redactedSubstitutions = 0
+  let bytes = 0
 
   for (const link of links) {
     const photo = link.photo
+    const shared = photo._count.subjects > 1
     const entry = {
       photoId: photo.id,
       sessionId: photo.sessionId,
       takenAt: photo.takenAt,
       linkedAt: link.createdAt,
       consentId: link.consentId,
+      // Stated per photo, not only in the totals: a principal reading the
+      // manifest should be able to see which of their images were withheld in
+      // original form because someone else was in the frame.
+      sharedFrame: shared,
       included: false,
       reason: null,
+    }
+
+    // Selection is applied before anything is read from storage — a photo the
+    // operator did not select must not be decrypted at all, let alone packaged.
+    if (linkIds && !linkIds.has(link.id)) {
+      entry.reason = 'NOT_SELECTED — outside the selection this package was built for'
+      photoManifest.push(entry)
+      continue
     }
 
     // Fail closed here too. A photo whose masking was never confirmed is not
@@ -130,12 +233,21 @@ export async function buildAccessPackage(dsarRequestId, admin = null) {
 
     try {
       const buffer = await readFile(photo.redactedPath)
+      bytes += buffer.length
+      if (bytes > PACKAGE_MAX_BYTES) {
+        throw new ApiError(
+          413,
+          `This package exceeds the ${Math.round(PACKAGE_MAX_BYTES / 1024 / 1024)} MB build ceiling. Build it in parts with a narrower selection.`,
+        )
+      }
       const name = `photos/${photo.id}.jpg`
       files.push({ name, data: buffer, date: photo.createdAt })
       entry.included = true
       entry.file = name
       entry.sha256 = createHash('sha256').update(buffer).digest('hex')
+      if (shared) redactedSubstitutions += 1
     } catch (err) {
+      if (err instanceof ApiError) throw err
       logger.error({ err, photoId: photo.id }, 'access package: could not read redacted derivative')
       entry.reason = 'UNREADABLE — the derivative could not be read at packaging time'
     }
@@ -143,10 +255,27 @@ export async function buildAccessPackage(dsarRequestId, admin = null) {
   }
 
   const manifest = {
-    version: 1,
+    version: 2,
     packageType: 'DPDP_SECTION_11_ACCESS',
     dsarRequestId,
     generatedAt: new Date().toISOString(),
+    // What this package is and is not. A narrowed package that did not say so
+    // could be read as the complete §11 answer, which is the one thing a partial
+    // export must never be mistaken for.
+    selection: {
+      ...descriptor,
+      complete: descriptor.mode === 'ALL',
+      itemCount: photoManifest.filter((p) => p.included).length,
+      excludedCount: photoManifest.filter((p) => !p.included).length,
+      excludedBySelection: photoManifest.filter((p) => p.reason?.startsWith('NOT_SELECTED')).length,
+      // Every image here is a redacted derivative; this counts the ones where
+      // that substitution withheld something — a frame holding other people.
+      redactedSubstitutions,
+      note:
+        descriptor.mode === 'ALL'
+          ? 'This package covers every image held for this data principal at the time of generation.'
+          : 'This package covers a selected subset. It is not a complete record of what is held.',
+    },
     dataPrincipal: {
       id: subject.masterUserId,
       fullName: subject.fullName,
@@ -209,6 +338,10 @@ export async function buildAccessPackage(dsarRequestId, admin = null) {
         'manifest.json holds your profile, your consents, and a summary of how your',
         'data is processed. photos/ holds the redacted copies of images you appear in.',
         '',
+        manifest.selection.complete
+          ? 'This package covers every image held for you at the time it was generated.'
+          : `This package covers a SELECTED SUBSET: ${manifest.selection.itemCount} image(s) included, ${manifest.selection.excludedCount} not included. It is not a complete record of what is held.`,
+        '',
         'Images are redacted: other people in the frame are blurred and sensitive text',
         'is masked. Originals are not included, because exporting them would disclose',
         'other people to you.',
@@ -241,7 +374,10 @@ export async function buildAccessPackage(dsarRequestId, admin = null) {
     data: {
       dsarRequestId,
       kind: 'EXPORT_PACKAGE',
-      label: 'DPDP §11 access package',
+      label:
+        descriptor.mode === 'ALL'
+          ? 'DPDP §11 access package'
+          : `DPDP §11 access package — selected subset (${descriptor.mode})`,
       storagePath,
       contentHash,
       createdByAdminId: admin?.id ?? null,
@@ -254,6 +390,7 @@ export async function buildAccessPackage(dsarRequestId, admin = null) {
         fileCount: files.length,
         photosIncluded: photoManifest.filter((p) => p.included).length,
         photosExcluded: photoManifest.filter((p) => !p.included).length,
+        selection: manifest.selection,
       },
     },
   })
@@ -263,11 +400,23 @@ export async function buildAccessPackage(dsarRequestId, admin = null) {
     entityId: dsarRequestId,
     action: 'ACCESS_PACKAGE_BUILT',
     actorId: admin?.id ?? null,
-    payload: { evidenceId: evidence.id, contentHash, sizeBytes: archive.length },
+    payload: {
+      evidenceId: evidence.id,
+      contentHash,
+      sizeBytes: archive.length,
+      selection: manifest.selection,
+    },
   })
 
   // The raw token is returned exactly once, here, and never stored.
-  return { evidenceId: evidence.id, token: rawToken, expiresAt, contentHash, sizeBytes: archive.length }
+  return {
+    evidenceId: evidence.id,
+    token: rawToken,
+    expiresAt,
+    contentHash,
+    sizeBytes: archive.length,
+    selection: manifest.selection,
+  }
 }
 
 // Short life on a re-issued link. The original token is minted when the package

@@ -83,8 +83,16 @@ Approval is a hard gate: `Session` creation must reject any project whose `statu
 | `POST /me/dsar` | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
 | `GET /me/dsar/:id` | ✓ own | ✗ | ✗ | ✗ | ✗ | ✗ |
 | `POST /me/dsar/:id/package-token` | ✓ own | ✗ | ✗ | ✗ | ✗ | ✗ |
+| `GET /me/dsar/:id/timeline` (own milestones) | ✓ own | ✗ | ✗ | ✗ | ✗ | ✗ |
 | `GET /dsar/evidence` (vault) | ✗ | ✓ all | ◐ assigned | ✗ | ✓ all | ✓ |
 | `GET /dsar/:id/media` (break-glass targets) | ✗ | ✓ | ✗ | ✗ | ✓ | ✓ |
+| `GET /dsar/subjects/search` (identity lookup) | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ |
+| `GET /dsar/:id/items` (item index, paged) | ✗ | ✓ | ✗ | ✗ | ✓ | ✓ |
+| `POST /dsar/:id/items/actions` (redact / delete / mark-export) | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ |
+| `GET /dsar/:id/items/actions` (batch progress) | ✗ | ✓ | ✗ | ✗ | ✓ | ✓ |
+| `POST /dsar/:id/package` (selective §11 build) | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ |
+| `GET /dsar/:id/timeline` (merged history) | ✗ | ✓ | ✗ | ✗ | ✓ | ✓ |
+| `POST /dsar/:id/close` (explicit close) | ✗ | ✓ | ✗ | ✗ | ✓ | ✓ |
 | `GET /dsar` (queue) | ✗ | ✓ all | ◐ assigned | ✗ | ✓ all | ✓ |
 | `POST /dsar/:id/assign` | ✗ | ✓ | ✗ | ✗ | ✗ | ✓ |
 | `POST /dsar/:id/discovery` | ✗ | ✗ | ✓ assigned | ✗ | ✓ | ✓ |
@@ -93,6 +101,18 @@ Approval is a hard gate: `Session` creation must reject any project whose `statu
 | `POST /dsar/:id/approve` | ✗ | ✓ | ✓ own | ✗ | ✗ | ✓ |
 | `GET /dsar/:id/certificate` | ✓ own | ✓ | ◐ | ✗ | ✓ | ✓ |
 | `GET /sla` | ✗ | ✓ | ◐ own | ✗ | ✓ | ✓ |
+
+### Import (admin-initiated inbound edge)
+`dataAdmin`/`super` only, throughout. Asserting "this photograph is of this named person" without a capture event and without a face match is a data-administration act: a `dpo` approves purposes and a `dataOwner` runs a project, and neither of those is the authority to write a person's data into the system on their behalf. The read endpoints share the floor because a batch names its subject.
+
+| Endpoint | Subject | dpo | dataOwner | collectionAgent | dataAdmin | super |
+|---|---|---|---|---|---|---|
+| `POST /imports` (open a batch) | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ |
+| `POST /imports/:batchId/items` (≤20 files/req) | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ |
+| `POST /imports/:batchId/close` | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ |
+| `GET /imports` / `GET /imports/:batchId` | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ |
+
+An import into an `ERASED` subject is a **409**, never a soft warning: it would re-create the data a signed deletion certificate says was destroyed.
 
 ### Audit
 | Endpoint | Subject | dpo | dataOwner | collectionAgent | dataAdmin | super |
@@ -126,6 +146,13 @@ Access token for the object is scoped: signed URL, 5-minute TTL, single-use, bou
 | Data Owner — Processed Data | redacted derivative + non-identifying tags | `PhotoSubject.subjectId` → return opaque per-project pseudonym |
 | Agent — Tagging | face crops + subject display name for assigned session | any other session, any project not assigned |
 | Data Admin — Lineage | ids, paths, timestamps, consent status | blob content unless `⚑` |
+| Data Admin — DSAR subject search | name, email, employeeRef, item count — **exact + prefix match only, never fuzzy** | any subject the term did not match exactly or by prefix; a wrong match is a breach, not a bad result |
+| DSAR request workspace — Data tab | item ids, type, origin, project/session id, capturedAt, content hash, shared-subject count, lawful basis | subject identity → `SUB-<first8 of hash>`; `storage_path`; any other principal's id on a shared frame |
+| DSAR request workspace — bulk action bar | exact selected count, how many of those are shared frames that will be **redacted instead of deleted** | any "delete all" that does not state the count; any client-side shared-frame check — the downgrade is decided server-side from `shared_subject_count` |
+| DSAR request workspace — Timeline tab | `at`, actor **admin id**, kind, summary, ref id, hash | subject identity; `AuditLog` payloads (hash-only by design — never invent content for an entry) |
+| DSAR dashboard — queue | pseudonym, coarse + fine status, SLA, assignee, item counters | subject name/email on any tier below `dataAdmin` |
+| Data Admin — Import | subject name/email of the **one** subject being imported into, batch counters, lawful-basis verdict per item | any other subject; any suggestion that an `IMPORT_UNVERIFIED` item has consent — the gap is shown, never hidden |
+| Subject portal — request timeline | coarse status, milestone kind, time, own resolution note | internal actor identities, `AccessEvent` rows, evidence hashes, another handler's reasoning |
 | Subject portal | own everything | any other subject |
 
 Enforce via Prisma `select` allowlists in each service — never `include` a whole relation on a governance route.

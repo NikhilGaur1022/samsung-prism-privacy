@@ -512,6 +512,11 @@ model Photo {
   // import.service.ingestItem (sha256 within the subject), not implied here.
   @@unique([sessionId, sha256])
   @@index([sessionId])
+  // The import de-duplication probe (`sha256` + `sessionId IS NULL` + a subject
+  // link). The unique above stops covering it the moment sessionId is null,
+  // because Postgres treats NULLs as distinct — so without this, every imported
+  // file scans the whole photo table before it is written.
+  @@index([sha256], map: "photos_sha256_idx")
   @@map("photos")
 }
 
@@ -722,6 +727,11 @@ model DsarRequest {
   @@index([status, slaDueAt])
   @@index([subjectId, createdAt])
   @@index([assignedAdminId, status])
+  // The dashboard's keyset walk: ORDER BY (sla_due_at ASC, id ASC) under a
+  // `status IN (…)` tab filter. `[status, slaDueAt]` cannot serve that sort —
+  // a coarse tab spans several statuses, so the planner reads every matching
+  // row and sorts it. This index matches the ORDER BY exactly.
+  @@index([slaDueAt, id], map: "dsar_requests_sla_due_at_id_idx")
   @@map("dsar_requests")
 }
 
@@ -762,6 +772,16 @@ enum PurgeJobStatus {
   FAILED
 }
 
+// FULL is the whole-subject erasure the deletion certificate attests to. PARTIAL
+// is a per-item delete raised from the DSAR item grid: it touches a named subset
+// of locations, never the subject key, and is excluded from issueCertificate()
+// by name. Without this column a scoped job is shaped exactly like a completed
+// full erasure and would certify as one.
+enum PurgeJobScope {
+  FULL
+  PARTIAL
+}
+
 enum PurgeLocationStatus {
   PENDING
   RUNNING
@@ -778,6 +798,11 @@ model PurgeJob {
   dsarRequestId  String         @map("dsar_request_id") @db.Uuid
   subjectId      String         @map("subject_id") @db.Uuid
   status         PurgeJobStatus @default(QUEUED)
+  // A PARTIAL job is a scoped, per-item delete. It is never certifiable and is
+  // never returned as "the open erasure" for this request.
+  scope          PurgeJobScope  @default(FULL)
+  // Provenance for a scoped job: which item action batch raised it, which items.
+  meta           Json?
   locationsTotal Int            @default(0) @map("locations_total")
   locationsDone  Int            @default(0) @map("locations_done")
   // Set only when every location reached DONE/SKIPPED. The certificate is issued
@@ -795,6 +820,7 @@ model PurgeJob {
 
   @@index([status])
   @@index([dsarRequestId])
+  @@index([dsarRequestId, scope, status])
   @@map("purge_jobs")
 }
 
@@ -864,6 +890,10 @@ enum AccessObjectType {
   DSAR_PACKAGE
   VAULT_OBJECT
   AUDIT_LOG
+  // A read of the item index — "the handler enumerated everything we hold about
+  // this person". Distinct from SUBJECT_PII (identity fields) because browsing a
+  // person's data set and looking up their name are different intrusions.
+  SUBJECT_DATA_ITEM
 }
 
 enum AccessAction {
@@ -872,6 +902,10 @@ enum AccessAction {
   DECRYPT
   EXPORT
   DENIED
+  // An identity lookup or an item enumeration. A handler trawling for a person
+  // is the insider behaviour this table exists to make answerable, and scoring
+  // it as VIEW would hide it among legitimate per-object reads.
+  SEARCH
 }
 
 // audit_log records mutations; this records reads. DPDP §8(4) reasonable-security
@@ -1044,6 +1078,9 @@ model SubjectDataItem {
   @@unique([subjectId, type, sourceTable, sourceId])
   @@index([subjectId, type, capturedAt])
   @@index([subjectId, deletedAt])
+  // Phase 4's keyset walk: live items for one subject, newest first, tie-broken
+  // by id. Matches the ORDER BY in itemSearch.service.js exactly.
+  @@index([subjectId, deletedAt, capturedAt(sort: Desc), id(sort: Desc)], map: "subject_data_items_subject_id_deleted_at_captured_at_id_idx")
   @@map("subject_data_items")
 }
 

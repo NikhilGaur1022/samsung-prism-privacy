@@ -917,7 +917,14 @@ export async function finalizeSession(sessionId, admin) {
       })
       await indexPhotoSubjects(created)
     } catch (err) {
-      logger.error({ err, sessionId }, 'item index refresh failed after finalize')
+      // Still non-fatal — the transaction is committed and the gallery already
+      // destroyed, so throwing would report failure for work that cannot be
+      // undone. Tagged so it is alertable: since Phase 4 the DSAR item grid
+      // serves completeness from this index.
+      logger.error(
+        { alert: 'ITEM_INDEX_REFRESH_FAILED', err, sessionId, at: 'finalizeSession' },
+        'item index refresh failed after finalize — DSAR completeness may be stale until the next listing repairs it',
+      )
     }
   }
 
@@ -1035,9 +1042,16 @@ async function detectPiiRegions(buffer, filename) {
 // or sensitive PII text (Aadhaar/PAN/plate/ID). The original is never touched —
 // downstream decides which copy it is entitled to.
 export async function redactBystanders(sessionId, { photoIds } = {}) {
+  // When ids are given they select on their own. `sessionId` is null for an
+  // imported frame (there was no capture event), and a `where: { sessionId: null }`
+  // clause would then match every import in the database rather than the one the
+  // retry queue named.
   const photos = await prisma.photo.findMany({
-    where: { sessionId, ...(photoIds ? { id: { in: photoIds } } : {}) },
-    include: { faces: { select: { bbox: true, tagStatus: true } } },
+    where: photoIds ? { id: { in: photoIds } } : { sessionId },
+    include: {
+      faces: { select: { bbox: true, tagStatus: true } },
+      subjects: { select: { subjectId: true } },
+    },
   })
 
   let written = 0
@@ -1063,7 +1077,12 @@ export async function redactBystanders(sessionId, { photoIds } = {}) {
         bystanders.length === 0 && piiRegions.length === 0
           ? original
           : await redactImage(original, bystanders, piiRegions, `${photo.id}.jpg`)
-      const redactedPath = `sessions/${sessionId}/redacted/${photo.id}.jpg`
+      // Derived from the photo's own session, not from the argument. An imported
+      // frame has no session, and `sessions/null/redacted/...` would have put a
+      // derivative outside the per-session key scope that opens it.
+      const redactedPath = photo.sessionId
+        ? `sessions/${photo.sessionId}/redacted/${photo.id}.jpg`
+        : `subjects/${photo.subjects[0]?.subjectId ?? 'orphan'}/imports/redacted/${photo.id}.jpg`
       await writeFile(redactedPath, blurred)
       await prisma.photo.update({
         where: { id: photo.id },

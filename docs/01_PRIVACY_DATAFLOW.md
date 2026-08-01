@@ -65,6 +65,14 @@ flowchart TD
     E4 --> E5["Search index (rebuildable)"]
   end
 
+  subgraph IMP["Phase B′ — Import (admin-initiated inbound edge)"]
+    G1["Data Admin picks a named subject<br/>exact/prefix identity search only"] --> G2["ImportBatch OPEN<br/>projectId optional"]
+    G2 --> G3["POST /imports/:id/items — ≤20 files<br/>sealed under the SUBJECT DEK"]
+    G3 --> G4["Photo.sessionId = NULL<br/>PhotoSubject.consentId = NULL if no live consent"]
+    G4 --> G5["SubjectDataItem origin=IMPORT<br/>meta.lawfulBasis = IMPORT_UNVERIFIED<br/>meta.identification = ADMIN_ASSERTED"]
+    G5 --> G6["enqueueRedaction — same PII mask as a captured frame<br/>NO face blur: detection never ran"]
+  end
+
   subgraph DSAR["Phase F — Rights (§11 §12 §13)"]
     F1["Data Principal raises DSAR"] --> F2["DPO triage, SLA clock"]
     F2 --> F3["Data Owner: discovery evidence"]
@@ -75,7 +83,26 @@ flowchart TD
 
   E5 -.lineage walked by.-> F3
   D1 -.consentId is the erasure key.-> F4
+  G5 -.indexed into the same completeness surface.-> F3
 ```
+
+**Why import is drawn as its own inbound edge and not as a variant of collection.**
+A collected frame carries a capture event, an agent, a project and a consent
+signed before the shutter. An imported one carries none of those: it was handed
+over, and the only thing binding it to a person is an operator's assertion. Both
+end up in `photos`/`photo_subjects` and both are equally discoverable — but the
+three missing facts are recorded on the item rather than papered over, because a
+DSAR answer that presents unverified data as consented collection is a false
+statement, not a tidier one.
+
+Two consequences worth stating plainly:
+
+- **`Photo.sessionId` is nullable and every consumer must treat it so.** Skipping
+  a session-less photo is a DSAR completeness hole, not a display bug.
+- **An imported frame gets PII text masking but no bystander face blur**, because
+  face detection is driven by the recognition worker and the recognition worker is
+  driven by a session. `meta.faceDetection = 'NOT_RUN'` says so on every item.
+  See DPIA §4 R9.
 
 ---
 
@@ -94,6 +121,20 @@ flowchart TD
 | L9 | Dataset export bundle | `exports/<jobId>.zip` | GAP → per-export DEK | requester, time-boxed URL | 7d then hard delete | GAP |
 | L10 | DSAR access package | `dsar/<requestId>/package.zip` | GAP → subject-key wrapped | that Data Principal only | 30d | GAP |
 | L11 | Backups | pg_dump / filesystem snapshot | GAP | ops break-glass | 35d | GAP |
+| L12 | Imported original | `subjects/<uid>/imports/<sha256>.jpg` | AES-256-GCM under the **subject DEK** | nobody directly; DSAR export path only | project retention, or indefinite where no project was named | BUILT |
+| L13 | Imported redacted derivative | `subjects/<uid>/imports/redacted/<pid>.jpg` | as L12 | dataAdmin, DSAR package | with L12 | BUILT |
+
+**L12 is deliberately under `subjects/<uid>/` rather than `imports/`.**
+`storage.scopeForPath()` maps that prefix to the per-subject DEK, which is what
+`keyring.destroySubjectKey()` destroys during a whole-subject erasure. An
+imported photo filed anywhere else would survive the crypto-shred and a signed
+deletion certificate would then be attesting to an erasure that did not reach it.
+
+**The item index (`subject_data_items`) is not a location.** It holds no media —
+only ids, hashes, counts and a `storage_path` pointer — so it is a projection of
+L2/L4/L12 and not a fourteenth copy. It is still purged on erasure, as a
+tombstone: the row survives with `deleted_at` set precisely so a timeline can
+prove the item existed and was destroyed.
 
 **Rule:** every filesystem write goes through `backend/src/lib/storage.js`. That is the single choke point where envelope encryption gets added — no caller touches `fs` directly. This is already true today, so the change is one file.
 

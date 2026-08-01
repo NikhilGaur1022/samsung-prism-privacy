@@ -25,12 +25,16 @@ export async function closePurgeQueue() {
 
 // jobId is the purge job id, so requeuing an already-running purge is a no-op
 // rather than a second executor racing the first over the same rows.
+//
+// Hyphen, not colon: BullMQ v5 refuses a custom job id containing ':' because
+// that is its own key delimiter. With the colon, enqueuePurge threw on every
+// call and the out-of-band erasure path never ran at all.
 export async function enqueuePurge(purgeJobId) {
   return getPurgeQueue().add(
     'execute-purge',
     { purgeJobId },
     {
-      jobId: `purge:${purgeJobId}`,
+      jobId: `purge-${purgeJobId}`,
       attempts: 3,
       backoff: { type: 'exponential', delay: 15_000 },
       removeOnComplete: 100,

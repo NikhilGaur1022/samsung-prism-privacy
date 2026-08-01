@@ -1,6 +1,7 @@
 import { prisma } from '../../config/prisma.js'
 import { fileExists } from '../../lib/storage.js'
 import { indexSubject } from './itemIndex.service.js'
+import { logger } from '../../lib/logger.js'
 
 // Answers "everywhere this person exists", in the same L-code vocabulary the
 // privacy dataflow and the DPIA use, so a discovery result, a purge job and a
@@ -263,10 +264,19 @@ export async function runDiscovery(subjectId) {
   // rebuildable projection could not be written would block a deletion the
   // principal is entitled to, which is strictly worse than a stale index — and
   // the next discovery run rebuilds it.
+  //
+  // Non-fatal is NOT silent. Since Phase 4 the DSAR item grid serves its
+  // completeness claim from this index, so a failure here is an operator-visible
+  // condition: it goes to the structured logger under a fixed `alert` key so it
+  // can be alerted on, and the next listing cross-checks the index against the
+  // source tables and rebuilds it before serving.
   try {
     await indexSubject(subjectId)
   } catch (err) {
-    console.error(`[discovery] item index refresh failed for subject ${subjectId}:`, err)
+    logger.error(
+      { alert: 'ITEM_INDEX_REFRESH_FAILED', err, subjectId, at: 'runDiscovery' },
+      'item index refresh failed during discovery — DSAR completeness may be stale until the next listing repairs it',
+    )
   }
 
   return {

@@ -152,6 +152,15 @@ export function getMyDsarRequest(id) {
   return request(`/api/v1/me/dsar/${id}`)
 }
 
+// The principal's own milestones. Deliberately a separate, narrower shape than
+// the operator timeline: no internal actor identities, no access-log rows, no
+// evidence hashes, no per-item ids. The server builds it from an allowlist of
+// milestone kinds rather than by redacting the operator view, so a new internal
+// event type cannot leak here by default.
+export function getMyDsarTimeline(id) {
+  return request(`/api/v1/me/dsar/${id}/timeline`)
+}
+
 export function getMyDsarCertificate(id) {
   return request(`/api/v1/me/dsar/${id}/certificate`)
 }

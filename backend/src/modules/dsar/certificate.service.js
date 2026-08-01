@@ -46,6 +46,19 @@ export async function issueCertificate(purgeJobId, admin = null) {
   })
   if (!job) throw new ApiError(404, 'Purge job not found')
 
+  // A scoped job deletes the items an operator ticked. It never touches the
+  // subject key, the consent rows or the identity row, so signing it would be a
+  // statement that the principal's data is gone when most of it is still held.
+  // Checked before the idempotent-return above it would still be wrong; checked
+  // here it fails loudly for the only caller that could get this wrong — a worker
+  // certifying whatever job it just finished.
+  if (job.scope === 'PARTIAL') {
+    throw new ApiError(
+      409,
+      'Cannot certify a scoped purge job. A deletion certificate attests to a whole-subject erasure; this job deleted a named subset of items.',
+    )
+  }
+
   const existing = await prisma.deletionCertificate.findUnique({
     where: { dsarRequestId: job.dsarRequestId },
   })

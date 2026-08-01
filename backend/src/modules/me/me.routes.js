@@ -10,6 +10,7 @@ import { readPersonRedactedPhotoForSubject } from '../sessions/session.service.j
 import * as dsarService from '../dsar/dsar.service.js'
 import { downloadPackage, issuePackageToken } from '../dsar/export.service.js'
 import { getCertificateForRequest, verifyCertificate } from '../dsar/certificate.service.js'
+import { getSubjectTimeline } from '../dsar/timeline.service.js'
 
 // Subject-facing account state that isn't enrollment CRUD. Shares the /api/v1/me
 // mount with selfEnrollmentRoutes; every handler takes the subject id from the
@@ -143,7 +144,8 @@ meRoutes.post('/dsar', async (req, res, next) => {
 
 meRoutes.get('/dsar', async (req, res, next) => {
   try {
-    res.json({ items: await dsarService.listQueue({ subject: req.subject }) })
+    const { items } = await dsarService.listQueue({ subject: req.subject })
+    res.json({ items })
   } catch (err) {
     next(err)
   }
@@ -153,6 +155,20 @@ meRoutes.get('/dsar/:requestId', async (req, res, next) => {
   try {
     const requestId = z.string().uuid().parse(req.params.requestId)
     res.json(await dsarService.getRequest(requestId, { subject: req.subject }))
+  } catch (err) {
+    next(err)
+  }
+})
+
+// The principal's own history of their own request. Mounted before
+// /:requestId/package so the literal segment cannot be read as a token path, and
+// scoped inside getSubjectTimeline by the subject id off the verified token —
+// another principal's request id is a 404, because confirming that it exists is
+// itself information about someone else.
+meRoutes.get('/dsar/:requestId/timeline', async (req, res, next) => {
+  try {
+    const requestId = z.string().uuid().parse(req.params.requestId)
+    res.json(await getSubjectTimeline(requestId, req.subject.masterUserId))
   } catch (err) {
     next(err)
   }

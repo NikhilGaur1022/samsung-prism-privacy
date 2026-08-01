@@ -31,6 +31,11 @@ const PHOTO_LINK_SELECT = {
   photoId: true,
   subjectId: true,
   consentId: true,
+  // The only route back to a project for an IMPORT link: there is no session to
+  // read one off. Without it a rebuild would null the projectId an import wrote,
+  // and the item would fall out of every project-filtered view of the subject's
+  // data — silently narrowing a completeness claim.
+  consent: { select: { projectId: true } },
   photo: {
     select: {
       id: true,
@@ -64,7 +69,7 @@ function photoItem(link) {
     origin: 'COLLECTION_SESSION',
     sourceTable: SOURCE.PHOTO_SUBJECT,
     sourceId: link.id,
-    projectId: photo.session?.projectId ?? null,
+    projectId: photo.session?.projectId ?? link.consent?.projectId ?? null,
     sessionId: photo.sessionId,
     storagePath: photo.storagePath,
     contentHash: photo.sha256,

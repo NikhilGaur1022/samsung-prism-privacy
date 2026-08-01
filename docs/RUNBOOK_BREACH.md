@@ -136,6 +136,42 @@ Per doc 01 §3.2 and §7 ("Key compromise" row), the envelope scheme is designed
 
 **Caveat:** this drill assumes `MEDIA_KEK` is actually set in the affected environment. The envelope-encryption scheme itself is **BUILT** for L2/L4/L6/L7/L8 (`backend/src/lib/storage.js` — every read/write goes through it; this corrects an earlier revision of this runbook, which described the scheme as GAP for those locations). But encryption is opt-in, keyed off `MEDIA_KEK` being present, and is off in some environments (confirmed off in the dev environment as of `docs/HANDOFF.md` §6.3). **Check whether `MEDIA_KEK` was set in the affected environment before running this drill** — if it was unset at the time of compromise, those blobs were plaintext on disk regardless of key rotation, and containment must instead focus on filesystem/storage-layer access revocation, not key rotation. If it *was* set, proceed with steps 1–7 above, and additionally run `node scripts/migrate-media-encrypt.js --dry-run` afterward to confirm no blob remains sealed under the compromised `keyId` beyond what lazy rotation has not yet touched.
 
+### 4.2a Scoping an exposure with the item index
+
+`subject_data_items` is the fastest honest answer to "what did we hold about this
+person at the time of the incident", and it changes the containment story in two
+specific ways. Both matter during a live response:
+
+1. **It is a projection, not a location.** It holds ids, hashes, counts and a
+   `storage_path` pointer — no media, no name, no email. A dump of this table is
+   not itself a personal-data exposure of the same class as a media leak, and it
+   is safe to copy into an incident workspace where a photo corpus is not.
+2. **It is the only surface that reports what was *destroyed*.** Deleted items are
+   tombstoned (`deleted_at` set), never removed, so it can answer "was this frame
+   already erased before the incident window" — which is often the difference
+   between notifying a principal and not.
+
+To scope an exposure by subject, count live and tombstoned items per origin:
+
+```sql
+SELECT origin, (deleted_at IS NULL) AS live, count(*)
+FROM subject_data_items WHERE subject_id = $1 GROUP BY 1, 2;
+```
+
+**Treat a divergence warning as part of the incident.** The item listing endpoint
+logs `alert: ITEM_INDEX_DIVERGED` (self-repairing) or `ITEM_INDEX_INCOMPLETE`
+(not repairable) when the index disagrees with `photo_subjects`. If those appear
+in the window, the index **understates** the holding and a scoping figure taken
+from it is a floor, not a total. Fall back to `runDiscovery()` per subject, which
+walks the source tables directly.
+
+**Imported items need a separate line in the incident record.** Anything with
+`origin = 'IMPORT'` carries no capture-time consent (`meta.lawfulBasis =
+'IMPORT_UNVERIFIED'`, DPIA R11) and no face blurring (`meta.faceDetection =
+'NOT_RUN'`, DPIA R12). Both facts change the notification assessment: the second
+means an exposed imported frame may reveal a bystander who is not the subject of
+the request at all, and that bystander is also an affected principal.
+
 ### 4.3 Service-level containment
 | Component | Containment action |
 |---|---|

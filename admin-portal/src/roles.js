@@ -19,6 +19,7 @@ import {
   Share2,
   Lock,
   FileClock,
+  Upload,
 } from 'lucide-react'
 
 const WORKSPACE_SUBTITLE =
@@ -82,7 +83,8 @@ export const ROLES = {
     subtitle: WORKSPACE_SUBTITLE,
     accessNote: ACCESS_NOTE,
     nav: [
-      { label: 'DSAR Queue', icon: Inbox, path: '/dsar-queue' },
+      { label: 'DSAR Dashboard', icon: Inbox, path: '/dsar-queue' },
+      { label: 'Import Data', icon: Upload, path: '/import' },
       { label: 'Collection Sessions', icon: Camera, path: '/collection-sessions' },
       { label: 'Discovery Workspace', icon: SearchCode, path: '/discovery-workspace' },
       { label: 'Data Lineage', icon: Share2, path: '/data-lineage' },

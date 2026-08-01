@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { AuthProvider, RequireRole } from './auth'
 import { ROLES } from './roles'
+import ErrorBoundary from './components/ErrorBoundary'
 import Login from './pages/Login'
 import AcceptInvite from './pages/AcceptInvite'
 import ForgotPassword from './pages/ForgotPassword'
@@ -13,6 +14,8 @@ import RequestOversight from './pages/dpo/RequestOversight'
 import SlaMonitoring from './pages/dpo/SlaMonitoring'
 import ComplianceReports from './pages/dpo/ComplianceReports'
 import DsarQueue from './pages/dataAdmin/DsarQueue'
+import DsarRequestDetail from './pages/dataAdmin/DsarRequestDetail'
+import ImportData from './pages/dataAdmin/ImportData'
 import CollectionSessions from './pages/dataAdmin/CollectionSessions'
 import DiscoveryWorkspace from './pages/dataAdmin/DiscoveryWorkspace'
 import DataLineage from './pages/dataAdmin/DataLineage'
@@ -43,6 +46,7 @@ const PAGE_COMPONENTS = {
   '/sla-monitoring': SlaMonitoring,
   '/compliance-reports': ComplianceReports,
   '/dsar-queue': DsarQueue,
+  '/import': ImportData,
   '/collection-sessions': CollectionSessions,
   '/discovery-workspace': DiscoveryWorkspace,
   '/data-lineage': DataLineage,
@@ -64,9 +68,13 @@ const PAGE_COMPONENTS = {
 
 export default function App() {
   return (
-    <AuthProvider>
-      <BrowserRouter>
-        <Routes>
+    // Wraps the whole router. Until this existed a thrown render presented as a
+    // blank white page with the real error only in the console — which is what
+    // made the /requests/new crash look like a failed fetch for a whole session.
+    <ErrorBoundary>
+      <AuthProvider>
+        <BrowserRouter>
+          <Routes>
           <Route path="/login" element={<Login />} />
           <Route path="/accept-invite" element={<AcceptInvite />} />
           <Route path="/forgot-password" element={<ForgotPassword />} />
@@ -138,10 +146,22 @@ export default function App() {
               )
             }),
           )}
+          {/* The request workspace. Not driven off ROLES[].nav because it is a
+              parameterised route with no nav entry of its own, and dpo reaches it
+              from Request Oversight while dataAdmin reaches it from the queue. */}
+          <Route
+            path="/dsar/:requestId"
+            element={
+              <RequireRole allow={['dataAdmin', 'dpo', 'super_admin']}>
+                <DsarRequestDetail />
+              </RequireRole>
+            }
+          />
           <Route path="/" element={<Navigate to="/login" replace />} />
           <Route path="*" element={<Navigate to="/login" replace />} />
-        </Routes>
-      </BrowserRouter>
-    </AuthProvider>
+          </Routes>
+        </BrowserRouter>
+      </AuthProvider>
+    </ErrorBoundary>
   )
 }

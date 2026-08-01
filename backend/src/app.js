@@ -26,6 +26,7 @@ import { joinRoutes, sessionInviteRoutes } from './modules/join/join.routes.js'
 import { consentTemplateRoutes } from './modules/consentTemplates/consentTemplate.routes.js'
 import { auditRoutes, accessEventRoutes } from './modules/audit/audit.routes.js'
 import { dsarRoutes } from './modules/dsar/dsar.routes.js'
+import { importRoutes } from './modules/import/import.routes.js'
 import { dashboardRoutes } from './modules/dashboard/dashboard.routes.js'
 
 // The app is built here and listened to in server.js. The split exists so the
@@ -97,6 +98,11 @@ export function createApp() {
   app.use('/api/v1/consent-templates', consentTemplateRoutes)
   app.use('/api/v1/dashboard', dashboardRoutes)
   app.use('/api/v1/dsar', dsarRoutes)
+  // The admin-initiated inbound edge. Its own router with its own dataAdmin
+  // floor — mounting it under /dsar would have inherited that router's wider
+  // dpo/dataOwner floor, and asserting "this photograph is of this person" is
+  // not an oversight authority.
+  app.use('/api/v1/imports', importRoutes)
   app.use('/api/v1/audit', auditRoutes)
   app.use('/api/v1/access-events', accessEventRoutes)
   // Public — no auth middleware anywhere above it on this path, and mounted before

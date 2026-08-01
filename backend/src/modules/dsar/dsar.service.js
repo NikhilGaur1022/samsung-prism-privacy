@@ -7,6 +7,7 @@ import { runDiscovery } from './discovery.service.js'
 import { createPurgeJob, executePurgeJob } from './purge.service.js'
 import { buildAccessPackage } from './export.service.js'
 import { issueCertificate, getCertificateForRequest } from './certificate.service.js'
+import { coarseStatus, statusesFor } from './lifecycle.js'
 
 // Request lifecycle and SLA clock.
 //
@@ -72,6 +73,10 @@ function withSla(request, { pseudonymous = false } = {}) {
 
   const shaped = {
     ...request,
+    // The Open / In Progress / Closed projection, computed in one place so the
+    // dashboard tabs and the API can never disagree about which tab a request
+    // belongs in.
+    coarseStatus: coarseStatus(request.status),
     sla: {
       dueAt: request.slaDueAt,
       internalDueAt: request.internalDueAt,
@@ -153,14 +158,85 @@ export async function getRequest(requestId, actor) {
   return withSla(request)
 }
 
-export async function listQueue(actor, { status, type, overdue } = {}) {
+// Keyset over (slaDueAt asc, id asc). Offset paging over a queue that reorders
+// as deadlines pass would skip and repeat rows; the SLA order is exactly the
+// order that changes under the reader's feet.
+function encodeQueueCursor(row) {
+  return Buffer.from(JSON.stringify({ slaDueAt: row.slaDueAt, id: row.id }), 'utf8').toString('base64url')
+}
+
+function decodeQueueCursor(cursor) {
+  if (!cursor) return null
+  try {
+    const parsed = JSON.parse(Buffer.from(String(cursor), 'base64url').toString('utf8'))
+    if (typeof parsed?.id !== 'string' || !parsed.slaDueAt) throw new Error('shape')
+    return parsed
+  } catch {
+    throw new ApiError(400, 'Malformed cursor')
+  }
+}
+
+/**
+ * Per-request counters for one page of the queue.
+ *
+ * Two grouped queries for the whole page rather than four per row. The item grid
+ * is the screen this feeds and it is the screen most likely to be opened against
+ * a subject with thousands of items.
+ */
+async function queueCounters(rows) {
+  if (rows.length === 0) return new Map()
+
+  const requestIds = rows.map((r) => r.id)
+  const subjectIds = [...new Set(rows.map((r) => r.subjectId))]
+
+  const [found, done] = await Promise.all([
+    prisma.subjectDataItem.groupBy({
+      by: ['subjectId'],
+      where: { subjectId: { in: subjectIds }, deletedAt: null },
+      _count: { _all: true },
+    }),
+    prisma.dsarItemAction.groupBy({
+      by: ['dsarRequestId', 'kind'],
+      where: { dsarRequestId: { in: requestIds }, status: 'DONE' },
+      _count: { _all: true },
+    }),
+  ])
+
+  const foundBySubject = new Map(found.map((f) => [f.subjectId, f._count._all]))
+  const counters = new Map()
+  for (const row of rows) {
+    counters.set(row.id, {
+      itemsFound: foundBySubject.get(row.subjectId) ?? 0,
+      itemsRedacted: 0,
+      itemsDeleted: 0,
+      itemsExported: 0,
+    })
+  }
+  for (const d of done) {
+    const c = counters.get(d.dsarRequestId)
+    if (!c) continue
+    if (d.kind === 'REDACT') c.itemsRedacted = d._count._all
+    if (d.kind === 'DELETE') c.itemsDeleted = d._count._all
+    if (d.kind === 'EXPORT') c.itemsExported = d._count._all
+  }
+  return counters
+}
+
+/**
+ * The queue behind the DSAR dashboard.
+ *
+ * Returns `{ items, nextCursor, counts }`. `counts` is over the whole filtered
+ * set, not the page — it feeds the Open / In Progress / Closed tab badges, and a
+ * badge that counted only the visible page would be worse than no badge.
+ */
+export async function listQueue(actor, { status, type, overdue, coarse, assignedAdminId, cursor, limit = 50 } = {}) {
   if (actor.subject) {
     const rows = await prisma.dsarRequest.findMany({
       where: { subjectId: actor.subject.masterUserId },
       orderBy: { createdAt: 'desc' },
       select: REQUEST_FIELDS,
     })
-    return rows.map((r) => withSla(r))
+    return { items: rows.map((r) => withSla(r)), nextCursor: null, counts: null }
   }
 
   const role = actor.admin?.role
@@ -168,21 +244,73 @@ export async function listQueue(actor, { status, type, overdue } = {}) {
     throw new ApiError(403, 'Not authorized to read the DSAR queue')
   }
 
+  const coarseStatuses = coarse ? statusesFor(coarse) : null
+  if (coarse && !coarseStatuses) throw new ApiError(400, `Unknown lifecycle stage ${coarse}`)
+
   const where = {
     ...(status ? { status } : {}),
+    ...(coarseStatuses && !status ? { status: { in: coarseStatuses } } : {}),
     ...(type ? { type } : {}),
     ...(overdue ? { slaDueAt: { lt: new Date() }, status: { notIn: ['CLOSED', 'REJECTED'] } } : {}),
+    ...(assignedAdminId ? { assignedAdminId } : {}),
     // A data owner sees only what was routed to them, never the whole queue.
     ...(role === 'dataOwner' ? { assignedAdminId: actor.admin.id } : {}),
   }
 
+  const take = Math.min(Math.max(Number(limit) || 50, 1), 200)
+  const after = decodeQueueCursor(cursor)
+
   const rows = await prisma.dsarRequest.findMany({
-    where,
-    orderBy: [{ slaDueAt: 'asc' }],
+    where: {
+      AND: [
+        where,
+        after
+          ? {
+              OR: [
+                { slaDueAt: { gt: new Date(after.slaDueAt) } },
+                { slaDueAt: new Date(after.slaDueAt), id: { gt: after.id } },
+              ],
+            }
+          : {},
+      ],
+    },
+    orderBy: [{ slaDueAt: 'asc' }, { id: 'asc' }],
+    take: take + 1,
     select: REQUEST_FIELDS,
   })
 
-  return rows.map((r) => withSla(r, { pseudonymous: role === 'dpo' }))
+  const page = rows.slice(0, take)
+  const hasMore = rows.length > take
+
+  const [counters, byStatus] = await Promise.all([
+    queueCounters(page),
+    // Tab badges over the filtered set minus the coarse filter itself — a tab
+    // that only counted its own contents could never show the other two.
+    prisma.dsarRequest.groupBy({
+      by: ['status'],
+      where: {
+        ...(type ? { type } : {}),
+        ...(assignedAdminId ? { assignedAdminId } : {}),
+        ...(role === 'dataOwner' ? { assignedAdminId: actor.admin.id } : {}),
+      },
+      _count: { _all: true },
+    }),
+  ])
+
+  const counts = { OPEN: 0, IN_PROGRESS: 0, CLOSED: 0, byStatus: {} }
+  for (const s of byStatus) {
+    counts.byStatus[s.status] = s._count._all
+    counts[coarseStatus(s.status)] += s._count._all
+  }
+
+  return {
+    items: page.map((r) => ({
+      ...withSla(r, { pseudonymous: role === 'dpo' }),
+      counters: counters.get(r.id) ?? null,
+    })),
+    nextCursor: hasMore ? encodeQueueCursor(page[page.length - 1]) : null,
+    counts,
+  }
 }
 
 export async function assign(requestId, { assignedAdminId }, admin) {
@@ -369,6 +497,95 @@ export async function approveResolution(requestId, { note }, admin) {
     action: 'DSAR_CLOSED',
     actorId: admin.id,
     payload: { type: request.type, note: note ?? null },
+  })
+
+  return withSla(updated)
+}
+
+/**
+ * Explicit close, from the request workspace.
+ *
+ * Distinct from approveResolution() on purpose: approval is the DPO signing off
+ * on the outcome, closing is the handler declaring the work finished. They are
+ * the same transition and different acts, and the close is the one that has to
+ * check that nothing is still running.
+ *
+ * The in-flight guard is the reason this exists. A request closed while a bulk
+ * delete is still queued reports a completed obligation over data that is still
+ * there, and the worker would then quietly finish deleting from a closed
+ * request. 409 rather than a wait: the operator should see what is outstanding.
+ */
+export async function closeRequest(requestId, { note }, admin) {
+  if (!['dpo', 'dataAdmin', 'super_admin'].includes(admin?.role)) {
+    throw new ApiError(403, 'Not authorized to close a DSAR request')
+  }
+
+  const request = await prisma.dsarRequest.findUnique({ where: { id: requestId } })
+  if (!request) throw new ApiError(404, 'DSAR request not found')
+  assertTransition(request.status, 'CLOSED')
+
+  const inFlight = await prisma.dsarItemAction.groupBy({
+    by: ['status'],
+    where: { dsarRequestId: requestId, status: { in: ['REQUESTED', 'RUNNING'] } },
+    _count: { _all: true },
+  })
+  const outstanding = inFlight.reduce((n, r) => n + r._count._all, 0)
+  if (outstanding > 0) {
+    throw new ApiError(
+      409,
+      `Cannot close: ${outstanding} item action(s) have not finished. A closed request would report an obligation as met while the work is still running.`,
+    )
+  }
+
+  // Same rule approveResolution() enforces, restated rather than shared: an
+  // erasure with no certificate has no proof it happened, and this is a second
+  // door into the same transition.
+  if (['ERASE', 'WITHDRAWAL_ERASURE'].includes(request.type)) {
+    const certificate = await getCertificateForRequest(requestId)
+    if (!certificate) {
+      throw new ApiError(409, 'Cannot close an erasure with no deletion certificate issued')
+    }
+  }
+
+  const failed = await prisma.dsarItemAction.count({
+    where: { dsarRequestId: requestId, status: 'FAILED' },
+  })
+
+  const summary = {
+    closedBy: admin.id,
+    note: note ?? null,
+    // Recorded, not blocking. A failed action is a fact about the outcome and
+    // the operator closing with it on the record is a decision they are allowed
+    // to make; hiding it is not.
+    failedActions: failed,
+    finalStatus: request.status,
+  }
+  const contentHash = createHash('sha256').update(JSON.stringify(summary)).digest('hex')
+
+  const updated = await prisma.$transaction(async (tx) => {
+    await tx.dsarEvidence.create({
+      data: {
+        dsarRequestId: requestId,
+        kind: 'CORRESPONDENCE',
+        label: `Closure — ${note ? note.slice(0, 120) : 'no note given'}`,
+        payload: summary,
+        contentHash,
+        createdByAdminId: admin.id,
+      },
+    })
+    return tx.dsarRequest.update({
+      where: { id: requestId },
+      data: { status: 'CLOSED', resolutionNote: note ?? null, closedAt: new Date() },
+      select: REQUEST_FIELDS,
+    })
+  })
+
+  await writeAuditLog({
+    entityType: 'DsarRequest',
+    entityId: requestId,
+    action: 'DSAR_CLOSED',
+    actorId: admin.id,
+    payload: { type: request.type, note: note ?? null, failedActions: failed, via: 'close' },
   })
 
   return withSla(updated)

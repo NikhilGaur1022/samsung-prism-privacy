@@ -5,7 +5,24 @@ import TopBar from '../components/TopBar'
 import Card from '../components/Card'
 import Badge from '../components/Badge'
 import IconChip from '../components/IconChip'
-import { getMyDsarRequest, listMyDsarRequests } from '../lib/api'
+import { getMyDsarRequest, getMyDsarTimeline, listMyDsarRequests } from '../lib/api'
+
+// The three coarse stages. The seven-state internal enum describes our workflow,
+// not the principal's rights — showing them "TRIAGE" invites questions about a
+// process that is ours to run, so the server sends `coarseStatus` and this is
+// how it is labelled. The fine status is still shown as a secondary badge on the
+// detail screen for anyone who wants it.
+const COARSE_LABELS = {
+  OPEN: 'Received',
+  IN_PROGRESS: 'In progress',
+  CLOSED: 'Closed',
+}
+
+const COARSE_TONE = {
+  OPEN: 'neutral',
+  IN_PROGRESS: 'brand',
+  CLOSED: 'success',
+}
 
 const STATUS_TONE = {
   RECEIVED: 'neutral',
@@ -67,7 +84,9 @@ function RequestList() {
                     <p className="text-sm font-semibold text-ink">{r.type}</p>
                     <SlaCountdown sla={r.sla} />
                   </div>
-                  <Badge tone={STATUS_TONE[r.status] ?? 'neutral'}>{r.status}</Badge>
+                  <Badge tone={COARSE_TONE[r.coarseStatus] ?? 'neutral'}>
+                    {COARSE_LABELS[r.coarseStatus] ?? r.status}
+                  </Badge>
                   <ChevronRight size={16} className="text-ink-faint" />
                 </Card>
               </Link>
@@ -81,10 +100,15 @@ function RequestList() {
 
 function RequestDetail({ id }) {
   const [request, setRequest] = useState(null)
+  const [timeline, setTimeline] = useState(null)
   const [error, setError] = useState(null)
 
   useEffect(() => {
     getMyDsarRequest(id).then(setRequest).catch(setError)
+    // Non-fatal on purpose: the request detail is the answer to "what is
+    // happening", and losing the milestone list must not blank the page that
+    // carries the rejection reason and the SLA clock.
+    getMyDsarTimeline(id).then(setTimeline).catch(() => setTimeline({ entries: [] }))
   }, [id])
 
   if (error) {
@@ -116,7 +140,12 @@ function RequestDetail({ id }) {
     <div>
       <TopBar back />
       <div className="px-4 md:px-8 pb-6">
-        <Badge tone={STATUS_TONE[request.status] ?? 'neutral'}>{request.status}</Badge>
+        <div className="flex items-center gap-2">
+          <Badge tone={COARSE_TONE[request.coarseStatus] ?? 'neutral'}>
+            {COARSE_LABELS[request.coarseStatus] ?? request.status}
+          </Badge>
+          <Badge tone={STATUS_TONE[request.status] ?? 'neutral'}>{request.status}</Badge>
+        </div>
         <h1 className="mt-3 text-2xl font-extrabold tracking-tight text-ink">{request.type} request</h1>
         {request.description && (
           <p className="mt-2 text-sm font-medium leading-relaxed text-ink-muted">{request.description}</p>
@@ -150,6 +179,33 @@ function RequestDetail({ id }) {
             <p className="text-xs font-bold uppercase tracking-wide text-ink-faint">Resolution note</p>
             <p className="mt-1 text-sm font-medium text-ink-muted">{request.resolutionNote}</p>
           </Card>
+        )}
+
+        {timeline?.entries?.length > 0 && (
+          <>
+            <p className="mt-6 text-xs font-bold uppercase tracking-wide text-ink-faint">
+              What has happened
+            </p>
+            <ol className="mt-3 ml-2 border-l border-border">
+              {timeline.entries.map((e, i) => (
+                <li key={`${e.at}-${i}`} className="relative py-2.5 pl-5">
+                  <span className="absolute -left-[3px] top-4 size-1.5 rounded-full bg-brand" />
+                  <p className="text-sm font-semibold text-ink">{e.summary}</p>
+                  <p className="mt-0.5 text-[11px] font-medium text-ink-faint">
+                    {new Date(e.at).toLocaleString()}
+                  </p>
+                </li>
+              ))}
+            </ol>
+            {/* Stated rather than left implicit: the omission is a policy, and a
+                principal who assumes this is the complete internal record would
+                be assuming something untrue. */}
+            <p className="mt-2 text-[11px] font-medium text-ink-faint">
+              These are the milestones of your request. Our internal handling records and the names
+              of the staff who worked on it are kept separately and are available through a request
+              to the Data Protection Officer.
+            </p>
+          </>
         )}
 
         {request.evidence?.length > 0 && (

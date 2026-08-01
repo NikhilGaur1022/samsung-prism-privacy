@@ -67,42 +67,178 @@ async function hashOf(storagePath) {
 }
 
 /**
+ * Materialises the locations for a SCOPED delete — the subset of the discovery
+ * vocabulary that one item occupies, and nothing else.
+ *
+ * Three locations are deliberately absent and must stay absent:
+ *   - SUBJECT_KEY. Destroying the per-subject DEK to honour the deletion of one
+ *     photo would make every OTHER photo and enrollment of that subject
+ *     permanently unreadable. Crypto-shredding is a whole-subject act.
+ *   - CONSENT and PII. The consent proof and the identity row are subject-level;
+ *     an item delete says nothing about either.
+ * Their absence is also what makes a scoped job structurally uncertifiable, on
+ * top of the explicit `scope` check in issueCertificate().
+ */
+async function locationsForItems(subjectId, items) {
+  const linkIds = items.filter((i) => i.sourceTable === 'photo_subjects').map((i) => i.sourceId)
+  const enrollmentIds = items
+    .filter((i) => i.sourceTable === 'subject_face_enrollments')
+    .map((i) => i.sourceId)
+
+  const [links, enrollments] = await Promise.all([
+    linkIds.length
+      ? prisma.photoSubject.findMany({
+          where: { id: { in: linkIds }, subjectId },
+          select: {
+            id: true,
+            photoId: true,
+            consentId: true,
+            photo: { select: { id: true, sessionId: true, storagePath: true, redactedPath: true } },
+          },
+        })
+      : [],
+    enrollmentIds.length
+      ? prisma.subjectFaceEnrollment.findMany({
+          where: { id: { in: enrollmentIds }, subjectId },
+          select: { id: true, imagePath: true, embedding: true },
+        })
+      : [],
+  ])
+
+  // Untagged crops on a frame this subject appears in are still potentially crops
+  // OF this subject — same rule runDiscovery() applies, for the same reason.
+  const photoIds = links.map((l) => l.photoId)
+  const faces = photoIds.length
+    ? await prisma.faceDetection.findMany({
+        where: {
+          photoId: { in: photoIds },
+          OR: [{ taggedSubjectId: subjectId }, { taggedSubjectId: null }],
+        },
+        select: { id: true, cropPath: true },
+      })
+    : []
+
+  const locations = []
+
+  for (const link of links) {
+    const photo = link.photo
+    locations.push({ locationCode: 'LINK', objectType: 'PhotoSubject', objectId: link.id, storagePath: null })
+    if (photo.redactedPath) {
+      locations.push({
+        locationCode: 'L6',
+        objectType: 'Photo.redactedPath',
+        objectId: photo.id,
+        storagePath: photo.redactedPath,
+      })
+    }
+    locations.push({
+      locationCode: 'L7',
+      objectType: 'Photo.personCache',
+      objectId: photo.id,
+      storagePath: `sessions/${photo.sessionId}/redacted/${photo.id}.person-${subjectId}.jpg`,
+    })
+    locations.push({
+      locationCode: 'L2',
+      objectType: 'Photo.storagePath',
+      objectId: photo.id,
+      storagePath: photo.storagePath,
+    })
+  }
+
+  for (const face of faces) {
+    locations.push({
+      locationCode: 'L3',
+      objectType: 'FaceDetection',
+      objectId: face.id,
+      storagePath: face.cropPath,
+    })
+  }
+
+  for (const enrollment of enrollments) {
+    locations.push({
+      locationCode: 'L4',
+      objectType: 'SubjectFaceEnrollment.imagePath',
+      objectId: enrollment.id,
+      storagePath: enrollment.imagePath,
+    })
+    if (enrollment.embedding) {
+      locations.push({
+        locationCode: 'L5',
+        objectType: 'SubjectFaceEnrollment.embedding',
+        objectId: enrollment.id,
+        storagePath: null,
+      })
+    }
+  }
+
+  // The unique constraint is (purgeJobId, locationCode, objectType, objectId), so
+  // two selected items sharing a frame would collide on L2/L6/L7 and the create
+  // would fail the whole batch.
+  const seen = new Set()
+  return locations.filter((l) => {
+    const key = `${l.locationCode}:${l.objectType}:${l.objectId}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+/**
  * Plans the purge. Runs discovery and materialises one PurgeJobLocation per
  * place the subject exists.
  *
  * Idempotent: re-planning an existing job returns it untouched rather than
  * duplicating locations, so a retried request cannot double-execute.
+ *
+ * With `items`, plans a SCOPED job instead: locations are derived from the named
+ * item index rows rather than from a discovery walk, `scope` is PARTIAL, and the
+ * job is excluded from certification. Idempotency for the scoped path lives one
+ * level up, on the unique constraint over DsarItemAction — an item action is the
+ * only thing that may raise one.
  */
-export async function createPurgeJob(dsarRequestId, admin = null) {
+export async function createPurgeJob(dsarRequestId, admin = null, { items = null, batchId = null } = {}) {
   const request = await prisma.dsarRequest.findUnique({ where: { id: dsarRequestId } })
   if (!request) throw new ApiError(404, 'DSAR request not found')
-  if (!['ERASE', 'WITHDRAWAL_ERASURE'].includes(request.type)) {
+
+  const scoped = Array.isArray(items)
+
+  // The erasure-type gate applies to whole-subject jobs only. A scoped delete is
+  // a handler minimising what is held while working a request of any type, and
+  // it destroys only the items an operator named.
+  if (!scoped && !['ERASE', 'WITHDRAWAL_ERASURE'].includes(request.type)) {
     throw new ApiError(400, `DSAR type ${request.type} is not an erasure`)
   }
 
-  const existing = await prisma.purgeJob.findFirst({
-    where: { dsarRequestId, status: { in: ['QUEUED', 'RUNNING', 'PARTIAL'] } },
-    include: { locations: true },
-  })
-  if (existing) return existing
+  if (!scoped) {
+    const existing = await prisma.purgeJob.findFirst({
+      // scope: FULL matters. Without it a scoped job left PARTIAL by a failed
+      // item delete would be returned as "the open erasure" and the whole-subject
+      // purge would never be planned at all.
+      where: { dsarRequestId, scope: 'FULL', status: { in: ['QUEUED', 'RUNNING', 'PARTIAL'] } },
+      include: { locations: true },
+    })
+    if (existing) return existing
+  }
 
-  const discovery = await runDiscovery(request.subjectId)
+  const discovery = scoped ? null : await runDiscovery(request.subjectId)
+  const locations = scoped
+    ? await locationsForItems(request.subjectId, items)
+    : discovery.locations.map((l) => ({
+        locationCode: l.locationCode,
+        objectType: l.objectType,
+        objectId: l.objectId,
+        storagePath: l.storagePath,
+      }))
 
   const job = await prisma.purgeJob.create({
     data: {
       dsarRequestId,
       subjectId: request.subjectId,
       status: 'QUEUED',
-      locationsTotal: discovery.locations.length,
-      locations: {
-        create: discovery.locations.map((l) => ({
-          locationCode: l.locationCode,
-          objectType: l.objectType,
-          objectId: l.objectId,
-          storagePath: l.storagePath,
-          status: 'PENDING',
-        })),
-      },
+      scope: scoped ? 'PARTIAL' : 'FULL',
+      meta: scoped ? { batchId, itemIds: items.map((i) => i.id) } : undefined,
+      locationsTotal: locations.length,
+      locations: { create: locations.map((l) => ({ ...l, status: 'PENDING' })) },
     },
     include: { locations: true },
   })
@@ -110,12 +246,15 @@ export async function createPurgeJob(dsarRequestId, admin = null) {
   await writeAuditLog({
     entityType: 'DsarRequest',
     entityId: dsarRequestId,
-    action: 'PURGE_PLANNED',
+    action: scoped ? 'PURGE_PLANNED_SCOPED' : 'PURGE_PLANNED',
     actorId: admin?.id ?? null,
     payload: {
       purgeJobId: job.id,
-      locations: discovery.locations.length,
-      multiSubjectPhotos: discovery.counts.multiSubjectPhotos,
+      scope: scoped ? 'PARTIAL' : 'FULL',
+      locations: locations.length,
+      ...(scoped
+        ? { batchId, itemIds: items.map((i) => i.id) }
+        : { multiSubjectPhotos: discovery.counts.multiSubjectPhotos }),
     },
   })
 

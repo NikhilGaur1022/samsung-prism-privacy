@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import Sidebar from '../../components/Sidebar'
 import PageHeader from '../../components/PageHeader'
 import ListPanel from '../../components/ListPanel'
@@ -66,7 +67,13 @@ export default function RequestOversight() {
             emptyTitle="Nothing here"
             emptyMessage="No DSAR requests match this filter."
             renderRow={(r) => (
-              <div className="flex items-center justify-between gap-4 py-4 first:pt-0 last:pb-0">
+              // Links into the workspace. A dpo gets the same pseudonymous item
+              // grid and timeline the handler works from — supervising a request
+              // end to end without ever learning whose it is (matrix §D).
+              <Link
+                to={`/dsar/${r.id}`}
+                className="flex items-center justify-between gap-4 py-4 first:pt-0 last:pb-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+              >
                 <div className="min-w-0">
                   <p className="truncate text-sm font-semibold text-ink">
                     {r.subjectRef} — {r.type}
@@ -79,7 +86,7 @@ export default function RequestOversight() {
                 <StatusPill tone={r.sla.breached ? 'danger' : STATUS_TONE[r.status]}>
                   {r.sla.breached ? 'SLA breached' : r.status}
                 </StatusPill>
-              </div>
+              </Link>
             )}
           />
         </div>

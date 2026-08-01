@@ -164,6 +164,9 @@ const MATRIX = {
   'POST /api/v1/me/dsar': A('subject'),
   'GET /api/v1/me/dsar': A('subject'),
   'GET /api/v1/me/dsar/:requestId': A('subject'),
+  // The principal's own milestones. Ownership is enforced inside the service off
+  // the verified token, and another principal's request id is a 404 there.
+  'GET /api/v1/me/dsar/:requestId/timeline': A('subject'),
   'GET /api/v1/me/dsar/:requestId/package': A('subject'),
   'POST /api/v1/me/dsar/:requestId/package-token': A('subject'),
   'GET /api/v1/me/dsar/:requestId/certificate': A('subject'),
@@ -184,8 +187,28 @@ const MATRIX = {
   // Vault index. Returns content hashes, never payloads — the EXPORT_PACKAGE
   // payload holds a live download token hash.
   'GET /api/v1/dsar/evidence': A('dpo', 'dataOwner', 'dataAdmin', 'super_admin'),
+  // Identity search. Returns names and emails, so §D's rule that dpo and
+  // dataOwner never see subject identity puts this at dataAdmin/super only.
+  'GET /api/v1/dsar/subjects/search': A('dataAdmin', 'super_admin'),
   // Break-glass targeting: ids only, scoped to the request's own subject.
   'GET /api/v1/dsar/:requestId/media': A('dpo', 'dataAdmin', 'super_admin'),
+  // The item index for one request's subject: pseudonymous, no identity, no
+  // blob paths — same role floor as /media.
+  'GET /api/v1/dsar/:requestId/items': A('dpo', 'dataAdmin', 'super_admin'),
+  // Destroying or redacting a frame is execution, not oversight. dpo approves
+  // purposes and reads the record; it does not act on a principal's data.
+  'POST /api/v1/dsar/:requestId/items/actions': A('dataAdmin', 'super_admin'),
+  // Reading what was done to it is oversight, so dpo is admitted here.
+  'GET /api/v1/dsar/:requestId/items/actions': A('dpo', 'dataAdmin', 'super_admin'),
+  // Builds the §11 archive with a selection. dataAdmin/super only: it decrypts
+  // derivatives, which is the same authority /execute needs.
+  'POST /api/v1/dsar/:requestId/package': A('dataAdmin', 'super_admin'),
+  // Merged history, pseudonymous throughout.
+  'GET /api/v1/dsar/:requestId/timeline': A('dpo', 'dataAdmin', 'super_admin'),
+  // Explicit close. dataOwner is excluded: they approve their own project's
+  // resolution via /approve, but declaring a statutory obligation discharged is
+  // the handler's or the DPO's act.
+  'POST /api/v1/dsar/:requestId/close': A('dpo', 'dataAdmin', 'super_admin'),
   'GET /api/v1/dsar/:requestId': A('dpo', 'dataOwner', 'dataAdmin', 'super_admin'),
   'POST /api/v1/dsar/:requestId/assign': A('dpo', 'super_admin'),
   'POST /api/v1/dsar/:requestId/discovery': A('dataOwner', 'dataAdmin', 'super_admin'),
@@ -195,6 +218,18 @@ const MATRIX = {
   'POST /api/v1/dsar/:requestId/reject': A('dpo', 'super_admin'),
   'GET /api/v1/dsar/:requestId/certificate': A('dpo', 'dataOwner', 'dataAdmin', 'super_admin'),
   'GET /api/v1/dsar/:requestId/purge-jobs/:purgeJobId': A('dpo', 'dataAdmin', 'super_admin'),
+
+  // --- import (PLAN Phase 3) ---
+  // dataAdmin/super_admin throughout. Asserting "this photograph is of this
+  // named person" without a capture event or a face match is a data-administration
+  // act: a dpo approves purposes and a dataOwner runs a project, and neither of
+  // those is the authority to write a person's data into the system on their
+  // behalf. The read endpoints share the floor because a batch names its subject.
+  'POST /api/v1/imports': A('dataAdmin', 'super_admin'),
+  'GET /api/v1/imports': A('dataAdmin', 'super_admin'),
+  'POST /api/v1/imports/:batchId/items': A('dataAdmin', 'super_admin'),
+  'POST /api/v1/imports/:batchId/close': A('dataAdmin', 'super_admin'),
+  'GET /api/v1/imports/:batchId': A('dataAdmin', 'super_admin'),
 
   // --- audit ---
   'GET /api/v1/audit': A('dpo', 'dataOwner', 'dataAdmin', 'super_admin', 'subject'),
