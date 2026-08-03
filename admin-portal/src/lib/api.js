@@ -18,8 +18,6 @@ function cacheSet(key, data) {
   _cache.set(key, { data, expires: Date.now() + CACHE_TTL })
 }
 
-// Bust every cached key whose path starts with the given prefix.
-// e.g. writing to /sessions/abc/clusters/x invalidates /sessions/abc/*
 function cacheBust(path) {
   // Walk up to the second-to-last segment to get the parent scope
   const parts = path.split('/').filter(Boolean)
@@ -535,11 +533,89 @@ export async function requestRawMedia(sessionId, photoId, { dsarRequestId, justi
   return URL.createObjectURL(blob)
 }
 
-export const mediaUrl = {
-  photo: (sessionId, photoId) => `${BASE_URL}/api/v1/sessions/${sessionId}/photos/${photoId}/file`,
-  faceCrop: (sessionId, faceId) => `${BASE_URL}/api/v1/sessions/${sessionId}/faces/${faceId}/crop`,
-  redacted: (sessionId, photoId) =>
-    `${BASE_URL}/api/v1/sessions/${sessionId}/photos/${photoId}/redacted`,
-  personRedacted: (sessionId, subjectId, photoId) =>
-    `${BASE_URL}/api/v1/sessions/${sessionId}/people/${subjectId}/photos/${photoId}/redacted`,
+// --- Recordings (audio) -------------------------------------------------------
+// Add this block after the Face enrollment section, or anywhere alongside
+// the other session-scoped functions — order doesn't matter, grouping does.
+
+export function listRecordings(sessionId) {
+  return request(`/api/v1/sessions/${sessionId}/recordings`)
 }
+
+// Multipart, same reasoning as uploadPhotos: bypasses request() because that
+// helper always sets a JSON content-type, which would stop the browser from
+// generating the multipart boundary.
+export async function uploadRecording(sessionId, file) {
+  const form = new FormData()
+  form.append('main_audio', file)
+
+  const res = await fetch(`${BASE_URL}/api/v1/sessions/${sessionId}/recordings`, {
+    method: 'POST',
+    credentials: 'include',
+    body: form,
+  })
+
+  const body = await res.json().catch(() => null)
+  if (!res.ok) {
+    const error = new Error(body?.error ?? `Upload failed with status ${res.status}`)
+    error.status = res.status
+    throw error
+  }
+  clearApiCache()
+  return body
+}
+
+// `snippets` is an array of { subjectId, file } — built by the UI from
+// explicit (subject, file) pairs the agent chose, not by positional index.
+// That's a deliberate difference from how this endpoint was first tested by
+// hand with curl: pairing by array position there was a trust-the-caller
+// shortcut for testing, not something a real UI should reproduce. Here the
+// pairing is structural (each snippet carries its own subjectId), so it's
+// still sent as two positionally-aligned arrays on the wire (that's the
+// backend's contract), but the *construction* of that alignment happens from
+// real (subject, file) objects, so there's no window for a UI bug to send
+// mismatched pairs the way a hand-typed curl command could.
+export async function analyzeRecording(sessionId, recordingId, snippets) {
+  const form = new FormData()
+  form.append('snippet_muids', JSON.stringify(snippets.map((s) => s.subjectId)))
+  for (const s of snippets) form.append('voice_snippets', s.file)
+
+  const res = await fetch(
+    `${BASE_URL}/api/v1/sessions/${sessionId}/recordings/${recordingId}/analyze`,
+    { method: 'POST', credentials: 'include', body: form },
+  )
+
+  const body = await res.json().catch(() => null)
+  if (!res.ok) {
+    const error = new Error(body?.error ?? `Analysis failed with status ${res.status}`)
+    error.status = res.status
+    throw error
+  }
+  clearApiCache()
+  return body
+}
+
+export function redactRecording(sessionId, recordingId) {
+  return request(`/api/v1/sessions/${sessionId}/recordings/${recordingId}/redact`, {
+    method: 'POST',
+  })
+}
+
+export function getRecording(sessionId, recordingId) {
+  return request(`/api/v1/sessions/${sessionId}/recordings/${recordingId}`)
+}
+
+// Add this to the existing `mediaUrl` export object, alongside photo/faceCrop/
+// redacted/personRedacted:
+//   redactedRecording: (sessionId, recordingId) =>
+//     `${BASE_URL}/api/v1/sessions/${sessionId}/recordings/${recordingId}/redacted`,
+
+ export const mediaUrl = {
+   photo: (sessionId, photoId) => `${BASE_URL}/api/v1/sessions/${sessionId}/photos/${photoId}/file`,
+   faceCrop: (sessionId, faceId) => `${BASE_URL}/api/v1/sessions/${sessionId}/faces/${faceId}/crop`,
+   redacted: (sessionId, photoId) =>
+     `${BASE_URL}/api/v1/sessions/${sessionId}/photos/${photoId}/redacted`,
+   personRedacted: (sessionId, subjectId, photoId) =>
+     `${BASE_URL}/api/v1/sessions/${sessionId}/people/${subjectId}/photos/${photoId}/redacted`,
+   redactedRecording: (sessionId, recordingId) =>
+     `${BASE_URL}/api/v1/sessions/${sessionId}/recordings/${recordingId}/redacted`,
+ }

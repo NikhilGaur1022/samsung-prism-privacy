@@ -36,6 +36,14 @@ services:
     ports:
       - "8002:8002"
     restart: unless-stopped
+  audio-worker:
+    build: ../ai-core/audio-worker
+    container_name: prism-audio-worker
+    env_file:
+      - ../ai-core/audio-worker/.env
+    ports:
+      - "8003:8003"
+    restart: unless-stopped
 
 volumes:
   qdrant_storage:

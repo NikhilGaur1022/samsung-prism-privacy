@@ -1,0 +1,29 @@
+[project]
+name = "audio-worker"
+version = "0.1.0"
+description = "Stateless diarization + speaker-ID + transcript-PII detection, and a separate mute-interval redaction step. No DB access, no consent logic — matches face-worker and image-pii-worker."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.139.0",
+    "faster-whisper>=1.2.1",
+    "numpy>=2.5.1",
+    "presidio-analyzer>=2.2.362",
+    "pyannote-audio>=4.0.7",
+    "pydantic-settings>=2.14.2",
+    "python-multipart>=0.0.32",
+    "speechbrain>=1.1.0",
+    "torch>=2.13.0",
+    "torchaudio>=2.11.0",
+    "uvicorn>=0.51.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
+
+# Run `uv lock` after copying this in to generate uv.lock — the original
+# audio-services/uv.lock is not reusable as-is since psycopg2-binary,
+# qdrant-client, and opencv-python-headless were dropped (this worker never
+# touches Postgres/Qdrant, and opencv was an unused leftover dependency).

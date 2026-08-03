@@ -424,7 +424,8 @@ model Session {
   jobs         RecognitionJob[]
   handoff      SessionHandoff?
   invites      SessionInvite[]
-
+  recordings   Recording[]
+  
   @@index([agentId, status])
   @@index([projectId])
   @@map("sessions")
@@ -963,4 +964,29 @@ model SubjectKey {
   subject Subject @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
 
   @@map("subject_keys")
+}
+
+model Recording {
+  id           String   @id @default(uuid()) @db.Uuid
+  sessionId    String   @db.Uuid
+  storagePath  String
+  redactedPath String?
+  status       String   // PENDING_ANALYSIS | ANALYZED | REDACTED | DEFERRED
+  createdAt    DateTime @default(now())
+
+  session  Session        @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  segments AudioSegment[]
+}
+
+model AudioSegment {
+  id          String   @id @default(uuid()) @db.Uuid
+  recordingId String   @db.Uuid
+  speakerId   String
+  subjectId   String?  @db.Uuid
+  startSec    Float
+  endSec      Float
+  action      String   // KEEP | REDACT_VOICE | REDACT_PII
+  matchScore  Float?
+
+  recording Recording @relation(fields: [recordingId], references: [id], onDelete: Cascade)
 }
