@@ -7,129 +7,63 @@ datasource db {
   provider   = "postgresql"
   url        = env("DATABASE_URL")
   directUrl  = env("DIRECT_URL")
-  extensions = [citext, uuidOssp(map: "uuid-ossp")]
-}
-
-enum SubjectGroup {
-  SAMSUNG_EMPLOYEE
-  EX_SAMSUNG_EMPLOYEE
-  SEED_LAB_EMPLOYEE
-  EX_SEED_LAB_EMPLOYEE
-  VOLUNTEER
-}
-
-enum SubjectStatus {
-  PENDING
-  ACTIVE
-  INACTIVE
-  REJECTED
-  // Terminal. The row survives an erasure — it anchors the ProjectConsent proof
-  // that the collection was lawful, and the DSAR request itself — but every
-  // identifying column has been overwritten. Distinct from INACTIVE so that
-  // "erased" is never mistaken for "dormant, could be reactivated".
-  ERASED
-}
-
-enum RegistrationChannel {
-  SELF
-  AGENT
+  extensions = [citext, uuid_ossp(map: "uuid-ossp")]
 }
 
 model Subject {
-  masterUserId String @id @default(uuid()) @map("master_user_id") @db.Uuid
-
-  group  SubjectGroup
-  status SubjectStatus @default(PENDING)
-
-  fullName    String
-  email       String  @unique @db.Citext
-  phone       String?
-  employeeRef String? @unique
-
+  masterUserId        String                  @id @default(uuid()) @map("master_user_id") @db.Uuid
+  group               SubjectGroup
+  status              SubjectStatus           @default(PENDING)
+  fullName            String
+  email               String                  @unique @db.Citext
+  phone               String?
+  employeeRef         String?                 @unique
   registrationChannel RegistrationChannel
-  registeredByUserId  String?             @db.Uuid
-
-  otpVerifiedAt DateTime?
-
-  // DPDP §9 (children) and §14 (nomination). dateOfBirth is what gates the
-  // guardian flow — a volunteer under 18 cannot self-consent, so intake must be
-  // able to tell. guardianContact/nomineeContact are free-form contact strings
-  // (email or phone) deliberately kept out of the auth identity columns.
-  dateOfBirth     DateTime? @map("date_of_birth") @db.Date
-  guardianContact String?   @map("guardian_contact")
-  nomineeContact  String?   @map("nominee_contact")
-
-  refreshTokens RefreshToken[]
-
-  projectConsents     ProjectConsent[]
-  sessionParticipants SessionParticipant[]
-  taggedFaces         FaceDetection[]
-  suggestedClusters   FaceCluster[]
-  photoLinks          PhotoSubject[]
+  registeredByUserId  String?                 @db.Uuid
+  otpVerifiedAt       DateTime?
+  generalTerms        Boolean                 @default(false)
+  piiProcessing       Boolean                 @default(false)
+  biometricMatch      Boolean                 @default(false)
+  createdAt           DateTime                @default(now())
+  updatedAt           DateTime                @updatedAt
+  dateOfBirth         DateTime?               @map("date_of_birth") @db.Date
+  guardianContact     String?                 @map("guardian_contact")
+  nomineeContact      String?                 @map("nominee_contact")
   dsarRequests        DsarRequest[]
+  suggestedClusters   FaceCluster[]
+  taggedFaces         FaceDetection[]
+  import_batches      import_batches[]
+  photoLinks          PhotoSubject[]
+  projectConsents     ProjectConsent[]
   purgeJobs           PurgeJob[]
+  refreshTokens       RefreshToken[]
+  sessionParticipants SessionParticipant[]
+  subject_data_items  subject_data_items[]
+  faceEnrollments     SubjectFaceEnrollment[]
   subjectKey          SubjectKey?
-
-  // Intake-time UX defaults ONLY. Once project_consent_matrix exists (backend-plan.md
-  // Phase 2), THAT table is the sole authority for any gating/consent-check logic.
-  // These three fields must never be read by media-intake, purge, or DSAR logic.
-  generalTerms   Boolean @default(false)
-  piiProcessing  Boolean @default(false)
-  biometricMatch Boolean @default(false)
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  faceEnrollments SubjectFaceEnrollment[]
 
   @@index([group, status])
   @@index([employeeRef])
   @@map("data_subjects")
 }
 
-enum EnrollmentSource {
-  SELF  // captured by the subject in user-portal
-  AGENT // captured by a collection agent in admin-portal
-}
-
-// Multi-pose capture: five angles is what makes a match survive a head turn.
-// buffalo_l degrades past ~±45° yaw, so anything wider is wasted storage.
-enum EnrollmentPose {
-  FRONT
-  LEFT
-  RIGHT
-  UP
-  DOWN
-}
-
-// The enrollment SELFIE and its embedding are BOTH persisted. The embedding is
-// encrypted at rest (AES-256-GCM, see lib/embeddingCrypto.js) and is cleared the
-// moment the enrollment is deleted — the tombstone row survives for the audit
-// chain, the biometric does not. It is never selected by any API response.
-// Persisting it is what makes a session gallery build in seconds instead of one
-// face-service round trip per enrollment per session.
 model SubjectFaceEnrollment {
-  id         String           @id @default(uuid()) @db.Uuid
-  subjectId  String           @map("subject_id") @db.Uuid
-  imagePath  String // relative to STORAGE_ROOT
-  sha256     String
-  detScore   Float
-  width      Int?
-  height     Int?
-  source     EnrollmentSource
-  pose       EnrollmentPose?
-  // AES-256-GCM(512 × float32 LE) laid out as nonce(12) || tag(16) || ciphertext
+  id           String           @id @default(uuid()) @db.Uuid
+  subjectId    String           @map("subject_id") @db.Uuid
+  imagePath    String
+  sha256       String
+  detScore     Float
+  width        Int?
+  height       Int?
+  source       EnrollmentSource
+  capturedBy   String?          @db.Uuid
+  createdAt    DateTime         @default(now())
+  deletedAt    DateTime?
+  pose         EnrollmentPose?
   embedding    Bytes?
-  embeddingDim Int? // 512; null = legacy row, re-derived from the selfie on use
-  // Which key sealed `embedding` and the selfie at imagePath. null = legacy row
-  // sealed with the global FACE_EMBEDDING_KEY; non-null = per-subject DEK from
-  // lib/keyring.js, and destroying that DEK crypto-shreds this row's biometrics.
-  encKeyId   String?          @map("enc_key_id")
-  capturedBy String?          @db.Uuid // AdminUser.id when source=AGENT
-  createdAt  DateTime         @default(now())
-  deletedAt  DateTime? // soft delete; file removed immediately
-
-  subject Subject @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
+  embeddingDim Int?
+  encKeyId     String?          @map("enc_key_id")
+  subject      Subject          @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
 
   @@unique([subjectId, sha256])
   @@index([subjectId, deletedAt])
@@ -137,61 +71,40 @@ model SubjectFaceEnrollment {
 }
 
 model AuditLog {
-  id          String   @id @default(uuid()) @db.Uuid
-  entityType  String
-  entityId    String   @db.Uuid
-  action      String
-  actorId     String?  @db.Uuid
-  payloadHash String
-  // SHA-256 of the canonical payload. A hash, never the payload itself, so
-  // invariant 7 holds — but storing it is what makes payloadHash recomputable and
-  // therefore the chain actually verifiable. Without it, an attacker editing
-  // `action` or `actorId` in place leaves a chain that still links up cleanly.
-  // Null on rows written before this column existed; those verify by linkage only.
-  payloadDigest String? @map("payload_digest")
-  prevHash    String?
-  createdAt   DateTime @default(now())
+  id            String   @id @default(uuid()) @db.Uuid
+  entityType    String
+  entityId      String   @db.Uuid
+  action        String
+  actorId       String?  @db.Uuid
+  payloadHash   String
+  prevHash      String?
+  createdAt     DateTime @default(now())
+  payloadDigest String?  @map("payload_digest")
 
   @@index([entityType, entityId, createdAt])
   @@map("audit_log")
 }
 
 model AdminUser {
-  id                  String      @id @default(uuid()) @db.Uuid
-  email               String      @unique @db.Citext
+  id                  String              @id @default(uuid()) @db.Uuid
+  email               String              @unique @db.Citext
   passwordHash        String?
   role                AdminRole
-  status              AdminStatus @default(INVITED)
-  invitedByAdminId    String?     @db.Uuid
-  failedLoginAttempts Int         @default(0)
+  status              AdminStatus         @default(INVITED)
+  invitedByAdminId    String?             @db.Uuid
+  failedLoginAttempts Int                 @default(0)
   lockedUntil         DateTime?
   lastLoginAt         DateTime?
-  createdAt           DateTime    @default(now())
-  updatedAt           DateTime    @updatedAt
-
-  authTokens    AuthToken[]
-  refreshTokens RefreshToken[]
-
-  ownedProjects      Project[]
-  projectAssignments ProjectAssignment[]
-  sessions           Session[]
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+  authTokens          AuthToken[]
+  projectAssignments  ProjectAssignment[]
+  ownedProjects       Project[]
+  refreshTokens       RefreshToken[]
+  sessions            Session[]
 
   @@index([role, status])
   @@map("admin_users")
-}
-
-enum AdminRole {
-  super_admin
-  dpo
-  dataOwner
-  collectionAgent
-  dataAdmin
-}
-
-enum AdminStatus {
-  INVITED
-  ACTIVE
-  DISABLED
 }
 
 model OtpCode {
@@ -209,10 +122,6 @@ model OtpCode {
   @@map("otp_codes")
 }
 
-enum OtpPurpose {
-  SUBJECT_LOGIN
-}
-
 model AuthToken {
   id          String           @id @default(uuid()) @db.Uuid
   adminUserId String           @db.Uuid
@@ -221,219 +130,142 @@ model AuthToken {
   expiresAt   DateTime
   consumedAt  DateTime?
   createdAt   DateTime         @default(now())
-
-  admin AdminUser @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+  admin       AdminUser        @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
 
   @@map("auth_tokens")
 }
 
-enum AuthTokenPurpose {
-  ADMIN_INVITE
-  ADMIN_PASSWORD_RESET
-}
-
-// (v2, changed — gap #4): two nullable FK columns + CHECK constraint, replacing the
-// no-FK principalType/principalId design from v1. Chosen specifically because this
-// platform's core purpose is rigorous data lifecycle management (purge/DSAR) — cascade
-// delete on refresh tokens when a subject or admin is deleted actually matters here,
-// not just referential-integrity hygiene for its own sake.
 model RefreshToken {
-  id          String    @id @default(uuid()) @db.Uuid
-  subjectId   String?   @db.Uuid
-  adminUserId String?   @db.Uuid
-  familyId    String    @db.Uuid
-  tokenHash   String    @unique
+  id          String     @id @default(uuid()) @db.Uuid
+  subjectId   String?    @db.Uuid
+  adminUserId String?    @db.Uuid
+  familyId    String     @db.Uuid
+  tokenHash   String     @unique
   expiresAt   DateTime
   revokedAt   DateTime?
-  createdAt   DateTime  @default(now())
-
-  subject   Subject?   @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
-  adminUser AdminUser? @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+  createdAt   DateTime   @default(now())
+  adminUser   AdminUser? @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+  subject     Subject?   @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
 
   @@index([subjectId])
   @@index([adminUserId])
   @@map("refresh_tokens")
 }
 
-// ---------------------------------------------------------------------------
-// Collection sessions & face tagging (collection-agent workflow)
-// ---------------------------------------------------------------------------
-
-// A project is a purpose. It may not collect anything until a DPO has approved
-// that purpose, so the lifecycle is a real state machine, not a label:
-// DRAFT -> SUBMITTED -> APPROVED | REJECTED -> ACTIVE -> CLOSED.
-enum ProjectStatus {
-  DRAFT
-  SUBMITTED
-  APPROVED
-  REJECTED
-  ACTIVE
-  CLOSED
-}
-
-enum RiskLevel {
-  LOW
-  MEDIUM
-  HIGH
-}
-
 model Project {
-  id            String        @id @default(uuid()) @db.Uuid
-  name          String
-  purpose       String
-  policyVersion String        @default("v1")
-  status        ProjectStatus @default(DRAFT)
-  ownerAdminId  String?       @db.Uuid
-  retention     String?
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
-
-  // Approval workflow. approvedByAdminId is a bare FK-less UUID on purpose: an
-  // approver is an audit fact, and deleting the admin row must never cascade
-  // into rewriting the approval history.
-  submittedAt        DateTime?  @map("submitted_at")
-  approvedAt         DateTime?  @map("approved_at")
-  approvedByAdminId  String?    @map("approved_by_admin_id") @db.Uuid
-  rejectionReason    String?    @map("rejection_reason")
-  consentTemplateId  String?    @map("consent_template_id") @db.Uuid
-  // Itemised data categories the project claims to need (DPDP §5 notice input),
-  // e.g. ["FACE_IMAGE","NAME","EMAIL"]. Purpose limitation is checked against it.
-  dataTypes          Json?      @map("data_types")
-  riskLevel          RiskLevel? @map("risk_level")
-
-  owner           AdminUser?          @relation(fields: [ownerAdminId], references: [id], onDelete: SetNull)
-  consentTemplate ConsentTemplate?    @relation(fields: [consentTemplateId], references: [id], onDelete: SetNull)
-  assignments     ProjectAssignment[]
-  consents        ProjectConsent[]
-  sessions        Session[]
-  dsarRequests    DsarRequest[]
+  id                String              @id @default(uuid()) @db.Uuid
+  name              String
+  purpose           String
+  policyVersion     String              @default("v1")
+  status            ProjectStatus       @default(DRAFT)
+  ownerAdminId      String?             @db.Uuid
+  retention         String?
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  approvedAt        DateTime?           @map("approved_at")
+  approvedByAdminId String?             @map("approved_by_admin_id") @db.Uuid
+  consentTemplateId String?             @map("consent_template_id") @db.Uuid
+  dataTypes         Json?               @map("data_types")
+  rejectionReason   String?             @map("rejection_reason")
+  riskLevel         RiskLevel?          @map("risk_level")
+  submittedAt       DateTime?           @map("submitted_at")
+  dsarRequests      DsarRequest[]
+  import_batches    import_batches[]
+  assignments       ProjectAssignment[]
+  consents          ProjectConsent[]
+  consentTemplate   ConsentTemplate?    @relation(fields: [consentTemplateId], references: [id])
+  owner             AdminUser?          @relation(fields: [ownerAdminId], references: [id])
   retentionPolicies RetentionPolicy[]
+  sessions          Session[]
 
   @@index([status])
   @@index([ownerAdminId])
   @@map("projects")
 }
 
-enum ConsentTemplateStatus {
-  DRAFT
-  PUBLISHED
-  SUPERSEDED
-}
-
-// The itemised notice text a Data Principal reads before signing (DPDP §5).
-// Published templates are immutable: a change publishes a new version that
-// supersedes the old one, because a consent given in the past was given against
-// the exact words shown at the time, and those words have to stay retrievable.
 model ConsentTemplate {
-  id           String                @id @default(uuid()) @db.Uuid
-  name         String
-  version      Int                   @default(1)
-  status       ConsentTemplateStatus @default(DRAFT)
-  purpose      String
-  // { "en": "...", "hi": "...", "kn": "..." } — DPDP §5(3) requires the notice be
-  // available in the Eighth Schedule languages, so locale is data, not a column.
-  bodyByLocale Json                  @map("body_by_locale")
-  dataTypes    Json?                 @map("data_types")
-  retention    String?
-  grievanceContact String?           @map("grievance_contact")
-  supersedesId String?               @map("supersedes_id") @db.Uuid
-  createdByAdminId String?           @map("created_by_admin_id") @db.Uuid
-  publishedAt  DateTime?             @map("published_at")
-  createdAt    DateTime              @default(now())
-  updatedAt    DateTime              @updatedAt
-
-  supersedes ConsentTemplate?  @relation("TemplateVersions", fields: [supersedesId], references: [id], onDelete: SetNull)
-  supersededBy ConsentTemplate[] @relation("TemplateVersions")
-  projects   Project[]
+  id               String                @id @default(uuid()) @db.Uuid
+  name             String
+  version          Int                   @default(1)
+  status           ConsentTemplateStatus @default(DRAFT)
+  purpose          String
+  bodyByLocale     Json                  @map("body_by_locale")
+  dataTypes        Json?                 @map("data_types")
+  retention        String?
+  grievanceContact String?               @map("grievance_contact")
+  supersedesId     String?               @map("supersedes_id") @db.Uuid
+  createdByAdminId String?               @map("created_by_admin_id") @db.Uuid
+  publishedAt      DateTime?             @map("published_at")
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+  supersedes       ConsentTemplate?      @relation("TemplateVersions", fields: [supersedesId], references: [id])
+  supersededBy     ConsentTemplate[]     @relation("TemplateVersions")
+  projects         Project[]
 
   @@unique([name, version])
   @@index([status])
   @@map("consent_templates")
 }
 
-// Scopes a collection agent to the projects they may run sessions for. Every
-// agent-facing query filters through this — an unassigned project 403s.
 model ProjectAssignment {
-  id         String   @id @default(uuid()) @db.Uuid
-  projectId  String   @db.Uuid
-  adminId    String   @db.Uuid
-  assignedAt DateTime @default(now())
-
-  project Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  admin   AdminUser @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  id         String    @id @default(uuid()) @db.Uuid
+  projectId  String    @db.Uuid
+  adminId    String    @db.Uuid
+  assignedAt DateTime  @default(now())
+  admin      AdminUser @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  project    Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
   @@unique([projectId, adminId])
   @@index([adminId])
   @@map("project_assignments")
 }
 
-enum ConsentStatus {
-  ACTIVE
-  REVOKED
-  PURGED
-}
-
-// The sole authority for consent gating. Project-wide, all-or-nothing: a subject
-// either consents to the project (and everything it collects, faces included) or
-// they don't. The three booleans on Subject are intake-time UX defaults and are
-// never read here.
 model ProjectConsent {
-  consentId     String        @id @default(uuid()) @db.Uuid
-  subjectId     String        @db.Uuid
-  projectId     String        @db.Uuid
-  status        ConsentStatus @default(ACTIVE)
-  policyVersion String
-  signatureHash String
-  consentedAt   DateTime      @default(now())
-  revokedAt     DateTime?
-
-  subject             Subject              @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
-  project             Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  sessionParticipants SessionParticipant[]
+  consentId           String               @id @default(uuid()) @db.Uuid
+  subjectId           String               @db.Uuid
+  projectId           String               @db.Uuid
+  status              ConsentStatus        @default(ACTIVE)
+  policyVersion       String
+  signatureHash       String
+  consentedAt         DateTime             @default(now())
+  revokedAt           DateTime?
   photos              PhotoSubject[]
+  project             Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  subject             Subject              @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
+  sessionParticipants SessionParticipant[]
+  audioSegments       AudioSegment[]
 
   @@unique([subjectId, projectId])
   @@index([projectId, status])
   @@map("project_consent_matrix")
 }
 
-enum SessionStatus {
-  ACTIVE
-  PROCESSING
-  TAGGING
-  ARCHIVED
-  FAILED
-}
-
 model Session {
-  id         String        @id @default(uuid()) @db.Uuid
-  code       String        @unique
-  projectId  String        @db.Uuid
-  agentId    String        @db.Uuid
-  status     SessionStatus @default(ACTIVE)
-  location   String?
-  createdAt  DateTime      @default(now())
-  endedAt    DateTime?
-  archivedAt DateTime?
-
-  project      Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  agent        AdminUser            @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  participants SessionParticipant[]
-  photos       Photo[]
+  id           String               @id @default(uuid()) @db.Uuid
+  code         String               @unique
+  projectId    String               @db.Uuid
+  agentId      String               @db.Uuid
+  status       SessionStatus        @default(ACTIVE)
+  location     String?
+  createdAt    DateTime             @default(now())
+  endedAt      DateTime?
+  archivedAt   DateTime?
+  recordings   Recording[]
   clusters     FaceCluster[]
+  photos       Photo[]
   jobs         RecognitionJob[]
   handoff      SessionHandoff?
   invites      SessionInvite[]
-  recordings   Recording[]
-  
+  participants SessionParticipant[]
+  agent        AdminUser            @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  project      Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
   @@index([agentId, status])
   @@index([projectId])
   @@map("sessions")
 }
 
-// The bearer credential behind the join QR. Deliberately NOT Session.code —
-// the code is an operator-facing label printed in the UI, while this has to be
-// rotatable and revocable on its own without renaming the session.
+
 model SessionInvite {
   id        String    @id @default(uuid()) @db.Uuid
   sessionId String    @map("session_id") @db.Uuid
@@ -442,38 +274,29 @@ model SessionInvite {
   revokedAt DateTime?
   createdBy String    @db.Uuid
   createdAt DateTime  @default(now())
-
-  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  session   Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
   @@index([sessionId])
   @@map("session_invites")
 }
 
 model SessionParticipant {
-  id        String   @id @default(uuid()) @db.Uuid
-  sessionId String   @db.Uuid
-  subjectId String   @db.Uuid
-  consentId String   @db.Uuid
-  addedAt   DateTime @default(now())
-
-  session Session        @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  subject Subject        @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
-  consent ProjectConsent @relation(fields: [consentId], references: [consentId], onDelete: Cascade)
+  id        String         @id @default(uuid()) @db.Uuid
+  sessionId String         @db.Uuid
+  subjectId String         @db.Uuid
+  consentId String         @db.Uuid
+  addedAt   DateTime       @default(now())
+  consent   ProjectConsent @relation(fields: [consentId], references: [consentId], onDelete: Cascade)
+  session   Session        @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  subject   Subject        @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
 
   @@unique([sessionId, subjectId])
   @@map("session_participants")
 }
 
-enum CameraSource {
-  IPHONE_LIVE
-  IPHONE_UPLOAD
-  DSLR
-  XR
-}
-
 model Photo {
-  id           String       @id @default(uuid()) @db.Uuid
-  sessionId    String       @db.Uuid
+  id           String          @id @default(uuid()) @db.Uuid
+  sessionId    String?         @db.Uuid
   storagePath  String
   cameraSource CameraSource
   sha256       String
@@ -482,48 +305,20 @@ model Photo {
   width        Int?
   height       Int?
   takenAt      DateTime?
-  createdAt    DateTime     @default(now())
-
-  // Bystander-blurred derivative written at finalize. The original at storagePath
-  // is never overwritten — downstream decides which derivative it is entitled to.
-  redactedPath String? @map("redacted_path")
-
-  // PII masking is fail-closed. DEFERRED means the image-pii-worker did not
-  // confirm a mask, so the derivative must not be served and the batch must not
-  // ingest — an unmasked Aadhaar leaving this system is a reportable breach.
-  piiStatus PiiStatus @default(PENDING) @map("pii_status")
-  // keyId of the DEK that sealed storagePath / redactedPath. null = plaintext
-  // legacy blob not yet swept by scripts/migrate-media-encrypt.js.
-  encKeyId  String?   @map("enc_key_id")
-
-  session  Session         @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  faces    FaceDetection[]
-  subjects PhotoSubject[]
+  createdAt    DateTime        @default(now())
+  redactedPath String?         @map("redacted_path")
+  encKeyId     String?         @map("enc_key_id")
+  piiStatus    PiiStatus       @default(PENDING) @map("pii_status")
+  faces        FaceDetection[]
+  subjects     PhotoSubject[]
+  session      Session?        @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
   @@unique([sessionId, sha256])
   @@index([sessionId])
+  @@index([sha256])
   @@map("photos")
 }
 
-enum PiiStatus {
-  PENDING
-  CLEAN
-  MASKED
-  DEFERRED
-  FAILED
-}
-
-enum FaceTagStatus {
-  PENDING
-  TAGGED
-  UNKNOWN
-  SKIPPED
-  NOT_A_FACE
-}
-
-// Face embeddings are NEVER persisted here or in Qdrant. The worker computes them
-// in memory, clusters within the session, writes the cluster assignment, and drops
-// the vectors. Only the bbox, the crop, and (once tagged) the subject link survive.
 model FaceDetection {
   id              String        @id @default(uuid()) @db.Uuid
   photoId         String        @db.Uuid
@@ -534,63 +329,47 @@ model FaceDetection {
   taggedSubjectId String?       @db.Uuid
   tagStatus       FaceTagStatus @default(PENDING)
   createdAt       DateTime      @default(now())
-
-  photo         Photo        @relation(fields: [photoId], references: [id], onDelete: Cascade)
-  cluster       FaceCluster? @relation(fields: [clusterId], references: [id], onDelete: SetNull)
-  taggedSubject Subject?     @relation(fields: [taggedSubjectId], references: [masterUserId], onDelete: SetNull)
+  cluster         FaceCluster?  @relation(fields: [clusterId], references: [id])
+  photo           Photo         @relation(fields: [photoId], references: [id], onDelete: Cascade)
+  taggedSubject   Subject?      @relation(fields: [taggedSubjectId], references: [masterUserId])
 
   @@index([photoId])
   @@index([clusterId])
   @@map("face_detections")
 }
 
-// One tagging card in the UI: the same person seen across N photos of a session.
 model FaceCluster {
-  id                 String        @id @default(uuid()) @db.Uuid
-  sessionId          String        @db.Uuid
-  repFaceId          String?       @db.Uuid
-  faceCount          Int           @default(0)
-  suggestedSubjectId String?       @db.Uuid
-  tagStatus          FaceTagStatus @default(PENDING)
-  taggedSubjectId    String?       @db.Uuid
-  createdAt          DateTime      @default(now())
-
-  // Provenance of the tag: what the gallery scored and whether the worker applied
-  // it without an agent ever looking at the card.
-  matchScore Float?  @map("match_score")
-  autoTagged Boolean @default(false) @map("auto_tagged")
-
-  session          Session         @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  faces            FaceDetection[]
-  suggestedSubject Subject?        @relation(fields: [suggestedSubjectId], references: [masterUserId], onDelete: SetNull)
+  id                 String          @id @default(uuid()) @db.Uuid
+  sessionId          String          @db.Uuid
+  repFaceId          String?         @db.Uuid
+  faceCount          Int             @default(0)
+  suggestedSubjectId String?         @db.Uuid
+  tagStatus          FaceTagStatus   @default(PENDING)
+  taggedSubjectId    String?         @db.Uuid
+  createdAt          DateTime        @default(now())
+  matchScore         Float?          @map("match_score")
+  autoTagged         Boolean         @default(false) @map("auto_tagged")
+  session            Session         @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  suggestedSubject   Subject?        @relation(fields: [suggestedSubjectId], references: [masterUserId])
+  faces              FaceDetection[]
 
   @@index([sessionId, tagStatus])
   @@map("face_clusters")
 }
 
-// Written at finalize. This is what links a photo to a person AND to the consent
-// that permits holding it — purge/DSAR walks consentId, exactly like media_assets.
 model PhotoSubject {
-  id        String   @id @default(uuid()) @db.Uuid
-  photoId   String   @db.Uuid
-  subjectId String   @db.Uuid
-  consentId String   @db.Uuid
-  createdAt DateTime @default(now())
-
-  photo   Photo          @relation(fields: [photoId], references: [id], onDelete: Cascade)
-  subject Subject        @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
-  consent ProjectConsent @relation(fields: [consentId], references: [consentId], onDelete: Cascade)
+  id        String          @id @default(uuid()) @db.Uuid
+  photoId   String          @db.Uuid
+  subjectId String          @db.Uuid
+  consentId String?         @db.Uuid
+  createdAt DateTime        @default(now())
+  consent   ProjectConsent? @relation(fields: [consentId], references: [consentId], onDelete: Cascade)
+  photo     Photo           @relation(fields: [photoId], references: [id], onDelete: Cascade)
+  subject   Subject         @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
 
   @@unique([photoId, subjectId])
   @@index([consentId])
   @@map("photo_subjects")
-}
-
-enum JobStatus {
-  QUEUED
-  RUNNING
-  DONE
-  FAILED
 }
 
 model RecognitionJob {
@@ -604,22 +383,12 @@ model RecognitionJob {
   startedAt   DateTime?
   finishedAt  DateTime?
   createdAt   DateTime  @default(now())
-
-  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  session     Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
   @@index([sessionId])
   @@map("recognition_jobs")
 }
 
-enum HandoffStatus {
-  PENDING_INGEST
-  INGESTED
-  REJECTED
-}
-
-// Emitted when a session is finalized. The batch the Consent Mapping Engine and
-// the PII/Redaction Engine consume (steps 7–9 of the DSAR dataflow) — every photo
-// in it already carries a consentId via photo_subjects.
 model SessionHandoff {
   id           String        @id @default(uuid()) @db.Uuid
   sessionId    String        @unique @db.Uuid
@@ -630,234 +399,124 @@ model SessionHandoff {
   linkCount    Int
   emittedAt    DateTime      @default(now())
   ingestedAt   DateTime?
-
-  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  session      Session       @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
   @@index([status])
   @@map("session_handoffs")
 }
 
-// ---------------------------------------------------------------------------
-// Data-principal rights: DSAR, purge, certificates, access logging (DPDP §11–§14)
-// ---------------------------------------------------------------------------
-
-enum DsarType {
-  ACCESS // §11 summary of data + processing
-  CORRECT // §12(1) correction / completion
-  ERASE // §12(3) erasure
-  WITHDRAWAL_ERASURE // §6(4) withdrawal, auto-raised by lib/revocation.js
-  GRIEVANCE // §13
-  NOMINATION // §14
-}
-
-enum DsarStatus {
-  RECEIVED
-  TRIAGE
-  DISCOVERY
-  EXECUTING
-  REVIEW
-  CLOSED
-  REJECTED
-}
-
-enum DsarChannel {
-  PORTAL
-  EMAIL
-  PHONE
-  INTERNAL
-}
-
 model DsarRequest {
-  id          String      @id @default(uuid()) @db.Uuid
-  subjectId   String      @map("subject_id") @db.Uuid
-  projectId   String?     @map("project_id") @db.Uuid
-  type        DsarType
-  status      DsarStatus  @default(RECEIVED)
-  channel     DsarChannel @default(PORTAL)
-  description String?
-
-  // Raised by the platform rather than the principal — a consent withdrawal walks
-  // the same audited executor as a hand-filed erasure request, never a side path.
-  autoRaised Boolean @default(false) @map("auto_raised")
-
-  assignedAdminId String? @map("assigned_admin_id") @db.Uuid
-  dpoAdminId      String? @map("dpo_admin_id") @db.Uuid
-
-  // 30 days is the statutory ceiling; internalDueAt (7d) is what the SLA board
-  // reports against so a breach of the real deadline is never the first warning.
-  slaDueAt      DateTime  @map("sla_due_at")
-  internalDueAt DateTime? @map("internal_due_at")
-
-  resolutionNote  String?   @map("resolution_note")
-  rejectionReason String?   @map("rejection_reason")
-  closedAt        DateTime? @map("closed_at")
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
-
-  subject     Subject              @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
-  project     Project?             @relation(fields: [projectId], references: [id], onDelete: SetNull)
-  evidence    DsarEvidence[]
-  purgeJobs   PurgeJob[]
-  certificate DeletionCertificate?
+  id                String               @id @default(uuid()) @db.Uuid
+  subjectId         String               @map("subject_id") @db.Uuid
+  projectId         String?              @map("project_id") @db.Uuid
+  type              DsarType
+  status            DsarStatus           @default(RECEIVED)
+  channel           DsarChannel          @default(PORTAL)
+  description       String?
+  autoRaised        Boolean              @default(false) @map("auto_raised")
+  assignedAdminId   String?              @map("assigned_admin_id") @db.Uuid
+  dpoAdminId        String?              @map("dpo_admin_id") @db.Uuid
+  slaDueAt          DateTime             @map("sla_due_at")
+  internalDueAt     DateTime?            @map("internal_due_at")
+  resolutionNote    String?              @map("resolution_note")
+  rejectionReason   String?              @map("rejection_reason")
+  closedAt          DateTime?            @map("closed_at")
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+  certificate       DeletionCertificate?
+  evidence          DsarEvidence[]
+  dsar_item_actions dsar_item_actions[]
+  project           Project?             @relation(fields: [projectId], references: [id])
+  subject           Subject              @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
+  purgeJobs         PurgeJob[]
 
   @@index([status, slaDueAt])
   @@index([subjectId, createdAt])
   @@index([assignedAdminId, status])
+  @@index([slaDueAt, id])
   @@map("dsar_requests")
 }
 
-enum EvidenceKind {
-  DISCOVERY_RESULT
-  IDENTITY_PROOF
-  EXPORT_PACKAGE
-  PURGE_REPORT
-  CORRESPONDENCE
-  APPROVAL
-}
-
-// The audit chain stores hashes only and therefore cannot prove *what* was done.
-// Anything that must be provable to a regulator lives here, in full, with its own
-// hash — this table is the evidentiary record, audit_log is only tamper-evidence.
 model DsarEvidence {
-  id            String       @id @default(uuid()) @db.Uuid
-  dsarRequestId String       @map("dsar_request_id") @db.Uuid
-  kind          EvidenceKind
-  label         String
-  payload       Json?
-  storagePath   String?      @map("storage_path")
-  contentHash   String       @map("content_hash")
-  createdByAdminId String?   @map("created_by_admin_id") @db.Uuid
-  createdAt     DateTime     @default(now())
-
-  request DsarRequest @relation(fields: [dsarRequestId], references: [id], onDelete: Cascade)
+  id               String       @id @default(uuid()) @db.Uuid
+  dsarRequestId    String       @map("dsar_request_id") @db.Uuid
+  kind             EvidenceKind
+  label            String
+  payload          Json?
+  storagePath      String?      @map("storage_path")
+  contentHash      String       @map("content_hash")
+  createdByAdminId String?      @map("created_by_admin_id") @db.Uuid
+  createdAt        DateTime     @default(now())
+  request          DsarRequest  @relation(fields: [dsarRequestId], references: [id], onDelete: Cascade)
 
   @@index([dsarRequestId, createdAt])
   @@map("dsar_evidence")
 }
 
-enum PurgeJobStatus {
-  QUEUED
-  RUNNING
-  PARTIAL
-  COMPLETED
-  FAILED
-}
-
-enum PurgeLocationStatus {
-  PENDING
-  RUNNING
-  DONE
-  SKIPPED
-  FAILED
-}
-
-// The erasure executor's unit of work. One job per DSAR, one row per physical
-// location from 01_PRIVACY_DATAFLOW §2 — so a half-finished purge resumes from
-// the last completed location instead of restarting and double-deleting.
 model PurgeJob {
-  id             String         @id @default(uuid()) @db.Uuid
-  dsarRequestId  String         @map("dsar_request_id") @db.Uuid
-  subjectId      String         @map("subject_id") @db.Uuid
-  status         PurgeJobStatus @default(QUEUED)
-  locationsTotal Int            @default(0) @map("locations_total")
-  locationsDone  Int            @default(0) @map("locations_done")
-  // Set only when every location reached DONE/SKIPPED. The certificate is issued
-  // off this flag, never off "the job finished running".
-  keyDestroyedAt DateTime?      @map("key_destroyed_at")
-  startedAt      DateTime?      @map("started_at")
-  finishedAt     DateTime?      @map("finished_at")
+  id             String             @id @default(uuid()) @db.Uuid
+  dsarRequestId  String             @map("dsar_request_id") @db.Uuid
+  subjectId      String             @map("subject_id") @db.Uuid
+  status         PurgeJobStatus     @default(QUEUED)
+  locationsTotal Int                @default(0) @map("locations_total")
+  locationsDone  Int                @default(0) @map("locations_done")
+  keyDestroyedAt DateTime?          @map("key_destroyed_at")
+  startedAt      DateTime?          @map("started_at")
+  finishedAt     DateTime?          @map("finished_at")
   error          String?
-  createdAt      DateTime       @default(now())
-  updatedAt      DateTime       @updatedAt
-
-  request   DsarRequest        @relation(fields: [dsarRequestId], references: [id], onDelete: Cascade)
-  subject   Subject            @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
-  locations PurgeJobLocation[]
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+  scope          PurgeJobScope      @default(FULL)
+  meta           Json?
+  locations      PurgeJobLocation[]
+  request        DsarRequest        @relation(fields: [dsarRequestId], references: [id], onDelete: Cascade)
+  subject        Subject            @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
 
   @@index([status])
   @@index([dsarRequestId])
+  @@index([dsarRequestId, scope, status])
   @@map("purge_jobs")
 }
 
 model PurgeJobLocation {
-  id         String              @id @default(uuid()) @db.Uuid
-  purgeJobId String              @map("purge_job_id") @db.Uuid
-  // "L2".."L11" from the photo-lifecycle table, so the certificate can name the
-  // location in the same vocabulary the DPIA uses.
-  locationCode String            @map("location_code")
-  objectType   String            @map("object_type")
-  objectId     String?           @map("object_id")
-  storagePath  String?           @map("storage_path")
+  id           String              @id @default(uuid()) @db.Uuid
+  purgeJobId   String              @map("purge_job_id") @db.Uuid
+  locationCode String              @map("location_code")
+  objectType   String              @map("object_type")
+  objectId     String?             @map("object_id")
+  storagePath  String?             @map("storage_path")
   status       PurgeLocationStatus @default(PENDING)
-  // Proof the thing existed and what it was, captured before deletion. After the
-  // delete there is nothing left to hash — this is the only chance.
-  hashBefore   String?           @map("hash_before")
-  attempts     Int               @default(0)
+  hashBefore   String?             @map("hash_before")
+  attempts     Int                 @default(0)
   error        String?
-  completedAt  DateTime?         @map("completed_at")
-  createdAt    DateTime          @default(now())
-
-  job PurgeJob @relation(fields: [purgeJobId], references: [id], onDelete: Cascade)
+  completedAt  DateTime?           @map("completed_at")
+  createdAt    DateTime            @default(now())
+  job          PurgeJob            @relation(fields: [purgeJobId], references: [id], onDelete: Cascade)
 
   @@unique([purgeJobId, locationCode, objectType, objectId])
   @@index([purgeJobId, status])
   @@map("purge_job_locations")
 }
 
-// Signed, self-contained proof of erasure handed to the Data Principal. Holds its
-// own canonical payload because audit_log is hash-only and cannot substitute.
 model DeletionCertificate {
-  id                String   @id @default(uuid()) @db.Uuid
-  dsarRequestId     String   @unique @map("dsar_request_id") @db.Uuid
-  purgeJobId        String?  @map("purge_job_id") @db.Uuid
-  // Never the real identity: certificates are shown to DPO/auditors who have no
-  // basis to see who the principal is.
-  subjectPseudonym  String   @map("subject_pseudonym")
-  locationsCount    Int      @map("locations_count")
-  payload           Json
-  payloadHash       String   @map("payload_hash")
-  signature         String
-  signingKeyId      String   @map("signing_key_id")
-  algorithm         String   @default("ed25519")
-  issuedByAdminId   String?  @map("issued_by_admin_id") @db.Uuid
-  completedAt       DateTime @map("completed_at")
-  issuedAt          DateTime @default(now()) @map("issued_at")
-
-  request DsarRequest @relation(fields: [dsarRequestId], references: [id], onDelete: Cascade)
+  id               String      @id @default(uuid()) @db.Uuid
+  dsarRequestId    String      @unique @map("dsar_request_id") @db.Uuid
+  purgeJobId       String?     @map("purge_job_id") @db.Uuid
+  subjectPseudonym String      @map("subject_pseudonym")
+  locationsCount   Int         @map("locations_count")
+  payload          Json
+  payloadHash      String      @map("payload_hash")
+  signature        String
+  signingKeyId     String      @map("signing_key_id")
+  algorithm        String      @default("ed25519")
+  issuedByAdminId  String?     @map("issued_by_admin_id") @db.Uuid
+  completedAt      DateTime    @map("completed_at")
+  issuedAt         DateTime    @default(now()) @map("issued_at")
+  request          DsarRequest @relation(fields: [dsarRequestId], references: [id], onDelete: Cascade)
 
   @@map("deletion_certificates")
 }
 
-enum AccessActorType {
-  ADMIN
-  SUBJECT
-  SERVICE
-}
-
-enum AccessObjectType {
-  PHOTO
-  REDACTED_PHOTO
-  FACE_CROP
-  ENROLLMENT
-  EMBEDDING
-  SUBJECT_PII
-  EXPORT
-  DSAR_PACKAGE
-  VAULT_OBJECT
-  AUDIT_LOG
-}
-
-enum AccessAction {
-  VIEW
-  DOWNLOAD
-  DECRYPT
-  EXPORT
-  DENIED
-}
-
-// audit_log records mutations; this records reads. DPDP §8(4) reasonable-security
-// needs both, and only this one answers "who looked at this face, and why".
-// Append-only by RLS: the app role may INSERT and SELECT, nothing else.
 model AccessEvent {
   id            String           @id @default(uuid()) @db.Uuid
   actorType     AccessActorType  @map("actor_type")
@@ -881,6 +540,378 @@ model AccessEvent {
   @@map("access_events")
 }
 
+model BreachRecord {
+  id                   String         @id @default(uuid()) @db.Uuid
+  title                String
+  description          String
+  severity             BreachSeverity
+  status               BreachStatus   @default(OPEN)
+  discoveredAt         DateTime       @map("discovered_at")
+  containedAt          DateTime?      @map("contained_at")
+  affectedSubjectCount Int            @default(0) @map("affected_subject_count")
+  affectedProjectIds   Json?          @map("affected_project_ids")
+  dpbNotifiedAt        DateTime?      @map("dpb_notified_at")
+  principalsNotifiedAt DateTime?      @map("principals_notified_at")
+  reportedByAdminId    String?        @map("reported_by_admin_id") @db.Uuid
+  remediation          String?
+  createdAt            DateTime       @default(now())
+  updatedAt            DateTime       @updatedAt
+
+  @@index([status, discoveredAt])
+  @@map("breach_records")
+}
+
+model RetentionPolicy {
+  id               String          @id @default(uuid()) @db.Uuid
+  projectId        String?         @map("project_id") @db.Uuid
+  dataClass        String          @map("data_class")
+  retentionDays    Int             @map("retention_days")
+  action           RetentionAction @default(HARD_DELETE)
+  clockStart       String          @map("clock_start")
+  active           Boolean         @default(true)
+  createdByAdminId String?         @map("created_by_admin_id") @db.Uuid
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+  project          Project?        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, dataClass])
+  @@index([active])
+  @@map("retention_policies")
+}
+
+model SubjectKey {
+  subjectId   String    @id @map("subject_id") @db.Uuid
+  keyId       String    @unique @map("key_id")
+  salt        Bytes?
+  kekVersion  Int       @default(1) @map("kek_version")
+  destroyedAt DateTime? @map("destroyed_at")
+  createdAt   DateTime  @default(now())
+  subject     Subject   @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
+
+  @@map("subject_keys")
+}
+
+model Recording {
+  id           String          @id @default(uuid()) @db.Uuid
+  sessionId    String          @map("session_id") @db.Uuid
+  storagePath  String          @map("storage_path")
+  redactedPath String?         @map("redacted_path")
+  status       RecordingStatus @default(PENDING_ANALYSIS)
+  mimeType     String?         @map("mime_type")
+  sha256       String?
+  sizeBytes    Int?            @map("size_bytes")
+  durationSec  Float?          @map("duration_sec")
+  encKeyId     String?         @map("enc_key_id")
+  createdAt    DateTime        @default(now()) @map("created_at")
+  segments     AudioSegment[]
+  session      Session         @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@map("recordings")
+}
+
+model AudioSegment {
+  id          String             @id @default(uuid()) @db.Uuid
+  recordingId String             @map("recording_id") @db.Uuid
+  speakerId   String             @map("speaker_id")
+  subjectId   String?            @map("subject_id") @db.Uuid
+  consentId   String?            @map("consent_id") @db.Uuid
+  startSec    Float              @map("start_sec")
+  endSec      Float              @map("end_sec")
+  action      AudioSegmentAction
+  reason      String?
+  piiType     String?            @map("pii_type")
+  matchScore  Float?             @map("match_score")
+  recording   Recording          @relation(fields: [recordingId], references: [id], onDelete: Cascade)
+  consent     ProjectConsent?    @relation(fields: [consentId], references: [consentId], onDelete: SetNull)
+
+  @@index([recordingId])
+  @@index([subjectId])
+  @@index([consentId])
+  @@map("audio_segments")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model dsar_item_actions {
+  id                    String               @id @db.Uuid
+  dsar_request_id       String               @db.Uuid
+  item_id               String               @db.Uuid
+  kind                  DsarItemActionKind
+  status                DsarItemActionStatus @default(REQUESTED)
+  requested_by_admin_id String?              @db.Uuid
+  batch_id              String?              @db.Uuid
+  reason                String?
+  error                 String?
+  hash_before           String?
+  requested_at          DateTime             @default(now())
+  completed_at          DateTime?
+  dsar_requests         DsarRequest          @relation(fields: [dsar_request_id], references: [id], onDelete: Cascade)
+  subject_data_items    subject_data_items   @relation(fields: [item_id], references: [id], onDelete: Cascade)
+
+  @@unique([dsar_request_id, item_id, kind])
+  @@index([batch_id])
+  @@index([dsar_request_id, status])
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model import_batches {
+  id                  String            @id @db.Uuid
+  subject_id          String            @db.Uuid
+  type                DataItemType      @default(PHOTO)
+  project_id          String?           @db.Uuid
+  status              ImportBatchStatus @default(OPEN)
+  created_by_admin_id String?           @db.Uuid
+  items_total         Int               @default(0)
+  items_done          Int               @default(0)
+  items_failed        Int               @default(0)
+  note                String?
+  closed_at           DateTime?
+  created_at          DateTime          @default(now())
+  updated_at          DateTime
+  projects            Project?          @relation(fields: [project_id], references: [id])
+  data_subjects       Subject           @relation(fields: [subject_id], references: [masterUserId], onDelete: Cascade)
+
+  @@index([status])
+  @@index([subject_id, created_at])
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model subject_data_items {
+  id                   String              @id @db.Uuid
+  subject_id           String              @db.Uuid
+  type                 DataItemType
+  origin               DataItemOrigin
+  source_table         String
+  source_id            String              @db.Uuid
+  project_id           String?             @db.Uuid
+  session_id           String?             @db.Uuid
+  storage_path         String?
+  content_hash         String?
+  captured_at          DateTime?
+  shared_subject_count Int                 @default(1)
+  redacted_available   Boolean             @default(false)
+  deleted_at           DateTime?
+  indexed_at           DateTime            @default(now())
+  meta                 Json?
+  dsar_item_actions    dsar_item_actions[]
+  data_subjects        Subject             @relation(fields: [subject_id], references: [masterUserId], onDelete: Cascade)
+
+  @@unique([subject_id, type, source_table, source_id])
+  @@index([subject_id, deleted_at, captured_at(sort: Desc), id(sort: Desc)])
+  @@index([subject_id, deleted_at])
+  @@index([subject_id, type, captured_at])
+}
+
+enum SubjectGroup {
+  SAMSUNG_EMPLOYEE
+  EX_SAMSUNG_EMPLOYEE
+  SEED_LAB_EMPLOYEE
+  EX_SEED_LAB_EMPLOYEE
+  VOLUNTEER
+}
+
+enum SubjectStatus {
+  PENDING
+  ACTIVE
+  INACTIVE
+  REJECTED
+  ERASED
+}
+
+enum RegistrationChannel {
+  SELF
+  AGENT
+}
+
+enum EnrollmentSource {
+  SELF
+  AGENT
+}
+
+enum EnrollmentPose {
+  FRONT
+  LEFT
+  RIGHT
+  UP
+  DOWN
+}
+
+enum AdminRole {
+  super_admin
+  dpo
+  dataOwner
+  collectionAgent
+  dataAdmin
+}
+
+enum AdminStatus {
+  INVITED
+  ACTIVE
+  DISABLED
+}
+
+enum OtpPurpose {
+  SUBJECT_LOGIN
+}
+
+enum AuthTokenPurpose {
+  ADMIN_INVITE
+  ADMIN_PASSWORD_RESET
+}
+
+enum ProjectStatus {
+  DRAFT
+  ACTIVE
+  CLOSED
+  SUBMITTED
+  APPROVED
+  REJECTED
+}
+
+enum RiskLevel {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum ConsentTemplateStatus {
+  DRAFT
+  PUBLISHED
+  SUPERSEDED
+}
+
+enum ConsentStatus {
+  ACTIVE
+  REVOKED
+  PURGED
+}
+
+enum SessionStatus {
+  ACTIVE
+  PROCESSING
+  TAGGING
+  ARCHIVED
+  FAILED
+}
+
+enum CameraSource {
+  IPHONE_LIVE
+  IPHONE_UPLOAD
+  DSLR
+  XR
+}
+
+enum PiiStatus {
+  PENDING
+  CLEAN
+  MASKED
+  DEFERRED
+  FAILED
+}
+
+enum FaceTagStatus {
+  PENDING
+  TAGGED
+  UNKNOWN
+  SKIPPED
+  NOT_A_FACE
+}
+
+enum JobStatus {
+  QUEUED
+  RUNNING
+  DONE
+  FAILED
+}
+
+enum HandoffStatus {
+  PENDING_INGEST
+  INGESTED
+  REJECTED
+}
+
+enum DsarType {
+  ACCESS
+  CORRECT
+  ERASE
+  WITHDRAWAL_ERASURE
+  GRIEVANCE
+  NOMINATION
+}
+
+enum DsarStatus {
+  RECEIVED
+  TRIAGE
+  DISCOVERY
+  EXECUTING
+  REVIEW
+  CLOSED
+  REJECTED
+}
+
+enum DsarChannel {
+  PORTAL
+  EMAIL
+  PHONE
+  INTERNAL
+}
+
+enum EvidenceKind {
+  DISCOVERY_RESULT
+  IDENTITY_PROOF
+  EXPORT_PACKAGE
+  PURGE_REPORT
+  CORRESPONDENCE
+  APPROVAL
+}
+
+enum PurgeJobStatus {
+  QUEUED
+  RUNNING
+  PARTIAL
+  COMPLETED
+  FAILED
+}
+
+enum PurgeLocationStatus {
+  PENDING
+  RUNNING
+  DONE
+  SKIPPED
+  FAILED
+}
+
+enum AccessActorType {
+  ADMIN
+  SUBJECT
+  SERVICE
+}
+
+enum AccessObjectType {
+  PHOTO
+  REDACTED_PHOTO
+  FACE_CROP
+  ENROLLMENT
+  EMBEDDING
+  SUBJECT_PII
+  EXPORT
+  DSAR_PACKAGE
+  VAULT_OBJECT
+  AUDIT_LOG
+  SUBJECT_DATA_ITEM
+  RECORDING
+  REDACTED_RECORDING
+}
+
+enum AccessAction {
+  VIEW
+  DOWNLOAD
+  DECRYPT
+  EXPORT
+  DENIED
+  SEARCH
+}
+
 enum BreachSeverity {
   LOW
   MEDIUM
@@ -895,30 +926,6 @@ enum BreachStatus {
   CLOSED
 }
 
-// DPDP §8(5) + Rules 2025: the Data Protection Board gets a report within 72h and
-// every affected principal gets told without delay. Both timestamps are columns
-// so "we forgot" is a query, not an archaeology exercise.
-model BreachRecord {
-  id                    String         @id @default(uuid()) @db.Uuid
-  title                 String
-  description           String
-  severity              BreachSeverity
-  status                BreachStatus   @default(OPEN)
-  discoveredAt          DateTime       @map("discovered_at")
-  containedAt           DateTime?      @map("contained_at")
-  affectedSubjectCount  Int            @default(0) @map("affected_subject_count")
-  affectedProjectIds    Json?          @map("affected_project_ids")
-  dpbNotifiedAt         DateTime?      @map("dpb_notified_at")
-  principalsNotifiedAt  DateTime?      @map("principals_notified_at")
-  reportedByAdminId     String?        @map("reported_by_admin_id") @db.Uuid
-  remediation           String?
-  createdAt             DateTime       @default(now())
-  updatedAt             DateTime       @updatedAt
-
-  @@index([status, discoveredAt])
-  @@map("breach_records")
-}
-
 enum RetentionAction {
   HARD_DELETE
   CRYPTO_SHRED
@@ -926,67 +933,51 @@ enum RetentionAction {
   TOMBSTONE
 }
 
-// Retention clocks from 01_PRIVACY_DATAFLOW §6.1, as data rather than constants,
-// so the sweeper is one loop and a project can tighten (never loosen) a default.
-model RetentionPolicy {
-  id            String          @id @default(uuid()) @db.Uuid
-  // null projectId = the platform default for that data class.
-  projectId     String?         @map("project_id") @db.Uuid
-  dataClass     String          @map("data_class")
-  retentionDays Int             @map("retention_days")
-  action        RetentionAction @default(HARD_DELETE)
-  clockStart    String          @map("clock_start")
-  active        Boolean         @default(true)
-  createdByAdminId String?      @map("created_by_admin_id") @db.Uuid
-  createdAt     DateTime        @default(now())
-  updatedAt     DateTime        @updatedAt
-
-  project Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
-
-  @@unique([projectId, dataClass])
-  @@index([active])
-  @@map("retention_policies")
+enum DataItemOrigin {
+  COLLECTION_SESSION
+  IMPORT
+  ENROLLMENT
 }
 
-// The per-subject DEK is HKDF-derived from MEDIA_KEK **and this random salt**.
-// Pure HKDF(KEK, subjectId) would be unshreddable — the KEK regenerates it
-// forever. Deleting the salt is what makes erasure irreversible, including in
-// backups that cannot be rewritten. The row survives with salt NULL as the
-// tombstone proving the key once existed and when it died.
-model SubjectKey {
-  subjectId   String    @id @map("subject_id") @db.Uuid
-  keyId       String    @unique @map("key_id")
-  salt        Bytes?
-  kekVersion  Int       @default(1) @map("kek_version")
-  destroyedAt DateTime? @map("destroyed_at")
-  createdAt   DateTime  @default(now())
-
-  subject Subject @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
-
-  @@map("subject_keys")
+enum DataItemType {
+  PHOTO
+  AUDIO
 }
 
-model Recording {
-  id           String   @id @default(uuid()) @db.Uuid
-  sessionId    String   @db.Uuid
-  storagePath  String
-  redactedPath String?
-  status       String   // PENDING_ANALYSIS | ANALYZED | REDACTED | DEFERRED
-  createdAt    DateTime @default(now())
-
-  session  Session        @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  segments AudioSegment[]
+enum DsarItemActionKind {
+  REDACT
+  DELETE
+  EXPORT
 }
 
-model AudioSegment {
-  id          String   @id @default(uuid()) @db.Uuid
-  recordingId String   @db.Uuid
-  speakerId   String
-  subjectId   String?  @db.Uuid
-  startSec    Float
-  endSec      Float
-  action      String   // KEEP | REDACT_VOICE | REDACT_PII
-  matchScore  Float?
+enum DsarItemActionStatus {
+  REQUESTED
+  RUNNING
+  DONE
+  FAILED
+  SKIPPED
+}
 
-  recording Recording @relation(fields: [recordingId], references: [id], onDelete: Cascade)
+enum ImportBatchStatus {
+  OPEN
+  CLOSED
+  FAILED
+}
+
+enum PurgeJobScope {
+  FULL
+  PARTIAL
+}
+
+enum RecordingStatus {
+  PENDING_ANALYSIS
+  ANALYZED
+  REDACTED
+  DEFERRED
+}
+
+enum AudioSegmentAction {
+  KEEP
+  REDACT_VOICE
+  REDACT_PII
 }

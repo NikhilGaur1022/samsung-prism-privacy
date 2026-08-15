@@ -28,6 +28,8 @@ dist-ssr
 !.env.example
 
 __pycache__/
+cookies.txt
+backend/prisma/schema.prisma.mine
 
 # Pre-delete database backups land here. They are verbatim row dumps -- admin
 # email addresses, subject records -- so they are exactly what must not be

@@ -16,6 +16,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 COPY pyproject.toml uv.lock* ./
 RUN uv sync --no-cache
+RUN uv run python -m spacy download en_core_web_lg
 
 COPY . .
 

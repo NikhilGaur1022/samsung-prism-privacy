@@ -502,12 +502,10 @@ export default function SessionDetail() {
                 </ul>
               </div>
             )}
-            <RecordingsPanel
-              sessionId={sessionId}
-              participants={session.participants}
-              capturing={capturing}
-            />
+            
           </section>
+
+          
 
           <section className="rounded-card bg-surface p-6 shadow-card">
             <h2 className="text-base font-bold text-ink">Capture</h2>
@@ -584,6 +582,7 @@ export default function SessionDetail() {
                 </div>
               </>
             )}
+          
 
             <div className="mt-5 border-t border-border pt-5">
               <p className="text-xs font-bold uppercase tracking-wide text-ink-faint">
@@ -614,6 +613,15 @@ export default function SessionDetail() {
               </div>
             </div>
           </section>
+
+          <section className="rounded-card bg-surface p-6 shadow-card">
+          <RecordingsPanel
+              sessionId={sessionId}
+              participants={session.participants}
+              capturing={capturing}
+            />
+            </section>
+            
         </div>
       </main>
     </div>

@@ -100,6 +100,16 @@ export async function buildAccessPackage(dsarRequestId, admin = null) {
       take: 200,
       select: { objectType: true, action: true, purpose: true, breakGlass: true, createdAt: true },
     }),
+    prisma.audioSegment.findMany({
+      where: { subjectId },
+      include: {
+        recording: {
+          include: {
+            segments: true,
+          },
+        },
+      },
+    }),
   ])
 
   if (!subject) throw new ApiError(404, 'Subject not found')
@@ -142,6 +152,61 @@ export async function buildAccessPackage(dsarRequestId, admin = null) {
     photoManifest.push(entry)
   }
 
+  const audioManifest = []
+  const processedRecordings = new Set()
+
+  for (const seg of audioSegments) {
+    const rec = seg.recording
+    if (!rec || processedRecordings.has(rec.id)) continue
+    processedRecordings.add(rec.id)
+
+    const entry = {
+      recordingId: rec.id,
+      sessionId: rec.sessionId,
+      consentId: seg.consentId,
+      included: false,
+      reason: null,
+      speakingTurns: (rec.segments || [])
+        .filter((s) => s.subjectId === subjectId && s.action === 'KEEP')
+        .map((s) => ({
+          startSec: s.startSec,
+          endSec: s.endSec,
+          action: s.action,
+          reason: s.reason || 'CONSENTED_SPEAKER',
+          consentId: s.consentId,
+        })),
+      redactions: (rec.segments || [])
+        .filter((s) => s.action === 'REDACT_VOICE' || s.action === 'REDACT_PII')
+        .map((s) => ({
+          startSec: s.startSec,
+          endSec: s.endSec,
+          action: s.action,
+          reason: s.reason || (s.action === 'REDACT_VOICE' ? 'UNIDENTIFIED_SPEAKER' : `PII_${s.piiType || 'DETECTED'}_FOUND`),
+          piiType: s.piiType,
+          consentId: s.consentId,
+        })),
+    }
+
+    if (!rec.redactedPath || rec.status !== 'REDACTED') {
+      entry.reason = 'REDACTION_INCOMPLETE — excluded pending masking; re-request once processing completes'
+      audioManifest.push(entry)
+      continue
+    }
+
+    try {
+      const buffer = await readFile(rec.redactedPath)
+      const fileName = `audio/${rec.id}.redacted.wav`
+      files.push({ name: fileName, data: buffer, date: rec.createdAt })
+      entry.included = true
+      entry.file = fileName
+      entry.sha256 = createHash('sha256').update(buffer).digest('hex')
+    } catch (err) {
+      logger.error({ err, recordingId: rec.id }, 'access package: could not read redacted audio derivative')
+      entry.reason = 'UNREADABLE — the derivative could not be read at packaging time'
+    }
+    audioManifest.push(entry)
+  }
+
   const manifest = {
     version: 1,
     packageType: 'DPDP_SECTION_11_ACCESS',
@@ -176,14 +241,16 @@ export async function buildAccessPackage(dsarRequestId, admin = null) {
       enrollments: enrollments.length,
       poses: enrollments.map((e) => e.pose).filter(Boolean),
       embeddingsHeld: enrollments.filter((e) => e.embeddingDim).length,
-      note: 'Face templates are held encrypted and are never exported, displayed, or disclosed to any operator.',
+      note: 'Biometric face and voice templates are held encrypted and are never exported, displayed, or disclosed.',
     },
     photos: photoManifest,
+    audioRecordings: audioManifest,
     processingSummary: {
       purposesInForce: consents.filter((c) => c.status === 'ACTIVE').map((c) => c.project?.purpose),
       processors: [
         { name: 'face-worker', role: 'face detection and blurring', dataSeen: 'photo pixels, in memory only' },
         { name: 'image-pii-worker', role: 'text PII detection and masking', dataSeen: 'photo pixels, in memory only' },
+        { name: 'audio-worker', role: 'speaker diarization, voice recognition & audio PII redaction', dataSeen: 'audio waveforms, in memory only' },
       ],
       recentAccessEvents: accessEvents,
     },
@@ -208,12 +275,13 @@ export async function buildAccessPackage(dsarRequestId, admin = null) {
         '',
         'manifest.json holds your profile, your consents, and a summary of how your',
         'data is processed. photos/ holds the redacted copies of images you appear in.',
+        'audio/ holds the redacted copies of voice recordings with bystander speech and PII muted.',
         '',
-        'Images are redacted: other people in the frame are blurred and sensitive text',
-        'is masked. Originals are not included, because exporting them would disclose',
+        'Media is redacted: other people in the frame/recording are masked/muted and sensitive text/speech',
+        'is redacted. Originals are not included, because exporting them would disclose',
         'other people to you.',
         '',
-        'Face templates are never included in any export.',
+        'Face templates and voice biometric embeddings are never included in any export.',
         '',
         `This package expires ${PACKAGE_TTL_DAYS} days after issue and the download link is single-use.`,
       ].join('\n'),

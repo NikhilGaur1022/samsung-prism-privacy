@@ -63,26 +63,26 @@ function RecordingRow({ sessionId, recording, participants, onChanged }) {
       await analyzeRecording(sessionId, recording.id, snippets)
       setSnippets([])
       setExpanded(false)
-      await onChanged()
     } catch (err) {
       setError(err)
     } finally {
+      await onChanged()
       setBusy(false)
     }
   }
 
   const runRedact = async () => {
-    setBusy(true)
-    setError(null)
-    try {
-      await redactRecording(sessionId, recording.id)
-      await onChanged()
-    } catch (err) {
-      setError(err)
-    } finally {
-      setBusy(false)
-    }
-  }
+     setBusy(true)
+     setError(null)
+     try {
+       await redactRecording(sessionId, recording.id)
+     } catch (err) {
+       setError(err)
+     } finally {
+       await onChanged()
+       setBusy(false)
+     }
+   }
 
   return (
     <div className="rounded-lg border border-border p-4">

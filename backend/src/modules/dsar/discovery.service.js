@@ -36,7 +36,7 @@ function location(locationCode, objectType, objectId, storagePath = null, meta =
  *   re-redacted, and never be handed to a delete.
  */
 export async function runDiscovery(subjectId) {
-  const [subject, consents, photoLinks, enrollments, participations, dsarRequests] = await Promise.all([
+  const [subject, consents, photoLinks, enrollments, participations, dsarRequests, audioSegments] = await Promise.all([
     prisma.subject.findUnique({
       where: { masterUserId: subjectId },
       select: { masterUserId: true, fullName: true, email: true, status: true, createdAt: true },
@@ -74,6 +74,20 @@ export async function runDiscovery(subjectId) {
     prisma.dsarRequest.findMany({
       where: { subjectId },
       select: { id: true, type: true, status: true, createdAt: true },
+    }),
+    prisma.audioSegment.findMany({
+      where: { subjectId },
+      include: {
+        recording: {
+          select: {
+            id: true,
+            sessionId: true,
+            storagePath: true,
+            redactedPath: true,
+            status: true,
+          },
+        },
+      },
     }),
   ])
 
@@ -205,8 +219,42 @@ export async function runDiscovery(subjectId) {
     )
   }
 
-  if (subject) {
+    if (subject) {
     locations.push(location('PII', 'Subject', subject.masterUserId, null, { action: 'ANONYMISE' }))
+  }
+
+  // ---- Audio recordings & segments ------------------------------------------
+  const seenRecordings = new Set()
+  for (const seg of audioSegments) {
+    locations.push(
+      location('AUDIO_SEGMENT', 'AudioSegment', seg.id, null, {
+        recordingId: seg.recordingId,
+        consentId: seg.consentId,
+        startSec: seg.startSec,
+        endSec: seg.endSec,
+        action: seg.action,
+        reason: seg.reason,
+      }),
+    )
+
+    if (seg.recording && !seenRecordings.has(seg.recording.id)) {
+      seenRecordings.add(seg.recording.id)
+      locations.push(
+        location(LOCATIONS.L2_ORIGINAL, 'Recording.storagePath', seg.recording.id, seg.recording.storagePath, {
+          sessionId: seg.recording.sessionId,
+          consentId: seg.consentId,
+        }),
+      )
+      if (seg.recording.redactedPath) {
+        locations.push(
+          location(LOCATIONS.L6_REDACTED, 'Recording.redactedPath', seg.recording.id, seg.recording.redactedPath, {
+            sessionId: seg.recording.sessionId,
+            consentId: seg.consentId,
+            action: 'REREDACT',
+          }),
+        )
+      }
+    }
   }
 
   // ---- L9/L10 packages ------------------------------------------------------
@@ -264,6 +312,8 @@ export async function runDiscovery(subjectId) {
       faceCrops: faces.length,
       enrollments: enrollments.length,
       consents: consents.length,
+      audioSegments: audioSegments.length,
+      recordings: seenRecordings.size,
     },
     multiSubjectPhotos,
     locations,

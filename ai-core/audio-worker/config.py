@@ -22,8 +22,10 @@ class Settings(BaseSettings):
         description="Required to pull the gated pyannote/speaker-diarization-3.1 model",
     )
     WHISPER_MODEL_SIZE: str = Field(default="small")
-    SIMILARITY_THRESHOLD: float = Field(default=0.10)
+    SIMILARITY_THRESHOLD: float = Field(default=0.35)
     MIN_UTTERANCE_DURATION: float = Field(default=1.5)
+    MIN_SPEAKERS: int | None = Field(default=None)
+    MAX_SPEAKERS: int | None = Field(default=None)
 
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore"

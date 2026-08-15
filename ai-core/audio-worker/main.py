@@ -15,6 +15,7 @@ import os
 import shutil
 import tempfile
 import uuid
+from types import SimpleNamespace
 
 from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
 
@@ -41,12 +42,77 @@ def health():
     return {"status": "ok"}
 
 
-def _speaker_at(turns: list[dict], t: float) -> str | None:
-    """Which diarization speaker slot was talking at time t (seconds)."""
+def _speaker_for_segment(turns: list[dict], seg_start: float, seg_end: float) -> str | None:
+    """Which diarization speaker slot was talking during [seg_start, seg_end].
+
+    Uses maximum time overlap to prevent boundary jitter from dropping speakers
+    to UNKNOWN. Falls back to midpoint check or closest turn.
+    """
+    if not turns:
+        return None
+
+    best_speaker = None
+    max_overlap = 0.0
     for turn in turns:
-        if turn["start"] <= t <= turn["end"]:
+        overlap = max(0.0, min(seg_end, turn["end"]) - max(seg_start, turn["start"]))
+        if overlap > max_overlap:
+            max_overlap = overlap
+            best_speaker = turn["speaker_id"]
+
+    if best_speaker is not None and max_overlap > 0:
+        return best_speaker
+
+    # Fall back to midpoint
+    mid = (seg_start + seg_end) / 2
+    for turn in turns:
+        if turn["start"] <= mid <= turn["end"]:
             return turn["speaker_id"]
-    return None
+
+    # Fall back to closest turn
+    closest = min(
+        turns,
+        key=lambda t: min(abs(t["start"] - seg_end), abs(t["end"] - seg_start)),
+    )
+    return closest["speaker_id"]
+
+
+def _map_pii_span_to_time(seg, span: dict) -> tuple[float, float]:
+    """Presidio's span is a character offset local to seg.text; map it to
+    word timestamps when available, else fall back to the whole segment's time
+    range so nothing gets silently dropped for lack of word-level alignment.
+    """
+    words = getattr(seg, "words", None) or []
+    seg_text = getattr(seg, "text", "") or ""
+    if not words or not seg_text:
+        return seg.start, seg.end
+
+    span_start = span["start"]
+    span_end = span["end"]
+
+    # Compute character boundaries for each word within seg_text
+    word_spans = []
+    curr_idx = 0
+    for w in words:
+        w_text = getattr(w, "word", "").strip()
+        if not w_text:
+            continue
+        idx = seg_text.find(w_text, curr_idx)
+        if idx == -1:
+            idx = curr_idx
+        w_start_char = idx
+        w_end_char = idx + len(w_text)
+        curr_idx = w_end_char
+        word_spans.append((w_start_char, w_end_char, w.start, w.end))
+
+    matching = [
+        (ws, we)
+        for w_sc, w_ec, ws, we in word_spans
+        if not (w_ec <= span_start or w_sc >= span_end)
+    ]
+    if matching:
+        return matching[0][0], matching[-1][1]
+
+    return seg.start, seg.end
 
 
 @app.post(f"{settings.API_V1_STR}/analyze", response_model=AnalyzeResponse)
@@ -54,6 +120,8 @@ async def analyze(
     main_audio: UploadFile = File(...),
     voice_snippets: list[UploadFile] = File(default=[]),
     snippet_muids: str = Form(default="[]"),
+    min_speakers: int | None = Form(default=None),
+    max_speakers: int | None = Form(default=None),
 ):
     """Detection only — no consent lookups, no redaction decisions.
 
@@ -94,8 +162,18 @@ async def analyze(
                 # will reflect via an unmatched speaker slot.
                 logger.warning("Could not embed voice snippet for %s: %s", muid, exc)
 
+        effective_min_speakers = min_speakers or settings.MIN_SPEAKERS
+        if effective_min_speakers is None and len(voice_snippets) > 0:
+            effective_min_speakers = max(2, len(voice_snippets))
+
+        effective_max_speakers = max_speakers or settings.MAX_SPEAKERS
+
         try:
-            turns = diarize(audio_path)
+            turns = diarize(
+                audio_path,
+                min_speakers=effective_min_speakers,
+                max_speakers=effective_max_speakers,
+            )
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Diarization failed: {exc}") from exc
 
@@ -133,36 +211,75 @@ async def analyze(
                 SpeakerMatch(speaker_id=speaker_id, matched_muid=muid, score=score)
             )
 
+        # Collect all word timestamps across whisper segments
+        all_words = []
+        for seg in transcript_segments:
+            for w in (getattr(seg, "words", None) or []):
+                all_words.append(w)
+
         segments_out: list[DiarizedSegment] = []
         pii_spans_out: list[PiiSpan] = []
-        for seg in transcript_segments:
-            speaker_id = _speaker_at(turns, (seg.start + seg.end) / 2) or "UNKNOWN"
-            segments_out.append(
-                DiarizedSegment(
-                    start=seg.start, end=seg.end, speaker_id=speaker_id, transcript=seg.text
-                )
-            )
 
-            for span in find_pii_spans(seg.text):
-                # Presidio's span is a character offset local to seg.text;
-                # map it to word timestamps when available, else fall back to
-                # the whole segment's time range so nothing gets silently
-                # dropped for lack of word-level alignment.
-                word_start, word_end = seg.start, seg.end
-                words = getattr(seg, "words", None) or []
-                matching_words = [
+        if turns:
+            for turn in turns:
+                t_start = turn["start"]
+                t_end = turn["end"]
+                speaker_id = turn["speaker_id"]
+                turn_words = [
                     w
-                    for w in words
-                    if getattr(w, "start_char", None) is not None
-                    and not (w.end_char <= span["start"] or w.start_char >= span["end"])
+                    for w in all_words
+                    if not (w.end <= t_start or w.start >= t_end)
                 ]
-                if matching_words:
-                    word_start = matching_words[0].start
-                    word_end = matching_words[-1].end
+                turn_text = " ".join(
+                    getattr(w, "word", "").strip()
+                    for w in turn_words
+                    if getattr(w, "word", "").strip()
+                ).strip()
 
-                pii_spans_out.append(
-                    PiiSpan(start=word_start, end=word_end, type=span["type"], speaker_id=speaker_id)
+                segments_out.append(
+                    DiarizedSegment(
+                        start=t_start,
+                        end=t_end,
+                        speaker_id=speaker_id,
+                        transcript=turn_text,
+                    )
                 )
+
+                if turn_text:
+                    turn_mock = SimpleNamespace(
+                        text=turn_text, words=turn_words, start=t_start, end=t_end
+                    )
+                    for span in find_pii_spans(turn_text):
+                        word_start, word_end = _map_pii_span_to_time(turn_mock, span)
+                        pii_spans_out.append(
+                            PiiSpan(
+                                start=word_start,
+                                end=word_end,
+                                type=span["type"],
+                                speaker_id=speaker_id,
+                            )
+                        )
+        else:
+            for seg in transcript_segments:
+                speaker_id = "UNKNOWN"
+                segments_out.append(
+                    DiarizedSegment(
+                        start=seg.start,
+                        end=seg.end,
+                        speaker_id=speaker_id,
+                        transcript=seg.text,
+                    )
+                )
+                for span in find_pii_spans(seg.text):
+                    word_start, word_end = _map_pii_span_to_time(seg, span)
+                    pii_spans_out.append(
+                        PiiSpan(
+                            start=word_start,
+                            end=word_end,
+                            type=span["type"],
+                            speaker_id=speaker_id,
+                        )
+                    )
 
         return AnalyzeResponse(
             segments=segments_out,
@@ -195,7 +312,7 @@ async def redact(
     with tempfile.TemporaryDirectory() as tmp:
         audio_ext = os.path.splitext(main_audio.filename or "")[1] or ".wav"
         input_path = os.path.join(tmp, f"input{audio_ext}")
-        output_path = os.path.join(tmp, f"output{audio_ext}")
+        output_path = os.path.join(tmp, "output.wav")
         with open(input_path, "wb") as f:
             shutil.copyfileobj(main_audio.file, f)
 

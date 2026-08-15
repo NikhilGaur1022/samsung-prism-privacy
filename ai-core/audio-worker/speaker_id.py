@@ -27,10 +27,19 @@ def extract_voice_vector(
     if sr != 16000:
         waveform = torchaudio.transforms.Resample(sr, 16000)(waveform)
 
+    # Downmix multi-channel audio to mono (1, samples)
+    if waveform.shape[0] > 1:
+        waveform = torch.mean(waveform, dim=0, keepdim=True)
+
     if start_sec is not None and end_sec is not None:
-        start_sample = int(start_sec * 16000)
-        end_sample = int(end_sec * 16000)
+        start_sample = max(0, int(start_sec * 16000))
+        end_sample = min(waveform.shape[1], int(end_sec * 16000))
+        if start_sample >= end_sample:
+            return [0.0] * 192
         waveform = waveform[:, start_sample:end_sample]
+
+    if waveform.shape[1] < int(16000 * 0.1):  # Less than 100ms
+        return [0.0] * 192
 
     with torch.no_grad():
         embedding = get_speaker_embedding_model().encode_batch(waveform)
@@ -39,6 +48,8 @@ def extract_voice_vector(
 
 
 def cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
+    if not vec_a or not vec_b:
+        return 0.0
     a = np.array(vec_a)
     b = np.array(vec_b)
     denom = np.linalg.norm(a) * np.linalg.norm(b)
@@ -59,6 +70,9 @@ def match_speaker(
     clears `threshold`. The caller must treat an unmatched speaker as an
     unconsented bystander, not as "probably the closest one."
     """
+    if not current_embedding or all(v == 0.0 for v in current_embedding):
+        return None, 0.0
+
     best_muid: str | None = None
     best_score = 0.0
     for muid, target_vector in registered_vectors.items():

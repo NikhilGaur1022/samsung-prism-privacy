@@ -131,7 +131,9 @@ export async function analyzeRecording(sessionId, recordingId, voiceSnippets, ad
   const segmentRows = []
   for (const match of result.speaker_matches) {
     let action = 'REDACT_VOICE'
+    let reason = 'UNIDENTIFIED_SPEAKER'
     let subjectId = null
+    let consentId = null
 
     if (match.matched_muid) {
       const [subject, consent] = await Promise.all([
@@ -144,7 +146,13 @@ export async function analyzeRecording(sessionId, recordingId, voiceSnippets, ad
       ])
       if (subject && isEligible(consentVerdict(subject, consent))) {
         action = 'KEEP'
+        reason = 'CONSENTED_SPEAKER'
         subjectId = match.matched_muid
+        consentId = consent?.consentId ?? null
+      } else if (subject) {
+        reason = 'CONSENT_INELIGIBLE'
+        subjectId = match.matched_muid
+        consentId = consent?.consentId ?? null
       }
     }
 
@@ -152,9 +160,11 @@ export async function analyzeRecording(sessionId, recordingId, voiceSnippets, ad
       recordingId,
       speakerId: match.speaker_id,
       subjectId,
+      consentId,
       startSec: 0, // filled in per-turn below; speaker_matches has no timing itself
       endSec: 0,
       action,
+      reason,
       matchScore: match.score,
     })
   }
@@ -170,9 +180,12 @@ export async function analyzeRecording(sessionId, recordingId, voiceSnippets, ad
       recordingId,
       speakerId: seg.speaker_id,
       subjectId: base?.subjectId ?? null,
+      consentId: base?.consentId ?? null,
       startSec: seg.start,
       endSec: seg.end,
       action: base?.action ?? 'REDACT_VOICE',
+      reason: base?.reason ?? 'UNIDENTIFIED_SPEAKER',
+      piiType: null,
       matchScore: base?.matchScore ?? 0,
     }
   })
@@ -180,15 +193,21 @@ export async function analyzeRecording(sessionId, recordingId, voiceSnippets, ad
   // PII spans are muted unconditionally, regardless of whose voice it is —
   // matches the image pipeline, where PII text masking is not gated by
   // biometric consent either (docs/01_PRIVACY_DATAFLOW.md Phase D).
-  const piiRows = result.pii_spans.map((span) => ({
-    recordingId,
-    speakerId: span.speaker_id,
-    subjectId: null,
-    startSec: span.start,
-    endSec: span.end,
-    action: 'REDACT_PII',
-    matchScore: null,
-  }))
+  const piiRows = result.pii_spans.map((span) => {
+    const base = actionBySpeaker.get(span.speaker_id)
+    return {
+      recordingId,
+      speakerId: span.speaker_id,
+      subjectId: base?.subjectId ?? null,
+      consentId: base?.consentId ?? null,
+      startSec: span.start,
+      endSec: span.end,
+      action: 'REDACT_PII',
+      reason: `PII_${span.type || 'DETECTED'}_FOUND`,
+      piiType: span.type || null,
+      matchScore: null,
+    }
+  })
 
   await prisma.$transaction([
     prisma.audioSegment.deleteMany({ where: { recordingId } }),
@@ -201,7 +220,18 @@ export async function analyzeRecording(sessionId, recordingId, voiceSnippets, ad
     entityId: recordingId,
     action: 'RECORDING_ANALYZED',
     actorId: admin.id,
-    payload: { segments: expandedRows.length, piiSpans: piiRows.length },
+    payload: {
+      segments: expandedRows.length,
+      piiSpans: piiRows.length,
+      speakerManifest: segmentRows.map((s) => ({
+        speakerId: s.speakerId,
+        subjectId: s.subjectId,
+        consentId: s.consentId,
+        action: s.action,
+        reason: s.reason,
+        matchScore: s.matchScore,
+      })),
+    },
   })
 
   return prisma.audioSegment.findMany({ where: { recordingId } })
@@ -255,7 +285,21 @@ export async function redactRecording(sessionId, recordingId, admin) {
     entityId: recordingId,
     action: 'RECORDING_REDACTED',
     actorId: admin.id,
-    payload: { intervalsMuted: intervals.length },
+    payload: {
+      recordingId,
+      sessionId,
+      intervalsMuted: intervals.length,
+      redactionManifest: segments.map((s) => ({
+        speakerId: s.speakerId,
+        subjectId: s.subjectId,
+        consentId: s.consentId,
+        startSec: s.startSec,
+        endSec: s.endSec,
+        action: s.action,
+        reason: s.reason || (s.action === 'REDACT_VOICE' ? 'UNIDENTIFIED_SPEAKER' : `PII_${s.piiType || 'DETECTED'}_FOUND`),
+        piiType: s.piiType,
+      })),
+    },
   })
 
   return updated

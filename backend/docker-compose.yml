@@ -43,6 +43,9 @@ services:
       - ../ai-core/audio-worker/.env
     ports:
       - "8003:8003"
+    volumes:
+      - ../ai-core/audio-worker:/app
+      - /app/.venv
     restart: unless-stopped
 
 volumes:
