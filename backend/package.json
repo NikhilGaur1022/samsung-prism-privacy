@@ -22,7 +22,6 @@
     "fixtures:e2e": "node scripts/make-e2e-fixtures.js"
   },
   "dependencies": {
-    "@prisma/client": "^6.3.1",
     "@qdrant/js-client-rest": "^1.13.0",
     "bcrypt": "^5.1.1",
     "bullmq": "^5.80.2",
@@ -43,7 +42,8 @@
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@prisma/client": "^5.22.0",
     "pino-pretty": "^13.0.0",
-    "prisma": "^6.3.1"
+    "prisma": "^5.22.0"
   }
 }

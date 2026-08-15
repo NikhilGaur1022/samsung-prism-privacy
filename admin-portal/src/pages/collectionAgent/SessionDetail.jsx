@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { QRCodeSVG } from 'qrcode.react'
+import RecordingsPanel from '../../components/RecordingsPanel'
 import {
   Camera,
   CircleSlash,
@@ -501,6 +502,11 @@ export default function SessionDetail() {
                 </ul>
               </div>
             )}
+            <RecordingsPanel
+              sessionId={sessionId}
+              participants={session.participants}
+              capturing={capturing}
+            />
           </section>
 
           <section className="rounded-card bg-surface p-6 shadow-card">
