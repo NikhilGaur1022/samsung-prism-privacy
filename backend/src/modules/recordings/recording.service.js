@@ -322,6 +322,71 @@ export async function getRecording(sessionId, recordingId) {
   return { recording, segments }
 }
 
+export async function readRawRecording(sessionId, recordingId, admin) {
+  const recording = await prisma.recording.findFirst({
+    where: { id: recordingId, sessionId },
+    include: { session: true },
+  })
+  if (!recording) throw Object.assign(new Error('Recording not found'), { statusCode: 404 })
+  if (admin.role === 'collectionAgent' && recording.session.agentId !== admin.id) {
+    throw Object.assign(new Error('Forbidden'), { statusCode: 403 })
+  }
+  const buffer = await readFile(recording.storagePath)
+  return { buffer, mimeType: recording.mimeType || 'audio/wav' }
+}
+
+export async function saveSegments(sessionId, recordingId, segmentList, admin) {
+  const recording = await prisma.recording.findFirst({
+    where: { id: recordingId, sessionId },
+    include: { session: true },
+  })
+  if (!recording) throw Object.assign(new Error('Recording not found'), { statusCode: 404 })
+  if (admin.role === 'collectionAgent' && recording.session.agentId !== admin.id) {
+    throw Object.assign(new Error('Forbidden'), { statusCode: 403 })
+  }
+
+  const formatted = segmentList.map((s) => {
+    const start = parseFloat(s.startSec)
+    const end = parseFloat(s.endSec)
+    if (isNaN(start) || isNaN(end) || start < 0 || end <= start) {
+      throw Object.assign(new Error(`Invalid interval: [${s.startSec}, ${s.endSec}]`), { statusCode: 400 })
+    }
+    const action = ['KEEP', 'REDACT_VOICE', 'REDACT_PII'].includes(s.action) ? s.action : 'REDACT_PII'
+    return {
+      recordingId,
+      speakerId: s.speakerId || 'MANUAL',
+      subjectId: s.subjectId || null,
+      consentId: s.consentId || null,
+      startSec: start,
+      endSec: end,
+      action,
+      reason: s.reason || (action === 'KEEP' ? 'CONSENTED_SPEAKER' : action === 'REDACT_VOICE' ? 'UNIDENTIFIED_SPEAKER' : 'AGENT_MANUAL_REDACTION'),
+      piiType: s.piiType || null,
+      matchScore: typeof s.matchScore === 'number' ? s.matchScore : null,
+    }
+  })
+
+  await prisma.$transaction([
+    prisma.audioSegment.deleteMany({ where: { recordingId } }),
+    prisma.audioSegment.createMany({ data: formatted }),
+    prisma.recording.update({ where: { id: recordingId }, data: { status: 'ANALYZED' } }),
+  ])
+
+  await writeAuditLog({
+    entityType: 'Recording',
+    entityId: recordingId,
+    action: 'AUDIO_SEGMENTS_MANUALLY_UPDATED',
+    actorId: admin.id,
+    payload: {
+      recordingId,
+      sessionId,
+      segmentCount: formatted.length,
+    },
+  })
+
+  return prisma.audioSegment.findMany({ where: { recordingId }, orderBy: { startSec: 'asc' } })
+}
+
 export async function readRedactedRecording(sessionId, recordingId) {
   const recording = await prisma.recording.findFirst({ where: { id: recordingId, sessionId } })
   if (!recording) throw Object.assign(new Error('Recording not found'), { statusCode: 404 })

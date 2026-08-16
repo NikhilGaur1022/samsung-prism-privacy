@@ -125,6 +125,87 @@ recordingRoutes.get('/:sessionId/recordings/:recordingId', async (req, res, next
   }
 })
 
+const segmentItemSchema = z.object({
+  id: z.string().uuid().optional(),
+  speakerId: z.string().default('MANUAL'),
+  subjectId: z.string().uuid().nullable().optional(),
+  consentId: z.string().uuid().nullable().optional(),
+  startSec: z.number().nonnegative(),
+  endSec: z.number().positive(),
+  action: z.enum(['KEEP', 'REDACT_VOICE', 'REDACT_PII']),
+  reason: z.string().nullable().optional(),
+  piiType: z.string().nullable().optional(),
+  matchScore: z.number().nullable().optional(),
+})
+
+const updateSegmentsSchema = z.object({
+  segments: z.array(segmentItemSchema),
+})
+
+recordingRoutes.put('/:sessionId/recordings/:recordingId/segments', async (req, res, next) => {
+  try {
+    const sessionId = uuid.parse(req.params.sessionId)
+    const recordingId = uuid.parse(req.params.recordingId)
+    const body = updateSegmentsSchema.parse(req.body)
+    const segments = await recordingService.saveSegments(sessionId, recordingId, body.segments, req.admin)
+    res.json({ segments })
+  } catch (err) {
+    next(err)
+  }
+})
+
+function sendAudioWithRange(req, res, buffer, mimeType = 'audio/wav') {
+  const totalSize = buffer.length
+  res.set('Accept-Ranges', 'bytes')
+  res.set('Cache-Control', 'private, no-store')
+
+  const range = req.headers.range
+  if (!range) {
+    res.set('Content-Length', totalSize)
+    res.type(mimeType).status(200).send(buffer)
+    return
+  }
+
+  // Parse Range header e.g. "bytes=1000-2000" or "bytes=1000-"
+  const parts = range.replace(/bytes=/, '').split('-')
+  const start = parseInt(parts[0], 10)
+  const end = parts[1] ? parseInt(parts[1], 10) : totalSize - 1
+
+  if (isNaN(start) || start >= totalSize || (parts[1] && end < start)) {
+    res.set('Content-Range', `bytes */${totalSize}`)
+    res.status(416).send('Requested Range Not Satisfiable')
+    return
+  }
+
+  const chunkEnd = Math.min(end, totalSize - 1)
+  const chunkSize = chunkEnd - start + 1
+  const chunk = buffer.subarray(start, chunkEnd + 1)
+
+  res.status(206)
+  res.set({
+    'Content-Range': `bytes ${start}-${chunkEnd}/${totalSize}`,
+    'Content-Length': chunkSize,
+    'Content-Type': mimeType,
+  })
+  res.send(chunk)
+}
+
+// Serves unredacted audio for collection agents before archive
+recordingRoutes.get(
+  '/:sessionId/recordings/:recordingId/raw',
+  logAccess('RECORDING', (req) => req.params.recordingId, { purpose: 'COLLECTION' }),
+  async (req, res, next) => {
+    try {
+      const sessionId = uuid.parse(req.params.sessionId)
+      const recordingId = uuid.parse(req.params.recordingId)
+      const { buffer, mimeType } = await recordingService.readRawRecording(sessionId, recordingId, req.admin)
+      sendAudioWithRange(req, res, buffer, mimeType)
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
 // This one DOES serve audio bytes, so it gets the same logAccess treatment as
 // GET .../photos/:photoId/redacted — an AccessEvent is written before the
 // blob is ever decrypted (invariant 6), and the response is never cached.
@@ -136,8 +217,7 @@ recordingRoutes.get(
       const sessionId = uuid.parse(req.params.sessionId)
       const recordingId = uuid.parse(req.params.recordingId)
       const { buffer, mimeType } = await recordingService.readRedactedRecording(sessionId, recordingId)
-      res.set('Cache-Control', 'private, no-store')
-      res.type(mimeType).send(buffer)
+      sendAudioWithRange(req, res, buffer, mimeType)
     } catch (err) {
       next(err)
     }

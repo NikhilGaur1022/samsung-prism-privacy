@@ -245,6 +245,7 @@ model Session {
   code         String               @unique
   projectId    String               @db.Uuid
   agentId      String               @db.Uuid
+  type         SessionType          @default(IMAGE) @map("type")
   status       SessionStatus        @default(ACTIVE)
   location     String?
   createdAt    DateTime             @default(now())
@@ -980,4 +981,9 @@ enum AudioSegmentAction {
   KEEP
   REDACT_VOICE
   REDACT_PII
+}
+
+enum SessionType {
+  IMAGE
+  AUDIO
 }

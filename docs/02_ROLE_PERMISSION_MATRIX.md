@@ -55,9 +55,11 @@ Approval is a hard gate: `Session` creation must reject any project whose `statu
 | `GET /sessions/:id/faces` (crops) | ✗ | ✗ | ✗ | ✓ TAGGING only | ✗ | ⚑ |
 | `POST /sessions/:id/recordings` | ✗ | ✗ | ✗ | ✓ own ACTIVE | ✗ | ✗ |
 | `POST /sessions/:id/recordings/:recordingId/analyze` | ✗ | ✗ | ✗ | ✓ own | ✗ | ✗ |
+| `PUT /sessions/:id/recordings/:recordingId/segments` | ✗ | ✗ | ✗ | ✓ own | ✗ | ✗ |
 | `POST /sessions/:id/recordings/:recordingId/redact` | ✗ | ✗ | ✗ | ✓ own | ✗ | ✗ |
 | `GET /sessions/:id/recordings` | ✗ | ✗ | ✓ own project | ✓ own | ✓ | ✓ |
 | `GET /sessions/:id/recordings/:recordingId` | ✗ | ✗ | ✓ own project | ✓ own | ✓ | ✓ |
+| `GET /sessions/:id/recordings/:recordingId/raw` | ✓ own | ✗ | ✗ | ✓ own, pre-ARCHIVE | ⚑ | ⚑ |
 | `GET /sessions/:id/recordings/:recordingId/redacted` | ✓ own | ✗ | ✓ own project | ✓ own | ✓ | ✓ |
 | `POST /sessions/:id/finalize` | ✗ | ✗ | ✗ | ✓ own | ✗ | ✓ |
 

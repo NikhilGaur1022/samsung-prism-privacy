@@ -604,18 +604,22 @@ export function getRecording(sessionId, recordingId) {
   return request(`/api/v1/sessions/${sessionId}/recordings/${recordingId}`)
 }
 
-// Add this to the existing `mediaUrl` export object, alongside photo/faceCrop/
-// redacted/personRedacted:
-//   redactedRecording: (sessionId, recordingId) =>
-//     `${BASE_URL}/api/v1/sessions/${sessionId}/recordings/${recordingId}/redacted`,
+export function updateRecordingSegments(sessionId, recordingId, segments) {
+  return request(`/api/v1/sessions/${sessionId}/recordings/${recordingId}/segments`, {
+    method: 'PUT',
+    body: JSON.stringify({ segments }),
+  })
+}
 
- export const mediaUrl = {
-   photo: (sessionId, photoId) => `${BASE_URL}/api/v1/sessions/${sessionId}/photos/${photoId}/file`,
-   faceCrop: (sessionId, faceId) => `${BASE_URL}/api/v1/sessions/${sessionId}/faces/${faceId}/crop`,
-   redacted: (sessionId, photoId) =>
-     `${BASE_URL}/api/v1/sessions/${sessionId}/photos/${photoId}/redacted`,
-   personRedacted: (sessionId, subjectId, photoId) =>
-     `${BASE_URL}/api/v1/sessions/${sessionId}/people/${subjectId}/photos/${photoId}/redacted`,
-   redactedRecording: (sessionId, recordingId) =>
-     `${BASE_URL}/api/v1/sessions/${sessionId}/recordings/${recordingId}/redacted`,
- }
+export const mediaUrl = {
+  photo: (sessionId, photoId) => `${BASE_URL}/api/v1/sessions/${sessionId}/photos/${photoId}/file`,
+  faceCrop: (sessionId, faceId) => `${BASE_URL}/api/v1/sessions/${sessionId}/faces/${faceId}/crop`,
+  redacted: (sessionId, photoId) =>
+    `${BASE_URL}/api/v1/sessions/${sessionId}/photos/${photoId}/redacted`,
+  personRedacted: (sessionId, subjectId, photoId) =>
+    `${BASE_URL}/api/v1/sessions/${sessionId}/people/${subjectId}/photos/${photoId}/redacted`,
+  rawRecording: (sessionId, recordingId) =>
+    `${BASE_URL}/api/v1/sessions/${sessionId}/recordings/${recordingId}/raw`,
+  redactedRecording: (sessionId, recordingId) =>
+    `${BASE_URL}/api/v1/sessions/${sessionId}/recordings/${recordingId}/redacted`,
+}

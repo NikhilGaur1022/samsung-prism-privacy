@@ -37,10 +37,12 @@ const uuid = z.string().uuid()
 const createSessionSchema = z.object({
   projectId: uuid,
   location: z.string().trim().max(200).optional(),
+  type: z.enum(['IMAGE', 'AUDIO']).default('IMAGE'),
 })
 
 const listQuerySchema = z.object({
   status: z.enum(['ACTIVE', 'PROCESSING', 'TAGGING', 'ARCHIVED', 'FAILED']).optional(),
+  type: z.enum(['IMAGE', 'AUDIO']).optional(),
 })
 
 const photoMetaSchema = z.object({
