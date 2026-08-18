@@ -23,6 +23,18 @@ export const LOCATIONS = {
   L9_EXPORT: 'L9',
   L10_DSAR_PACKAGE: 'L10',
   L11_BACKUP: 'L11',
+  L12_IMPORT_ORIGINAL: 'L12',
+  L13_IMPORT_REDACTED: 'L13',
+  L14_RECORDING: 'L14',
+  L15_RECORDING_REDACTED: 'L15',
+  // The voice counterpart of L4/L5. Given their own codes rather than folded
+  // into L4/L5 because the purge handlers dispatch on the location code and then
+  // delete by id from ONE table — an L5 row carrying a voice enrollment's id
+  // would hit subjectFaceEnrollment.deleteMany, match nothing, and report
+  // SKIPPED while the voice print survived. A certificate that names the wrong
+  // table is worse than one that names an extra code.
+  L16_VOICE_ENROLLMENT: 'L16',
+  L17_VOICE_EMBEDDING: 'L17',
 }
 
 function location(locationCode, objectType, objectId, storagePath = null, meta = {}) {
@@ -38,7 +50,15 @@ function location(locationCode, objectType, objectId, storagePath = null, meta =
  *   re-redacted, and never be handed to a delete.
  */
 export async function runDiscovery(subjectId) {
-  const [subject, consents, photoLinks, enrollments, participations, dsarRequests] = await Promise.all([
+  const [
+    subject,
+    consents,
+    photoLinks,
+    enrollments,
+    voiceEnrollments,
+    participations,
+    dsarRequests,
+  ] = await Promise.all([
     prisma.subject.findUnique({
       where: { masterUserId: subjectId },
       select: { masterUserId: true, fullName: true, email: true, status: true, createdAt: true },
@@ -69,6 +89,10 @@ export async function runDiscovery(subjectId) {
       where: { subjectId },
       select: { id: true, imagePath: true, sha256: true, embedding: true, encKeyId: true, deletedAt: true },
     }),
+    prisma.subjectVoiceEnrollment.findMany({
+      where: { subjectId },
+      select: { id: true, audioPath: true, sha256: true, embedding: true, encKeyId: true, deletedAt: true },
+    }),
     prisma.sessionParticipant.findMany({
       where: { subjectId },
       select: { id: true, sessionId: true, consentId: true },
@@ -78,6 +102,22 @@ export async function runDiscovery(subjectId) {
       select: { id: true, type: true, status: true, createdAt: true },
     }),
   ])
+
+  // Every recording this subject is audible in, with the whole segment set so
+  // the sole-speaker test is made against the recording and not against this
+  // subject's slice of it.
+  const recordings = await prisma.recording.findMany({
+    where: { segments: { some: { subjectId } } },
+    select: {
+      id: true,
+      sessionId: true,
+      storagePath: true,
+      redactedPath: true,
+      status: true,
+      sha256: true,
+      segments: { select: { id: true, subjectId: true, startSec: true, endSec: true, action: true } },
+    },
+  })
 
   const faces = await prisma.faceDetection.findMany({
     where: {
@@ -94,6 +134,7 @@ export async function runDiscovery(subjectId) {
 
   const locations = []
   const multiSubjectPhotos = []
+  const multiSpeakerRecordings = []
 
   // ---- L2 originals, L6 redacted, L7 per-person cache -----------------------
   for (const link of photoLinks) {
@@ -148,6 +189,64 @@ export async function runDiscovery(subjectId) {
     )
   }
 
+  // ---- L14 recordings, L15 muted derivatives, SEGMENT attributions ----------
+  // Shaped exactly like the photo block above, and for the same reason: a
+  // recording holding A and B, where A erases, must survive for B with A's spans
+  // muted. The difference is that audio CAN be selectively rewritten, so unlike
+  // an L2 original a multi-speaker L14 is re-redacted rather than destroyed.
+  for (const recording of recordings) {
+    const mine = recording.segments.filter((s) => s.subjectId === subjectId)
+    const otherSpeakers = [
+      ...new Set(
+        recording.segments.map((s) => s.subjectId).filter((id) => id && id !== subjectId),
+      ),
+    ]
+    const soleSpeaker = otherSpeakers.length === 0
+
+    if (!soleSpeaker) {
+      multiSpeakerRecordings.push({ recordingId: recording.id, otherSpeakers })
+    }
+
+    // The attribution rows are the erasure key, exactly as PhotoSubject is. They
+    // always go: after this, nothing in the system says this voice was theirs.
+    locations.push(
+      location('SEGMENT', 'AudioSegment', recording.id, null, {
+        recordingId: recording.id,
+        segmentIds: mine.map((s) => s.id),
+        segments: mine.length,
+        note: 'voice attributions — deleted per subject, never per recording',
+      }),
+    )
+
+    locations.push(
+      location(LOCATIONS.L14_RECORDING, 'Recording.storagePath', recording.id, recording.storagePath, {
+        sha256: recording.sha256 || null,
+        sessionId: recording.sessionId,
+        soleSpeaker,
+        // Unlike an L2 photo original, audio is selectively rewritable: the
+        // subject's spans can be muted out of the file while the remaining
+        // speakers keep theirs. Destroying a shared recording outright would
+        // erase consenting speakers' data along with this subject's.
+        action: soleSpeaker ? 'DELETE' : 'MUTE_SPEAKER',
+        mutedSeconds: Number(
+          mine.reduce((n, s) => n + Math.max(0, s.endSec - s.startSec), 0).toFixed(2),
+        ),
+      }),
+    )
+
+    if (recording.redactedPath) {
+      locations.push(
+        location(
+          LOCATIONS.L15_RECORDING_REDACTED,
+          'Recording.redactedPath',
+          recording.id,
+          recording.redactedPath,
+          { soleSpeaker, action: soleSpeaker ? 'DELETE' : 'REBUILD' },
+        ),
+      )
+    }
+  }
+
   // ---- L3 face crops --------------------------------------------------------
   for (const face of faces) {
     locations.push(
@@ -169,6 +268,35 @@ export async function runDiscovery(subjectId) {
     if (enrollment.embedding) {
       locations.push(
         location(LOCATIONS.L5_EMBEDDING, 'SubjectFaceEnrollment.embedding', enrollment.id, null, {
+          encKeyId: enrollment.encKeyId,
+          note: 'row deleted and per-subject DEK destroyed',
+        }),
+      )
+    }
+  }
+
+  // ---- L16 voice clips + L17 voice embeddings -------------------------------
+  // Same structure as L4/L5 above, because a voice print is §2 sensitive
+  // personal data on the same footing as a face embedding. Both are sealed under
+  // the per-subject DEK, so the SubjectKey location below crypto-shreds them
+  // together as a backstop — but the row and the file are still destroyed
+  // explicitly, because a certificate must name what it destroyed.
+  for (const enrollment of voiceEnrollments) {
+    locations.push(
+      location(
+        LOCATIONS.L16_VOICE_ENROLLMENT,
+        'SubjectVoiceEnrollment.audioPath',
+        enrollment.id,
+        enrollment.audioPath,
+        {
+          sha256: enrollment.sha256,
+          alreadySoftDeleted: Boolean(enrollment.deletedAt),
+        },
+      ),
+    )
+    if (enrollment.embedding) {
+      locations.push(
+        location(LOCATIONS.L17_VOICE_EMBEDDING, 'SubjectVoiceEnrollment.embedding', enrollment.id, null, {
           encKeyId: enrollment.encKeyId,
           note: 'row deleted and per-subject DEK destroyed',
         }),
@@ -289,9 +417,13 @@ export async function runDiscovery(subjectId) {
       multiSubjectPhotos: multiSubjectPhotos.length,
       faceCrops: faces.length,
       enrollments: enrollments.length,
+      voiceEnrollments: voiceEnrollments.length,
       consents: consents.length,
+      recordings: recordings.length,
+      multiSpeakerRecordings: multiSpeakerRecordings.length,
     },
     multiSubjectPhotos,
+    multiSpeakerRecordings,
     locations,
   }
 }

@@ -76,8 +76,13 @@ export function BiometricExplainer() {
             shared, and are used for nothing except matching you to your own pictures.
           </p>
           <p>
+            This is the same permission that lets you record a voice sample, so that you can be
+            recognised — and not silenced — in session recordings. Nothing of your voice is
+            recorded unless you record it yourself.
+          </p>
+          <p>
             You can delete them at any time. Withdrawing consent to a project, or turning this off
-            here, erases them immediately.
+            here, erases your photos and any voice recording immediately.
           </p>
         </div>
       </div>
@@ -85,7 +90,10 @@ export function BiometricExplainer() {
   )
 }
 
-export function ConsentGate({ enrollment }) {
+// onAccepted is optional and fires after the flag has actually moved — the
+// Consent Hub uses it to re-read the voice card, which is driven by the same
+// stored consent and would otherwise still be offering to collect it.
+export function ConsentGate({ enrollment, onAccepted }) {
   const [checked, setChecked] = useState(false)
 
   return (
@@ -111,7 +119,10 @@ export function ConsentGate({ enrollment }) {
       <button
         type="button"
         disabled={!checked || enrollment.busy}
-        onClick={() => enrollment.consent(true)}
+        onClick={async () => {
+          await enrollment.consent(true)
+          onAccepted?.()
+        }}
         className="w-full rounded-card bg-brand py-3.5 text-base font-bold text-white shadow-card disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-dark"
       >
         {enrollment.busy ? 'Saving…' : 'Agree & take photos'}

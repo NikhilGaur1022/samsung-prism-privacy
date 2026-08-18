@@ -49,3 +49,8 @@ ENV/
 
 # Redis dev snapshot — a local artifact, never a source file
 dump.rdb
+
+# Deploy secrets and built portal output — never committed.
+deploy/prod.env
+deploy/.env
+deploy/www/

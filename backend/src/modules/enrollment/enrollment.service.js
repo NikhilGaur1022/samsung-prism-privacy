@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import sharp from 'sharp'
 import { prisma } from '../../config/prisma.js'
 import { ApiError } from '../../middleware/errorHandler.js'
+import { deleteAllVoiceEnrollments } from './voiceEnrollment.service.js'
 import { writeAuditLog } from '../../lib/auditLog.js'
 import { writeFile, readFile, deleteFile } from '../../lib/storage.js'
 import { encryptEmbeddingForSubject } from '../../lib/embeddingCrypto.js'
@@ -190,6 +191,12 @@ export async function setBiometricConsent(subjectId, accepted) {
   // an all-consent revoke.
   if (!accepted) {
     await deleteAllEnrollments(subjectId, subjectId, 'BIOMETRIC_CONSENT_WITHDRAWN')
+    // Voice prints rest on this same flag — `createVoiceEnrollment` refuses to
+    // capture one without it — so withdrawing it has to take them too. Leaving
+    // them would keep a biometric alive on a consent that no longer exists, and
+    // the subject would still be identified by voice in every later session
+    // while the UI told them biometric matching was off.
+    await deleteAllVoiceEnrollments(subjectId, subjectId, 'BIOMETRIC_CONSENT_WITHDRAWN')
   }
 
   return { biometricConsent: updated.biometricMatch }

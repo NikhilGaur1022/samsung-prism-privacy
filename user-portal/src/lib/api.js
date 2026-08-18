@@ -116,6 +116,49 @@ export function deleteEnrollment(id) {
 
 export const enrollmentImageUrl = (id) => `${BASE_URL}/api/v1/me/enrollments/${id}/image`
 
+// --- Voice enrollment --------------------------------------------------------
+// The same shape as above and the same consent gate — a voice print is biometric
+// data on exactly the same footing as a face embedding. All of these 503 when
+// AUDIO_CAPTURE_ENABLED is off, which the UI reads as "not offered here" rather
+// than as a failure.
+
+export function getVoiceEnrollmentStatus() {
+  return request('/api/v1/me/voice-enrollments/status')
+}
+
+export async function addVoiceEnrollment(blob) {
+  const form = new FormData()
+  form.append('audio', blob, blob.name ?? 'voice.wav')
+
+  const res = await fetch(`${BASE_URL}/api/v1/me/voice-enrollments`, {
+    method: 'POST',
+    credentials: 'include',
+    body: form,
+  })
+
+  const body = await res.json().catch(() => null)
+  if (!res.ok) {
+    const error = new Error(body?.error ?? `Voice enrollment failed with status ${res.status}`)
+    error.status = res.status
+    throw error
+  }
+  return body
+}
+
+export function listVoiceEnrollments() {
+  return request('/api/v1/me/voice-enrollments')
+}
+
+export function deleteVoiceEnrollment(id) {
+  return request(`/api/v1/me/voice-enrollments/${id}`, { method: 'DELETE' })
+}
+
+// Playback of your own clip — the one voice playback route in the system, and
+// the reason it exists is §11 access, not review. no-store on the response, so
+// this URL is safe to hand straight to an <audio> element.
+export const voiceEnrollmentAudioUrl = (id) =>
+  `${BASE_URL}/api/v1/me/voice-enrollments/${id}/audio`
+
 // --- QR session join ---------------------------------------------------------
 // The lookup is public — a phone that has scanned the code but has not signed in
 // yet still needs to see what it is being asked to agree to. Accepting is not.

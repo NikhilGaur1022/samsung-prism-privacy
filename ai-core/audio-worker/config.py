@@ -22,7 +22,11 @@ class Settings(BaseSettings):
         description="Required to pull the gated pyannote/speaker-diarization-3.1 model",
     )
     WHISPER_MODEL_SIZE: str = Field(default="small")
-    SIMILARITY_THRESHOLD: float = Field(default=0.10)
+    # SIMILARITY_THRESHOLD used to live here. It is gone rather than left unused:
+    # identity matching moved to the backend (VOICE_MATCH_THRESHOLD in
+    # backend/.env.example), and a knob that still reads from the environment but
+    # no longer changes who gets identified is worse than no knob — someone tunes
+    # it, sees no effect, and concludes the matching is broken.
     MIN_UTTERANCE_DURATION: float = Field(default=1.5)
 
     model_config = SettingsConfigDict(

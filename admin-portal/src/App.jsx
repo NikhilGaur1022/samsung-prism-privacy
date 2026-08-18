@@ -1,6 +1,6 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { AuthProvider, RequireRole } from './auth'
-import { ROLES } from './roles'
+import { PAGES } from './roles'
 import ErrorBoundary from './components/ErrorBoundary'
 import Login from './pages/Login'
 import AcceptInvite from './pages/AcceptInvite'
@@ -10,7 +10,6 @@ import Dashboard from './pages/Dashboard'
 import Placeholder from './pages/Placeholder'
 import ProjectApprovals from './pages/dpo/ProjectApprovals'
 import ConsentTemplates from './pages/dpo/ConsentTemplates'
-import RequestOversight from './pages/dpo/RequestOversight'
 import SlaMonitoring from './pages/dpo/SlaMonitoring'
 import ComplianceReports from './pages/dpo/ComplianceReports'
 import DsarQueue from './pages/dataAdmin/DsarQueue'
@@ -42,7 +41,6 @@ import SessionPhotos from './pages/SessionPhotos'
 const PAGE_COMPONENTS = {
   '/project-approvals': ProjectApprovals,
   '/consent-templates': ConsentTemplates,
-  '/request-oversight': RequestOversight,
   '/sla-monitoring': SlaMonitoring,
   '/compliance-reports': ComplianceReports,
   '/dsar-queue': DsarQueue,
@@ -85,7 +83,7 @@ export default function App() {
           <Route
             path="/sessions/:sessionId/photos"
             element={
-              <RequireRole allow={['dataOwner', 'dataAdmin']}>
+              <RequireRole allow={['dataOwner', 'dataAdmin', 'super_admin']}>
                 <SessionPhotos />
               </RequireRole>
             }
@@ -93,7 +91,7 @@ export default function App() {
           <Route
             path="/sessions/:sessionId"
             element={
-              <RequireRole allow={['collectionAgent']}>
+              <RequireRole allow={['collectionAgent', 'super_admin']}>
                 <SessionDetail />
               </RequireRole>
             }
@@ -101,7 +99,7 @@ export default function App() {
           <Route
             path="/sessions/:sessionId/tagging"
             element={
-              <RequireRole allow={['collectionAgent']}>
+              <RequireRole allow={['collectionAgent', 'super_admin']}>
                 <Tagging />
               </RequireRole>
             }
@@ -109,7 +107,7 @@ export default function App() {
           <Route
             path="/sessions/:sessionId/people"
             element={
-              <RequireRole allow={['collectionAgent']}>
+              <RequireRole allow={['collectionAgent', 'super_admin']}>
                 <People />
               </RequireRole>
             }
@@ -117,7 +115,7 @@ export default function App() {
           <Route
             path="/sessions/:sessionId/review"
             element={
-              <RequireRole allow={['collectionAgent']}>
+              <RequireRole allow={['collectionAgent', 'super_admin']}>
                 <ReviewPhotos />
               </RequireRole>
             }
@@ -130,29 +128,33 @@ export default function App() {
               </RequireRole>
             }
           />
-          {Object.values(ROLES).flatMap((role) =>
-            role.nav.map(({ label, path }) => {
-              const Page = PAGE_COMPONENTS[path]
-              return (
-                <Route
-                  key={path}
-                  path={path}
-                  element={
-                    <RequireRole allow={[role.key]}>
-                      {Page ? <Page /> : <Placeholder label={label} />}
-                    </RequireRole>
-                  }
-                />
-              )
-            }),
-          )}
-          {/* The request workspace. Not driven off ROLES[].nav because it is a
-              parameterised route with no nav entry of its own, and dpo reaches it
-              from Request Oversight while dataAdmin reaches it from the queue. */}
+          {/* One route per page, carrying every role that page admits. The old
+              generator walked ROLES[].nav and emitted allow={[role.key]}, which
+              made a shared page reachable by exactly one of the roles that share
+              it — and made super_admin, which had no nav array, reach nothing. */}
+          {PAGES.map(({ path, label, roles }) => {
+            const Page = PAGE_COMPONENTS[path]
+            return (
+              <Route
+                key={path}
+                path={path}
+                element={
+                  <RequireRole allow={roles}>
+                    {Page ? <Page /> : <Placeholder label={label} />}
+                  </RequireRole>
+                }
+              />
+            )
+          })}
+          {/* The request workspace. Not in PAGES because it is a parameterised
+              route with no nav entry of its own — every role reaches it by
+              clicking a row in the DSAR queue. The page itself is role-aware:
+              dataOwner never fires the item grid, timeline or actions endpoints,
+              which are dpo/dataAdmin/super_admin only. */}
           <Route
             path="/dsar/:requestId"
             element={
-              <RequireRole allow={['dataAdmin', 'dpo', 'super_admin']}>
+              <RequireRole allow={['dataAdmin', 'dpo', 'dataOwner', 'super_admin']}>
                 <DsarRequestDetail />
               </RequireRole>
             }

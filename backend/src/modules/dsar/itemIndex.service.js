@@ -18,11 +18,21 @@ import { prisma } from '../../config/prisma.js'
 export const SOURCE = {
   PHOTO_SUBJECT: 'photo_subjects',
   ENROLLMENT: 'subject_face_enrollments',
+  // One item per (subject, recording), NOT per segment. A person audible in a
+  // ten-minute conversation is one thing we hold about them, not forty; the
+  // individual utterances are how it gets redacted, not what gets listed.
+  RECORDING: 'recordings',
+  VOICE_ENROLLMENT: 'subject_voice_enrollments',
 }
 
 // Source tables this walk owns. The tombstone sweep is scoped to them so a
 // future indexer for another source cannot delete rows it never looked at.
-const WALKED_SOURCES = [SOURCE.PHOTO_SUBJECT, SOURCE.ENROLLMENT]
+const WALKED_SOURCES = [
+  SOURCE.PHOTO_SUBJECT,
+  SOURCE.ENROLLMENT,
+  SOURCE.RECORDING,
+  SOURCE.VOICE_ENROLLMENT,
+]
 
 const WRITE_CHUNK = 20
 
@@ -52,6 +62,33 @@ const PHOTO_LINK_SELECT = {
   },
 }
 
+const RECORDING_SELECT = {
+  id: true,
+  sessionId: true,
+  storagePath: true,
+  redactedPath: true,
+  status: true,
+  sha256: true,
+  durationSec: true,
+  createdAt: true,
+  session: { select: { projectId: true } },
+  segments: {
+    select: { id: true, subjectId: true, consentId: true, startSec: true, endSec: true, action: true },
+  },
+}
+
+/**
+ * How many distinct identified people are on a recording. Unidentified speaker
+ * slots are deliberately NOT counted: an unmatched voice is not evidence that a
+ * second consenting principal is present, and inflating this number would
+ * downgrade a lawful DELETE to a REDACT and leave data the principal asked us to
+ * destroy. Erring the other way — counting a real second speaker as absent —
+ * is prevented by the analysis step writing a subjectId for every match.
+ */
+function distinctSpeakers(segments) {
+  return new Set(segments.map((s) => s.subjectId).filter(Boolean)).size
+}
+
 /**
  * Same rule `listSubjectMedia()` uses. A derivative whose PII mask was never
  * confirmed is not "available" — serving it is the reportable failure mode, so
@@ -79,6 +116,55 @@ function photoItem(link) {
   }
 }
 
+/**
+ * Same fail-closed rule as `isRedactedAvailable`. A recording whose analysis
+ * never completed (DEFERRED) has no trustworthy muted derivative, so it counts
+ * as having none — serving it would release voices the consent gate never
+ * cleared.
+ */
+export function isRecordingRedactedAvailable(recording) {
+  return Boolean(recording.redactedPath) && recording.status === 'REDACTED'
+}
+
+/**
+ * One index row per subject per recording.
+ *
+ * `segments` are this subject's segments only; `speakerCount` is the number of
+ * DISTINCT identified subjects across the whole recording, which is the audio
+ * analogue of `photo.subjects.length` and drives the same server-side downgrade:
+ * >1 means a DELETE becomes a mute-this-speaker REDACT, because the other
+ * speakers' consent to their own voice survives this subject's erasure.
+ */
+function recordingItem({ recording, subjectId, segments, speakerCount }) {
+  const consentId = segments.find((s) => s.consentId)?.consentId ?? null
+  return {
+    subjectId,
+    type: 'AUDIO',
+    origin: 'COLLECTION_SESSION',
+    sourceTable: SOURCE.RECORDING,
+    sourceId: recording.id,
+    projectId: recording.session?.projectId ?? null,
+    sessionId: recording.sessionId,
+    storagePath: recording.storagePath,
+    contentHash: recording.sha256 || null,
+    capturedAt: recording.createdAt,
+    sharedSubjectCount: Math.max(speakerCount, 1),
+    redactedAvailable: isRecordingRedactedAvailable(recording),
+    meta: {
+      segments: segments.length,
+      audibleSeconds: Number(
+        segments.reduce((n, s) => n + Math.max(0, s.endSec - s.startSec), 0).toFixed(2),
+      ),
+      durationSec: recording.durationSec ?? null,
+      recordingStatus: recording.status,
+      // Recorded per-row for the same reason the import path records its lawful
+      // basis: a KEEP segment with no consent id is a gap that must be visible
+      // in the item grid, not smoothed over.
+      lawfulBasis: consentId ? 'CONSENT' : 'UNVERIFIED',
+    },
+  }
+}
+
 function enrollmentItem(enrollment) {
   return {
     subjectId: enrollment.subjectId,
@@ -95,6 +181,45 @@ function enrollmentItem(enrollment) {
     // this subject's and always deletable.
     sharedSubjectCount: 1,
     redactedAvailable: false,
+  }
+}
+
+/**
+ * The audio twin of `enrollmentItem`.
+ *
+ * type AUDIO / origin ENROLLMENT, which is a combination nothing produced before
+ * — a reference clip is not collection-session material and is not a photo. The
+ * grid's type filter and the item-action `filter.type` both go through the same
+ * enum, so this row is reachable and batch-selectable exactly like any other.
+ *
+ * `sharedSubjectCount: 1` for the same reason a selfie is 1: an enrollment clip
+ * is one person's voice by construction, so it is never downgraded to a REDACT
+ * and is always fully deletable. Recordings are the multi-speaker case, and they
+ * come through `recordingItem`.
+ */
+function voiceEnrollmentItem(enrollment) {
+  return {
+    subjectId: enrollment.subjectId,
+    type: 'AUDIO',
+    origin: 'ENROLLMENT',
+    sourceTable: SOURCE.VOICE_ENROLLMENT,
+    sourceId: enrollment.id,
+    projectId: null,
+    sessionId: null,
+    storagePath: enrollment.audioPath,
+    contentHash: enrollment.sha256,
+    capturedAt: enrollment.createdAt,
+    sharedSubjectCount: 1,
+    // There is no muted derivative of a reference clip and there should not be:
+    // the whole clip is the biometric, so there is nothing to keep after the
+    // voice is removed.
+    redactedAvailable: false,
+    meta: {
+      durationSec: enrollment.durationSec ?? null,
+      segments: null,
+      audibleSeconds: null,
+      recordingStatus: null,
+    },
   }
 }
 
@@ -134,11 +259,30 @@ async function writeAll(entries, at, client = prisma) {
  * depend on app-vs-DB clock skew and could tombstone rows written seconds ago.
  */
 export async function indexSubject(subjectId, { at = new Date() } = {}) {
-  const [links, enrollments] = await Promise.all([
+  const [links, enrollments, voiceEnrollments, recordings] = await Promise.all([
     prisma.photoSubject.findMany({ where: { subjectId }, select: PHOTO_LINK_SELECT }),
     prisma.subjectFaceEnrollment.findMany({
       where: { subjectId },
       select: { id: true, subjectId: true, imagePath: true, sha256: true, createdAt: true, deletedAt: true },
+    }),
+    prisma.subjectVoiceEnrollment.findMany({
+      where: { subjectId },
+      select: {
+        id: true,
+        subjectId: true,
+        audioPath: true,
+        sha256: true,
+        durationSec: true,
+        createdAt: true,
+        deletedAt: true,
+      },
+    }),
+    // Every recording this subject is audible in, with the full segment set so
+    // the shared-speaker count is derived from the recording rather than from
+    // this subject's slice of it.
+    prisma.recording.findMany({
+      where: { segments: { some: { subjectId } } },
+      select: RECORDING_SELECT,
     }),
   ])
 
@@ -147,6 +291,19 @@ export async function indexSubject(subjectId, { at = new Date() } = {}) {
     // A soft-deleted enrollment is already gone as far as the principal is
     // concerned; it enters the index as a tombstone rather than as live data.
     ...enrollments.map((e) => ({ item: enrollmentItem(e), deletedAt: e.deletedAt ?? null })),
+    ...voiceEnrollments.map((e) => ({
+      item: voiceEnrollmentItem(e),
+      deletedAt: e.deletedAt ?? null,
+    })),
+    ...recordings.map((recording) => ({
+      item: recordingItem({
+        recording,
+        subjectId,
+        segments: recording.segments.filter((s) => s.subjectId === subjectId),
+        speakerCount: distinctSpeakers(recording.segments),
+      }),
+      deletedAt: null,
+    })),
   ]
 
   await writeAll(entries, at)
@@ -197,6 +354,56 @@ export async function indexPhotoSubject(link, { at = new Date() } = {}) {
   }
 
   return written
+}
+
+/**
+ * Incremental path for audio: one recording was just analysed or re-analysed.
+ *
+ * Writes (or refreshes) one item per identified speaker and tombstones items for
+ * speakers a re-analysis no longer places on the recording — a person removed
+ * from the transcript must stop being listed as data we hold about them.
+ *
+ * Unlike `photoItem`, `recordingItem` returns `meta`, so a rebuild refreshes the
+ * segment counts. That is deliberate and does not contradict the create-only
+ * rule in `writeItem`: `meta` there protects the import path's `lawfulBasis`,
+ * which is asserted once and must survive; these counts are derived from the
+ * segments and are wrong the moment they go stale.
+ */
+export async function indexRecording(recordingId, { at = new Date() } = {}) {
+  const recording = await prisma.recording.findUnique({
+    where: { id: recordingId },
+    select: RECORDING_SELECT,
+  })
+  if (!recording) return null
+
+  const speakerCount = distinctSpeakers(recording.segments)
+  const bySubject = new Map()
+  for (const segment of recording.segments) {
+    if (!segment.subjectId) continue
+    if (!bySubject.has(segment.subjectId)) bySubject.set(segment.subjectId, [])
+    bySubject.get(segment.subjectId).push(segment)
+  }
+
+  const entries = [...bySubject].map(([subjectId, segments]) => ({
+    item: recordingItem({ recording, subjectId, segments, speakerCount }),
+    deletedAt: null,
+  }))
+
+  await writeAll(entries, at)
+
+  // A re-analysis that no longer hears someone. Scoped to this recording, so it
+  // can never touch another recording's rows.
+  const { count: tombstoned } = await prisma.subjectDataItem.updateMany({
+    where: {
+      sourceTable: SOURCE.RECORDING,
+      sourceId: recordingId,
+      deletedAt: null,
+      indexedAt: { lt: at },
+    },
+    data: { deletedAt: at },
+  })
+
+  return { recordingId, indexed: entries.length, tombstoned }
 }
 
 /** Bulk incremental path — one finalize writes many links at once. */

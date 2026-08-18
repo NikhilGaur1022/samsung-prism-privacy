@@ -209,21 +209,41 @@ function shapeItem(row) {
     // Import items carry no capture-time consent. Never hidden: an unverified
     // lawful basis is a finding, not a footnote.
     lawfulBasis: row.meta?.lawfulBasis ?? null,
+    // Audio rows are a time range with speakers, not a frame, and the grid has
+    // to be able to say which it is looking at. Null on PHOTO rows. All four are
+    // derived from AudioSegment counts — no transcript, no name, no storagePath,
+    // so the endpoint stays pseudonymous by construction (matrix §D).
+    durationSec: row.meta?.durationSec ?? null,
+    audibleSeconds: row.meta?.audibleSeconds ?? null,
+    segmentCount: row.meta?.segments ?? null,
+    recordingStatus: row.meta?.recordingStatus ?? null,
     indexedAt: row.indexedAt,
   }
 }
 
 /**
  * How many items the SOURCE tables say this subject has, using the same rules
- * `indexSubject()` walks with: every photo link, plus enrollments that are not
- * soft-deleted.
+ * `indexSubject()` walks with: every photo link, every recording the subject is
+ * audible in, plus face and voice enrollments that are not soft-deleted.
+ *
+ * This MUST enumerate exactly what `indexSubject()` writes a live row for. A
+ * source missing here is not a harmless omission: `verifyIndex()` reads the
+ * shortfall as a diverged index, rebuilds on every single listing, and then logs
+ * ITEM_INDEX_INCOMPLETE against an index that was right all along — which trains
+ * the operator to ignore the one alert that says the completeness claim is
+ * unsound. Recordings were missing here until voice enrollments were added and
+ * made the same mistake visible.
  */
 async function sourceLiveCount(subjectId) {
-  const [links, enrollments] = await Promise.all([
+  const [links, enrollments, voiceEnrollments, recordings] = await Promise.all([
     prisma.photoSubject.count({ where: { subjectId } }),
     prisma.subjectFaceEnrollment.count({ where: { subjectId, deletedAt: null } }),
+    prisma.subjectVoiceEnrollment.count({ where: { subjectId, deletedAt: null } }),
+    // One item per (subject, recording), matching recordingItem's granularity —
+    // not one per segment.
+    prisma.recording.count({ where: { segments: { some: { subjectId } } } }),
   ])
-  return links + enrollments
+  return links + enrollments + voiceEnrollments + recordings
 }
 
 /**

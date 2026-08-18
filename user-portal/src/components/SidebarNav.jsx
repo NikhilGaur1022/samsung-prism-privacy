@@ -1,6 +1,6 @@
 import { NavLink } from 'react-router-dom'
 import { ShieldCheck } from 'lucide-react'
-import { NAV_ITEMS } from './NavItems'
+import { NAV_SECTIONS } from './NavItems'
 
 export default function SidebarNav() {
   return (
@@ -11,26 +11,32 @@ export default function SidebarNav() {
         </div>
         <span className="text-lg font-extrabold tracking-tight text-ink">Prism</span>
       </div>
-      <nav className="flex-1 px-3">
-        <ul className="space-y-1">
-          {NAV_ITEMS.map(({ to, label, icon: Icon }) => (
-            <li key={to}>
-              <NavLink
-                to={to}
-                className={({ isActive }) =>
-                  `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand ${
-                    isActive
-                      ? 'bg-brand-soft text-brand'
-                      : 'text-ink-muted hover:bg-canvas'
-                  }`
-                }
-              >
-                <Icon size={20} strokeWidth={1.75} />
-                {label}
-              </NavLink>
-            </li>
-          ))}
-        </ul>
+      <nav className="flex-1 overflow-y-auto px-3">
+        {NAV_SECTIONS.map((section) => (
+          <div key={section.key} className="mb-4 last:mb-0">
+            <p className="px-3 pb-1 text-[11px] font-bold uppercase tracking-wider text-ink-faint">
+              {section.label}
+            </p>
+            <ul className="space-y-1">
+              {section.items.map(({ to, label, icon: Icon }) => (
+                <li key={to}>
+                  <NavLink
+                    to={to}
+                    end={to === '/requests'}
+                    className={({ isActive }) =>
+                      `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand ${
+                        isActive ? 'bg-brand-soft text-brand' : 'text-ink-muted hover:bg-canvas'
+                      }`
+                    }
+                  >
+                    <Icon size={20} strokeWidth={1.75} />
+                    {label}
+                  </NavLink>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
       </nav>
       <div className="px-6 py-6 text-xs font-medium text-ink-faint">
         Consent Manager v6.21

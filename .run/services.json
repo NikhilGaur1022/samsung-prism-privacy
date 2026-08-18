@@ -1,0 +1,52 @@
+[
+  {
+    "Key": "qdrant",
+    "Name": "qdrant (6333)",
+    "Pid": 9528
+  },
+  {
+    "Key": "face",
+    "Name": "face-worker (8001)",
+    "Pid": 15300
+  },
+  {
+    "Key": "pii",
+    "Name": "image-pii-worker (8002)",
+    "Pid": 5548
+  },
+  {
+    "Key": "w-recognition",
+    "Name": "worker: recognition",
+    "Pid": 21284
+  },
+  {
+    "Key": "w-redaction",
+    "Name": "worker: redaction",
+    "Pid": 24924
+  },
+  {
+    "Key": "w-purge",
+    "Name": "worker: purge",
+    "Pid": 5508
+  },
+  {
+    "Key": "w-item-action",
+    "Name": "worker: item-action",
+    "Pid": 6332
+  },
+  {
+    "Key": "w-retention",
+    "Name": "worker: retention",
+    "Pid": 624
+  },
+  {
+    "Key": "user-portal",
+    "Name": "user-portal (5173)",
+    "Pid": 17180
+  },
+  {
+    "Key": "admin-portal",
+    "Name": "admin-portal (5180)",
+    "Pid": 5860
+  }
+]

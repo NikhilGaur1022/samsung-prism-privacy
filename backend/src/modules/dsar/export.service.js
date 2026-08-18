@@ -6,6 +6,7 @@ import { recordAccess } from '../../lib/accessLog.js'
 import { readFile, writeFile, shredFile, fileExists } from '../../lib/storage.js'
 import { createZip } from '../../lib/zip.js'
 import { logger } from '../../lib/logger.js'
+import { extensionFor } from '../recordings/recording.service.js'
 
 // DPDP §11 fulfilment: the summary of personal data being processed, plus the
 // data itself, packaged for one principal.
@@ -44,7 +45,9 @@ function tokenHash(token) {
  * principal's grid pulling their photos into this package.
  */
 async function resolveSelection(subjectId, dsarRequestId, selection) {
-  if (!selection || selection === 'ALL') return { linkIds: null, descriptor: { mode: 'ALL' } }
+  if (!selection || selection === 'ALL') {
+    return { linkIds: null, recordingIds: null, descriptor: { mode: 'ALL' } }
+  }
 
   let items
   let descriptor
@@ -92,6 +95,7 @@ async function resolveSelection(subjectId, dsarRequestId, selection) {
 
   return {
     linkIds: new Set(items.filter((i) => i.sourceTable === 'photo_subjects').map((i) => i.sourceId)),
+    recordingIds: new Set(items.filter((i) => i.sourceTable === 'recordings').map((i) => i.sourceId)),
     descriptor,
   }
 }
@@ -122,9 +126,10 @@ export async function buildAccessPackage(dsarRequestId, admin = null, { selectio
   }
 
   const subjectId = request.subjectId
-  const { linkIds, descriptor } = await resolveSelection(subjectId, dsarRequestId, selection)
+  const { linkIds, recordingIds, descriptor } = await resolveSelection(subjectId, dsarRequestId, selection)
 
-  const [subject, consents, links, enrollments, accessEvents] = await Promise.all([
+  // prettier-ignore
+  const [subject, consents, links, recordings, enrollments, voiceEnrollments, accessEvents] = await Promise.all([
     prisma.subject.findUnique({
       where: { masterUserId: subjectId },
       select: {
@@ -178,9 +183,31 @@ export async function buildAccessPackage(dsarRequestId, admin = null, { selectio
         },
       },
     }),
+    // Recordings the principal is a speaker in. Selected through the segments,
+    // because a recording carries no subject of its own — the attribution lives
+    // on the spans, exactly as it does for a face in a group photo.
+    prisma.recording.findMany({
+      where: { segments: { some: { subjectId } } },
+      select: {
+        id: true,
+        sessionId: true,
+        redactedPath: true,
+        mimeType: true,
+        status: true,
+        durationSec: true,
+        createdAt: true,
+        segments: {
+          select: { speakerId: true, subjectId: true, startSec: true, endSec: true, action: true },
+        },
+      },
+    }),
     prisma.subjectFaceEnrollment.findMany({
       where: { subjectId },
       select: { id: true, pose: true, source: true, createdAt: true, embeddingDim: true },
+    }),
+    prisma.subjectVoiceEnrollment.findMany({
+      where: { subjectId, deletedAt: null },
+      select: { id: true, source: true, durationSec: true, createdAt: true, embeddingDim: true },
     }),
     prisma.accessEvent.findMany({
       where: { objectId: subjectId },
@@ -194,6 +221,7 @@ export async function buildAccessPackage(dsarRequestId, admin = null, { selectio
 
   const files = []
   const photoManifest = []
+  const recordingManifest = []
   let redactedSubstitutions = 0
   let bytes = 0
 
@@ -254,8 +282,75 @@ export async function buildAccessPackage(dsarRequestId, admin = null, { selectio
     photoManifest.push(entry)
   }
 
+  // Audio, on exactly the terms photographs get. The redacted derivative is the
+  // only thing that ships: the original carries every other speaker in the room
+  // in full, and handing a principal a recording of their colleagues because
+  // they asked for their own data is the disclosure §11 is supposed to prevent.
+  for (const recording of recordings) {
+    const mine = recording.segments.filter((s) => s.subjectId === subjectId)
+    const otherSpeakers = new Set(
+      recording.segments.filter((s) => s.subjectId && s.subjectId !== subjectId).map((s) => s.subjectId),
+    )
+    const entry = {
+      recordingId: recording.id,
+      sessionId: recording.sessionId,
+      recordedAt: recording.createdAt,
+      durationSec: recording.durationSec,
+      // The principal's own share of the audio, which is the part of it that is
+      // their personal data. The rest of the timeline is other people's.
+      yourSpeakingSeconds: Number(
+        mine.reduce((total, s) => total + Math.max(0, s.endSec - s.startSec), 0).toFixed(2),
+      ),
+      yourSegments: mine.length,
+      sharedRecording: otherSpeakers.size > 0,
+      otherSpeakerCount: otherSpeakers.size,
+      included: false,
+      reason: null,
+    }
+
+    if (recordingIds && !recordingIds.has(recording.id)) {
+      entry.reason = 'NOT_SELECTED — outside the selection this package was built for'
+      recordingManifest.push(entry)
+      continue
+    }
+
+    // Fail closed, same rule as photographs: a recording whose muting was never
+    // confirmed is not shipped. DEFERRED means the audio worker could not be
+    // reached, and "we could not check" is never "there was nothing to mute".
+    if (!recording.redactedPath || recording.status === 'DEFERRED' || recording.status === 'PENDING_ANALYSIS') {
+      entry.reason = 'REDACTION_INCOMPLETE — excluded pending voice masking; re-request once processing completes'
+      recordingManifest.push(entry)
+      continue
+    }
+
+    try {
+      const buffer = await readFile(recording.redactedPath)
+      bytes += buffer.length
+      if (bytes > PACKAGE_MAX_BYTES) {
+        throw new ApiError(
+          413,
+          `This package exceeds the ${Math.round(PACKAGE_MAX_BYTES / 1024 / 1024)} MB build ceiling. Build it in parts with a narrower selection.`,
+        )
+      }
+      const name = `recordings/${recording.id}.${extensionFor(recording.mimeType)}`
+      files.push({ name, data: buffer, date: recording.createdAt })
+      entry.included = true
+      entry.file = name
+      entry.sha256 = createHash('sha256').update(buffer).digest('hex')
+      if (otherSpeakers.size > 0) redactedSubstitutions += 1
+    } catch (err) {
+      if (err instanceof ApiError) throw err
+      logger.error({ err, recordingId: recording.id }, 'access package: could not read redacted recording')
+      entry.reason = 'UNREADABLE — the derivative could not be read at packaging time'
+    }
+    recordingManifest.push(entry)
+  }
+
+  const included = [...photoManifest, ...recordingManifest].filter((e) => e.included)
+  const excluded = [...photoManifest, ...recordingManifest].filter((e) => !e.included)
+
   const manifest = {
-    version: 2,
+    version: 3,
     packageType: 'DPDP_SECTION_11_ACCESS',
     dsarRequestId,
     generatedAt: new Date().toISOString(),
@@ -265,15 +360,20 @@ export async function buildAccessPackage(dsarRequestId, admin = null, { selectio
     selection: {
       ...descriptor,
       complete: descriptor.mode === 'ALL',
-      itemCount: photoManifest.filter((p) => p.included).length,
-      excludedCount: photoManifest.filter((p) => !p.included).length,
-      excludedBySelection: photoManifest.filter((p) => p.reason?.startsWith('NOT_SELECTED')).length,
-      // Every image here is a redacted derivative; this counts the ones where
-      // that substitution withheld something — a frame holding other people.
+      itemCount: included.length,
+      excludedCount: excluded.length,
+      excludedBySelection: excluded.filter((p) => p.reason?.startsWith('NOT_SELECTED')).length,
+      // Every image and every recording here is a redacted derivative; this
+      // counts the ones where that substitution withheld something — a frame or
+      // a timeline holding other people.
       redactedSubstitutions,
+      byType: {
+        photos: { included: photoManifest.filter((p) => p.included).length, excluded: photoManifest.filter((p) => !p.included).length },
+        recordings: { included: recordingManifest.filter((r) => r.included).length, excluded: recordingManifest.filter((r) => !r.included).length },
+      },
       note:
         descriptor.mode === 'ALL'
-          ? 'This package covers every image held for this data principal at the time of generation.'
+          ? 'This package covers every image and recording held for this data principal at the time of generation.'
           : 'This package covers a selected subset. It is not a complete record of what is held.',
     },
     dataPrincipal: {
@@ -306,13 +406,30 @@ export async function buildAccessPackage(dsarRequestId, admin = null, { selectio
       poses: enrollments.map((e) => e.pose).filter(Boolean),
       embeddingsHeld: enrollments.filter((e) => e.embeddingDim).length,
       note: 'Face templates are held encrypted and are never exported, displayed, or disclosed to any operator.',
+      // Voice reported on the same terms as face, and deliberately as a summary
+      // rather than as files. The reference clip is withheld for the same reason
+      // the enrollment selfie is: the template derived from it is the biometric,
+      // and the manifest's job under §11(b) is to state what is held and why,
+      // not to re-issue the sample. A principal who wants the clip gone raises an
+      // ERASE — which now destroys it (L16) and its vector (L17) by name.
+      voice: {
+        enrollments: voiceEnrollments.length,
+        totalSeconds: Number(
+          voiceEnrollments.reduce((n, e) => n + (e.durationSec ?? 0), 0).toFixed(2),
+        ),
+        embeddingsHeld: voiceEnrollments.filter((e) => e.embeddingDim).length,
+        capturedAt: voiceEnrollments.map((e) => e.createdAt),
+        note: 'Voice templates are held encrypted under a key unique to you, are used only to tell your voice apart from other speakers in a recording, and are never exported or played back to any operator.',
+      },
     },
     photos: photoManifest,
+    recordings: recordingManifest,
     processingSummary: {
       purposesInForce: consents.filter((c) => c.status === 'ACTIVE').map((c) => c.project?.purpose),
       processors: [
         { name: 'face-worker', role: 'face detection and blurring', dataSeen: 'photo pixels, in memory only' },
         { name: 'image-pii-worker', role: 'text PII detection and masking', dataSeen: 'photo pixels, in memory only' },
+        { name: 'audio-worker', role: 'speaker diarisation and voice/PII muting', dataSeen: 'recording samples, in memory only' },
       ],
       recentAccessEvents: accessEvents,
     },
@@ -337,16 +454,18 @@ export async function buildAccessPackage(dsarRequestId, admin = null, { selectio
         '',
         'manifest.json holds your profile, your consents, and a summary of how your',
         'data is processed. photos/ holds the redacted copies of images you appear in.',
+        'recordings/ holds the redacted copies of audio you were recorded speaking in.',
         '',
         manifest.selection.complete
-          ? 'This package covers every image held for you at the time it was generated.'
-          : `This package covers a SELECTED SUBSET: ${manifest.selection.itemCount} image(s) included, ${manifest.selection.excludedCount} not included. It is not a complete record of what is held.`,
+          ? 'This package covers every image and recording held for you at the time it was generated.'
+          : `This package covers a SELECTED SUBSET: ${manifest.selection.itemCount} item(s) included, ${manifest.selection.excludedCount} not included. It is not a complete record of what is held.`,
         '',
         'Images are redacted: other people in the frame are blurred and sensitive text',
-        'is masked. Originals are not included, because exporting them would disclose',
-        'other people to you.',
+        'is masked. Recordings are redacted the same way: everyone else who spoke is',
+        'muted, so what you hear is your own voice. Originals are not included, because',
+        'exporting them would disclose other people to you.',
         '',
-        'Face templates are never included in any export.',
+        'Face templates and voice templates are never included in any export.',
         '',
         `This package expires ${PACKAGE_TTL_DAYS} days after issue and the download link is single-use.`,
       ].join('\n'),

@@ -1,5 +1,14 @@
 # PRISM — handoff
 
+> **SUPERSEDED as the entry point.** The current handoff is
+> `docs/HANDOFF_2026-08-17_phase3-dead-code.md` — production-readiness plan,
+> Phases 0–2 complete, Phase 3 next. Start there. This file remains the
+> authority on the completed nine-phase DSAR work described below.
+>
+> Earlier links in the same chain, each superseded by the next:
+> `docs/HANDOFF_2026-08-16_production-readiness.md` (Phase 0 done, Phase 1 next),
+> `docs/HANDOFF_2026-08-16_phase2-audio.md` (Phase 1 done, Phase 2 next).
+
 **Written for a session with zero memory of the one that produced it.**
 Read this and `PLAN.md`, and nothing else, before starting.
 

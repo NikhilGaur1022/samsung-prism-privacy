@@ -50,7 +50,7 @@ const subjectSearchSchema = z.object({
 // No `q` here and no free-text anywhere: the item grid filters by enum and by
 // date, never by a string an operator typed at a person's data.
 const itemQuerySchema = z.object({
-  type: z.enum(['PHOTO']).optional(),
+  type: z.enum(['PHOTO', 'AUDIO']).optional(),
   origin: z.enum(['COLLECTION_SESSION', 'IMPORT', 'ENROLLMENT']).optional(),
   projectId: uuid.optional(),
   from: z.coerce.date().optional(),
@@ -71,7 +71,7 @@ const itemActionSchema = z
     itemIds: z.array(uuid).min(1).max(1000).optional(),
     filter: z
       .object({
-        type: z.enum(['PHOTO']).optional(),
+        type: z.enum(['PHOTO', 'AUDIO']).optional(),
         origin: z.enum(['COLLECTION_SESSION', 'IMPORT', 'ENROLLMENT']).optional(),
         projectId: uuid.optional(),
         from: z.coerce.date().optional(),
@@ -101,7 +101,7 @@ const packageSchema = z.object({
       z.object({ itemIds: z.array(uuid).min(1).max(2000) }),
       z.object({
         filter: z.object({
-          type: z.enum(['PHOTO']).optional(),
+          type: z.enum(['PHOTO', 'AUDIO']).optional(),
           origin: z.enum(['COLLECTION_SESSION', 'IMPORT', 'ENROLLMENT']).optional(),
           projectId: uuid.optional(),
           from: z.coerce.date().optional(),

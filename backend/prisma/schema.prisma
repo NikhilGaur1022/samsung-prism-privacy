@@ -71,6 +71,7 @@ model Subject {
   subjectKey          SubjectKey?
   dataItems           SubjectDataItem[]
   importBatches       ImportBatch[]
+  audioSegments       AudioSegment[]
 
   // Intake-time UX defaults ONLY. Once project_consent_matrix exists (backend-plan.md
   // Phase 2), THAT table is the sole authority for any gating/consent-check logic.
@@ -82,7 +83,8 @@ model Subject {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  faceEnrollments SubjectFaceEnrollment[]
+  faceEnrollments  SubjectFaceEnrollment[]
+  voiceEnrollments SubjectVoiceEnrollment[]
 
   @@index([group, status])
   @@index([employeeRef])
@@ -90,7 +92,7 @@ model Subject {
 }
 
 enum EnrollmentSource {
-  SELF  // captured by the subject in user-portal
+  SELF // captured by the subject in user-portal
   AGENT // captured by a collection agent in admin-portal
 }
 
@@ -111,25 +113,25 @@ enum EnrollmentPose {
 // Persisting it is what makes a session gallery build in seconds instead of one
 // face-service round trip per enrollment per session.
 model SubjectFaceEnrollment {
-  id         String           @id @default(uuid()) @db.Uuid
-  subjectId  String           @map("subject_id") @db.Uuid
-  imagePath  String // relative to STORAGE_ROOT
-  sha256     String
-  detScore   Float
-  width      Int?
-  height     Int?
-  source     EnrollmentSource
-  pose       EnrollmentPose?
+  id           String           @id @default(uuid()) @db.Uuid
+  subjectId    String           @map("subject_id") @db.Uuid
+  imagePath    String // relative to STORAGE_ROOT
+  sha256       String
+  detScore     Float
+  width        Int?
+  height       Int?
+  source       EnrollmentSource
+  pose         EnrollmentPose?
   // AES-256-GCM(512 × float32 LE) laid out as nonce(12) || tag(16) || ciphertext
   embedding    Bytes?
   embeddingDim Int? // 512; null = legacy row, re-derived from the selfie on use
   // Which key sealed `embedding` and the selfie at imagePath. null = legacy row
   // sealed with the global FACE_EMBEDDING_KEY; non-null = per-subject DEK from
   // lib/keyring.js, and destroying that DEK crypto-shreds this row's biometrics.
-  encKeyId   String?          @map("enc_key_id")
-  capturedBy String?          @db.Uuid // AdminUser.id when source=AGENT
-  createdAt  DateTime         @default(now())
-  deletedAt  DateTime? // soft delete; file removed immediately
+  encKeyId     String?          @map("enc_key_id")
+  capturedBy   String?          @db.Uuid // AdminUser.id when source=AGENT
+  createdAt    DateTime         @default(now())
+  deletedAt    DateTime? // soft delete; file removed immediately
 
   subject Subject @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
 
@@ -138,21 +140,82 @@ model SubjectFaceEnrollment {
   @@map("subject_face_enrollments")
 }
 
+// The voice counterpart, and deliberately the same shape for the same reasons.
+//
+// Before this existed there was NO persisted voice enrollment anywhere: the
+// agent attached reference `voice_snippets` as multipart files at analyze time
+// and the worker re-embedded every one of them on every call. Speaker identity
+// therefore depended on whoever happened to attach the right WAVs to that one
+// request, nothing was reusable across sessions, and there was no row to erase —
+// so a voice print was held with no erasure path at all.
+//
+// A voice print is §2 sensitive personal data on exactly the same footing as a
+// face embedding, so every property of SubjectFaceEnrollment is load-bearing
+// here too: the reference clip AND its vector are persisted, the vector is
+// sealed under the per-subject DEK from lib/keyring.js so destroySubjectKey()
+// crypto-shreds it, `embeddingDim` records the width, a null embedding means a
+// legacy row to re-derive on use, the vector is never selected by any API
+// response, and delete is soft — the tombstone survives for the audit chain
+// while the clip and the biometric go immediately.
+//
+// Note this is single-subject data, which is why it is sealed under the
+// per-subject DEK. A Recording is NOT: it is a multi-speaker object, so it stays
+// under the session/path DEK and erases through L14/L15/SEGMENT instead. The
+// rule is about the object, not the modality.
+model SubjectVoiceEnrollment {
+  id        String @id @default(uuid()) @db.Uuid
+  subjectId String @map("subject_id") @db.Uuid
+
+  audioPath String @map("audio_path") // relative to STORAGE_ROOT
+  sha256    String
+  mimeType  String @default("audio/wav") @map("mime_type")
+  sizeBytes Int    @default(0) @map("size_bytes")
+
+  // Length of the reference clip. Short clips make a speaker embedding unstable,
+  // so this is recorded and enforced at capture rather than discovered later as
+  // an unexplained run of unmatched speakers.
+  durationSec Float? @map("duration_sec")
+
+  source     EnrollmentSource
+  capturedBy String?          @db.Uuid // AdminUser.id when source=AGENT
+
+  // AES-256-GCM(192 × float32 LE) laid out as nonce(12) || tag(16) || ciphertext
+  // for legacy rows, or the sealed PRSM envelope for per-subject-keyed rows —
+  // lib/embeddingCrypto.js reads both.
+  embedding Bytes?
+  // 192 for SpeechBrain ECAPA-TDNN (spkrec-ecapa-voxceleb), NOT the 512 of
+  // buffalo_l. Null = legacy row, re-derived from the clip on use.
+  embeddingDim Int? @map("embedding_dim")
+
+  // Which key sealed `embedding` and the clip at audioPath. Destroying that DEK
+  // crypto-shreds this row's biometric, the same as for a face enrollment.
+  encKeyId String? @map("enc_key_id")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  deletedAt DateTime? @map("deleted_at") // soft delete; file removed immediately
+
+  subject Subject @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
+
+  @@unique([subjectId, sha256])
+  @@index([subjectId, deletedAt])
+  @@map("subject_voice_enrollments")
+}
+
 model AuditLog {
-  id          String   @id @default(uuid()) @db.Uuid
-  entityType  String
-  entityId    String   @db.Uuid
-  action      String
-  actorId     String?  @db.Uuid
-  payloadHash String
+  id            String   @id @default(uuid()) @db.Uuid
+  entityType    String
+  entityId      String   @db.Uuid
+  action        String
+  actorId       String?  @db.Uuid
+  payloadHash   String
   // SHA-256 of the canonical payload. A hash, never the payload itself, so
   // invariant 7 holds — but storing it is what makes payloadHash recomputable and
   // therefore the chain actually verifiable. Without it, an attacker editing
   // `action` or `actorId` in place leaves a chain that still links up cleanly.
   // Null on rows written before this column existed; those verify by linkage only.
-  payloadDigest String? @map("payload_digest")
-  prevHash    String?
-  createdAt   DateTime @default(now())
+  payloadDigest String?  @map("payload_digest")
+  prevHash      String?
+  createdAt     DateTime @default(now())
 
   @@index([entityType, entityId, createdAt])
   @@map("audit_log")
@@ -293,24 +356,24 @@ model Project {
   // Approval workflow. approvedByAdminId is a bare FK-less UUID on purpose: an
   // approver is an audit fact, and deleting the admin row must never cascade
   // into rewriting the approval history.
-  submittedAt        DateTime?  @map("submitted_at")
-  approvedAt         DateTime?  @map("approved_at")
-  approvedByAdminId  String?    @map("approved_by_admin_id") @db.Uuid
-  rejectionReason    String?    @map("rejection_reason")
-  consentTemplateId  String?    @map("consent_template_id") @db.Uuid
+  submittedAt       DateTime?  @map("submitted_at")
+  approvedAt        DateTime?  @map("approved_at")
+  approvedByAdminId String?    @map("approved_by_admin_id") @db.Uuid
+  rejectionReason   String?    @map("rejection_reason")
+  consentTemplateId String?    @map("consent_template_id") @db.Uuid
   // Itemised data categories the project claims to need (DPDP §5 notice input),
   // e.g. ["FACE_IMAGE","NAME","EMAIL"]. Purpose limitation is checked against it.
-  dataTypes          Json?      @map("data_types")
-  riskLevel          RiskLevel? @map("risk_level")
+  dataTypes         Json?      @map("data_types")
+  riskLevel         RiskLevel? @map("risk_level")
 
-  owner           AdminUser?          @relation(fields: [ownerAdminId], references: [id], onDelete: SetNull)
-  consentTemplate ConsentTemplate?    @relation(fields: [consentTemplateId], references: [id], onDelete: SetNull)
-  assignments     ProjectAssignment[]
-  consents        ProjectConsent[]
-  sessions        Session[]
-  dsarRequests    DsarRequest[]
+  owner             AdminUser?          @relation(fields: [ownerAdminId], references: [id], onDelete: SetNull)
+  consentTemplate   ConsentTemplate?    @relation(fields: [consentTemplateId], references: [id], onDelete: SetNull)
+  assignments       ProjectAssignment[]
+  consents          ProjectConsent[]
+  sessions          Session[]
+  dsarRequests      DsarRequest[]
   retentionPolicies RetentionPolicy[]
-  importBatches   ImportBatch[]
+  importBatches     ImportBatch[]
 
   @@index([status])
   @@index([ownerAdminId])
@@ -328,26 +391,26 @@ enum ConsentTemplateStatus {
 // supersedes the old one, because a consent given in the past was given against
 // the exact words shown at the time, and those words have to stay retrievable.
 model ConsentTemplate {
-  id           String                @id @default(uuid()) @db.Uuid
-  name         String
-  version      Int                   @default(1)
-  status       ConsentTemplateStatus @default(DRAFT)
-  purpose      String
+  id               String                @id @default(uuid()) @db.Uuid
+  name             String
+  version          Int                   @default(1)
+  status           ConsentTemplateStatus @default(DRAFT)
+  purpose          String
   // { "en": "...", "hi": "...", "kn": "..." } — DPDP §5(3) requires the notice be
   // available in the Eighth Schedule languages, so locale is data, not a column.
-  bodyByLocale Json                  @map("body_by_locale")
-  dataTypes    Json?                 @map("data_types")
-  retention    String?
-  grievanceContact String?           @map("grievance_contact")
-  supersedesId String?               @map("supersedes_id") @db.Uuid
-  createdByAdminId String?           @map("created_by_admin_id") @db.Uuid
-  publishedAt  DateTime?             @map("published_at")
-  createdAt    DateTime              @default(now())
-  updatedAt    DateTime              @updatedAt
+  bodyByLocale     Json                  @map("body_by_locale")
+  dataTypes        Json?                 @map("data_types")
+  retention        String?
+  grievanceContact String?               @map("grievance_contact")
+  supersedesId     String?               @map("supersedes_id") @db.Uuid
+  createdByAdminId String?               @map("created_by_admin_id") @db.Uuid
+  publishedAt      DateTime?             @map("published_at")
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
 
-  supersedes ConsentTemplate?  @relation("TemplateVersions", fields: [supersedesId], references: [id], onDelete: SetNull)
+  supersedes   ConsentTemplate?  @relation("TemplateVersions", fields: [supersedesId], references: [id], onDelete: SetNull)
   supersededBy ConsentTemplate[] @relation("TemplateVersions")
-  projects   Project[]
+  projects     Project[]
 
   @@unique([name, version])
   @@index([status])
@@ -394,6 +457,7 @@ model ProjectConsent {
   project             Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
   sessionParticipants SessionParticipant[]
   photos              PhotoSubject[]
+  audioSegments       AudioSegment[]
 
   @@unique([subjectId, projectId])
   @@index([projectId, status])
@@ -428,7 +492,7 @@ model Session {
   handoff      SessionHandoff?
   invites      SessionInvite[]
   recordings   Recording[]
-  
+
   @@index([agentId, status])
   @@index([projectId])
   @@map("sessions")
@@ -475,7 +539,7 @@ enum CameraSource {
 }
 
 model Photo {
-  id String @id @default(uuid()) @db.Uuid
+  id           String       @id @default(uuid()) @db.Uuid
   // Null for an IMPORT: there was no capture event, so there is no session, no
   // agent and no project to hang one on. Every consumer that reads
   // `photo.session` must treat it as optional — an imported frame is real data
@@ -587,9 +651,9 @@ model FaceCluster {
 // Written at finalize. This is what links a photo to a person AND to the consent
 // that permits holding it — purge/DSAR walks consentId, exactly like media_assets.
 model PhotoSubject {
-  id        String @id @default(uuid()) @db.Uuid
-  photoId   String @db.Uuid
-  subjectId String @db.Uuid
+  id        String   @id @default(uuid()) @db.Uuid
+  photoId   String   @db.Uuid
+  subjectId String   @db.Uuid
   // Null ONLY on an IMPORT link for which no live ProjectConsent existed at
   // ingest. It is not "no lawful basis recorded" — the basis is recorded, as
   // SubjectDataItem.meta.lawfulBasis = 'IMPORT_UNVERIFIED', and discovery and
@@ -598,7 +662,7 @@ model PhotoSubject {
   //
   // The capture path is unchanged — session.service.finalizeSession still refuses
   // to write a link without a consent id, so nothing collected can reach null here.
-  consentId String? @db.Uuid
+  consentId String?  @db.Uuid
   createdAt DateTime @default(now())
 
   photo   Photo           @relation(fields: [photoId], references: [id], onDelete: Cascade)
@@ -749,15 +813,15 @@ enum EvidenceKind {
 // Anything that must be provable to a regulator lives here, in full, with its own
 // hash — this table is the evidentiary record, audit_log is only tamper-evidence.
 model DsarEvidence {
-  id            String       @id @default(uuid()) @db.Uuid
-  dsarRequestId String       @map("dsar_request_id") @db.Uuid
-  kind          EvidenceKind
-  label         String
-  payload       Json?
-  storagePath   String?      @map("storage_path")
-  contentHash   String       @map("content_hash")
-  createdByAdminId String?   @map("created_by_admin_id") @db.Uuid
-  createdAt     DateTime     @default(now())
+  id               String       @id @default(uuid()) @db.Uuid
+  dsarRequestId    String       @map("dsar_request_id") @db.Uuid
+  kind             EvidenceKind
+  label            String
+  payload          Json?
+  storagePath      String?      @map("storage_path")
+  contentHash      String       @map("content_hash")
+  createdByAdminId String?      @map("created_by_admin_id") @db.Uuid
+  createdAt        DateTime     @default(now())
 
   request DsarRequest @relation(fields: [dsarRequestId], references: [id], onDelete: Cascade)
 
@@ -826,22 +890,22 @@ model PurgeJob {
 }
 
 model PurgeJobLocation {
-  id         String              @id @default(uuid()) @db.Uuid
-  purgeJobId String              @map("purge_job_id") @db.Uuid
+  id           String              @id @default(uuid()) @db.Uuid
+  purgeJobId   String              @map("purge_job_id") @db.Uuid
   // "L2".."L11" from the photo-lifecycle table, so the certificate can name the
   // location in the same vocabulary the DPIA uses.
-  locationCode String            @map("location_code")
-  objectType   String            @map("object_type")
-  objectId     String?           @map("object_id")
-  storagePath  String?           @map("storage_path")
+  locationCode String              @map("location_code")
+  objectType   String              @map("object_type")
+  objectId     String?             @map("object_id")
+  storagePath  String?             @map("storage_path")
   status       PurgeLocationStatus @default(PENDING)
   // Proof the thing existed and what it was, captured before deletion. After the
   // delete there is nothing left to hash — this is the only chance.
-  hashBefore   String?           @map("hash_before")
-  attempts     Int               @default(0)
+  hashBefore   String?             @map("hash_before")
+  attempts     Int                 @default(0)
   error        String?
-  completedAt  DateTime?         @map("completed_at")
-  createdAt    DateTime          @default(now())
+  completedAt  DateTime?           @map("completed_at")
+  createdAt    DateTime            @default(now())
 
   job PurgeJob @relation(fields: [purgeJobId], references: [id], onDelete: Cascade)
 
@@ -853,21 +917,21 @@ model PurgeJobLocation {
 // Signed, self-contained proof of erasure handed to the Data Principal. Holds its
 // own canonical payload because audit_log is hash-only and cannot substitute.
 model DeletionCertificate {
-  id                String   @id @default(uuid()) @db.Uuid
-  dsarRequestId     String   @unique @map("dsar_request_id") @db.Uuid
-  purgeJobId        String?  @map("purge_job_id") @db.Uuid
+  id               String   @id @default(uuid()) @db.Uuid
+  dsarRequestId    String   @unique @map("dsar_request_id") @db.Uuid
+  purgeJobId       String?  @map("purge_job_id") @db.Uuid
   // Never the real identity: certificates are shown to DPO/auditors who have no
   // basis to see who the principal is.
-  subjectPseudonym  String   @map("subject_pseudonym")
-  locationsCount    Int      @map("locations_count")
-  payload           Json
-  payloadHash       String   @map("payload_hash")
-  signature         String
-  signingKeyId      String   @map("signing_key_id")
-  algorithm         String   @default("ed25519")
-  issuedByAdminId   String?  @map("issued_by_admin_id") @db.Uuid
-  completedAt       DateTime @map("completed_at")
-  issuedAt          DateTime @default(now()) @map("issued_at")
+  subjectPseudonym String   @map("subject_pseudonym")
+  locationsCount   Int      @map("locations_count")
+  payload          Json
+  payloadHash      String   @map("payload_hash")
+  signature        String
+  signingKeyId     String   @map("signing_key_id")
+  algorithm        String   @default("ed25519")
+  issuedByAdminId  String?  @map("issued_by_admin_id") @db.Uuid
+  completedAt      DateTime @map("completed_at")
+  issuedAt         DateTime @default(now()) @map("issued_at")
 
   request DsarRequest @relation(fields: [dsarRequestId], references: [id], onDelete: Cascade)
 
@@ -895,6 +959,14 @@ enum AccessObjectType {
   // this person". Distinct from SUBJECT_PII (identity fields) because browsing a
   // person's data set and looking up their name are different intrusions.
   SUBJECT_DATA_ITEM
+  // Audio. RECORDING is the raw session capture (break-glass only, same standing
+  // as PHOTO); REDACTED_RECORDING is the muted derivative. The redacted route
+  // shipped logging against a value that did not exist in this enum, so every
+  // read of it threw at the AccessEvent write — which, because the log is
+  // written before the blob is decrypted, meant the read failed closed rather
+  // than leaking. Correct outcome, wrong reason.
+  RECORDING
+  REDACTED_RECORDING
 }
 
 enum AccessAction {
@@ -953,21 +1025,21 @@ enum BreachStatus {
 // every affected principal gets told without delay. Both timestamps are columns
 // so "we forgot" is a query, not an archaeology exercise.
 model BreachRecord {
-  id                    String         @id @default(uuid()) @db.Uuid
-  title                 String
-  description           String
-  severity              BreachSeverity
-  status                BreachStatus   @default(OPEN)
-  discoveredAt          DateTime       @map("discovered_at")
-  containedAt           DateTime?      @map("contained_at")
-  affectedSubjectCount  Int            @default(0) @map("affected_subject_count")
-  affectedProjectIds    Json?          @map("affected_project_ids")
-  dpbNotifiedAt         DateTime?      @map("dpb_notified_at")
-  principalsNotifiedAt  DateTime?      @map("principals_notified_at")
-  reportedByAdminId     String?        @map("reported_by_admin_id") @db.Uuid
-  remediation           String?
-  createdAt             DateTime       @default(now())
-  updatedAt             DateTime       @updatedAt
+  id                   String         @id @default(uuid()) @db.Uuid
+  title                String
+  description          String
+  severity             BreachSeverity
+  status               BreachStatus   @default(OPEN)
+  discoveredAt         DateTime       @map("discovered_at")
+  containedAt          DateTime?      @map("contained_at")
+  affectedSubjectCount Int            @default(0) @map("affected_subject_count")
+  affectedProjectIds   Json?          @map("affected_project_ids")
+  dpbNotifiedAt        DateTime?      @map("dpb_notified_at")
+  principalsNotifiedAt DateTime?      @map("principals_notified_at")
+  reportedByAdminId    String?        @map("reported_by_admin_id") @db.Uuid
+  remediation          String?
+  createdAt            DateTime       @default(now())
+  updatedAt            DateTime       @updatedAt
 
   @@index([status, discoveredAt])
   @@map("breach_records")
@@ -983,17 +1055,17 @@ enum RetentionAction {
 // Retention clocks from 01_PRIVACY_DATAFLOW §6.1, as data rather than constants,
 // so the sweeper is one loop and a project can tighten (never loosen) a default.
 model RetentionPolicy {
-  id            String          @id @default(uuid()) @db.Uuid
+  id               String          @id @default(uuid()) @db.Uuid
   // null projectId = the platform default for that data class.
-  projectId     String?         @map("project_id") @db.Uuid
-  dataClass     String          @map("data_class")
-  retentionDays Int             @map("retention_days")
-  action        RetentionAction @default(HARD_DELETE)
-  clockStart    String          @map("clock_start")
-  active        Boolean         @default(true)
-  createdByAdminId String?      @map("created_by_admin_id") @db.Uuid
-  createdAt     DateTime        @default(now())
-  updatedAt     DateTime        @updatedAt
+  projectId        String?         @map("project_id") @db.Uuid
+  dataClass        String          @map("data_class")
+  retentionDays    Int             @map("retention_days")
+  action           RetentionAction @default(HARD_DELETE)
+  clockStart       String          @map("clock_start")
+  active           Boolean         @default(true)
+  createdByAdminId String?         @map("created_by_admin_id") @db.Uuid
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
 
   project Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
@@ -1029,6 +1101,12 @@ model SubjectKey {
 // so discovery/action/export stay type-agnostic.
 enum DataItemType {
   PHOTO
+  // A session recording this subject is audible in. Added with its erasure path
+  // in the same change as its capture path — see discovery.service.js L14/L15 and
+  // purge.service.js. A capture path that reaches production ahead of its erasure
+  // path makes the deletion certificate a false statement, which is the one
+  // failure mode this platform cannot have.
+  AUDIO
 }
 
 // How the item entered the system. IMPORT items have no capture-time consent
@@ -1058,8 +1136,8 @@ model SubjectDataItem {
   projectId String? @map("project_id") @db.Uuid
   sessionId String? @map("session_id") @db.Uuid
 
-  storagePath String? @map("storage_path")
-  contentHash String? @map("content_hash")
+  storagePath String?   @map("storage_path")
+  contentHash String?   @map("content_hash")
   capturedAt  DateTime? @map("captured_at")
 
   // >1 means other principals appear on the same object. A DELETE on such an
@@ -1073,7 +1151,7 @@ model SubjectDataItem {
   indexedAt DateTime  @default(now()) @map("indexed_at")
   meta      Json?
 
-  subject Subject         @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
+  subject Subject          @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
   actions DsarItemAction[]
 
   @@unique([subjectId, type, sourceTable, sourceId])
@@ -1165,27 +1243,89 @@ model ImportBatch {
   @@map("import_batches")
 }
 
+// ---------------------------------------------------------------------------
+// Audio capture (L14 original / L15 redacted derivative)
+// ---------------------------------------------------------------------------
+
+enum RecordingStatus {
+  PENDING_ANALYSIS
+  ANALYZED
+  REDACTED
+  // Fail-closed, exactly as PiiStatus.DEFERRED is for images: the worker was
+  // unreachable or errored, so the recording has NOT been cleared and its
+  // derivative must not be served or handed off.
+  DEFERRED
+}
+
+enum AudioSegmentAction {
+  KEEP
+  REDACT_VOICE
+  REDACT_PII
+}
+
+// A session recording. Deliberately shaped like Photo — same integrity columns
+// (sha256/sizeBytes/mimeType), same encKeyId so a key rotation knows what sealed
+// it, same fail-closed status. A recording that does not carry these cannot be
+// hashed before destruction, which is what a deletion certificate attests to.
 model Recording {
-  id           String   @id @default(uuid()) @db.Uuid
-  sessionId    String   @db.Uuid
-  storagePath  String
-  redactedPath String?
-  status       String   // PENDING_ANALYSIS | ANALYZED | REDACTED | DEFERRED
-  createdAt    DateTime @default(now())
+  id        String @id @default(uuid()) @db.Uuid
+  sessionId String @map("session_id") @db.Uuid
+
+  storagePath  String  @map("storage_path")
+  // Bystander-muted derivative. The original is never overwritten — same rule as
+  // Photo.redactedPath.
+  redactedPath String? @map("redacted_path")
+
+  mimeType    String @default("audio/wav") @map("mime_type")
+  sha256      String @default("")
+  sizeBytes   Int    @default(0) @map("size_bytes")
+  durationSec Float? @map("duration_sec")
+
+  status RecordingStatus @default(PENDING_ANALYSIS)
+
+  // keyId of the DEK that sealed storagePath / redactedPath. null = plaintext
+  // legacy blob. Mirrors Photo.encKeyId.
+  encKeyId String? @map("enc_key_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
 
   session  Session        @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   segments AudioSegment[]
+
+  @@index([sessionId])
+  @@index([status])
+  @@map("recordings")
 }
 
+// One diarised utterance, or one PII span. This is the audio analogue of
+// PhotoSubject: `subjectId` is the erasure key, and it carries a real FK so a
+// subject cascade reaches it instead of leaving orphaned voice attributions.
 model AudioSegment {
-  id          String   @id @default(uuid()) @db.Uuid
-  recordingId String   @db.Uuid
-  speakerId   String
-  subjectId   String?  @db.Uuid
-  startSec    Float
-  endSec      Float
-  action      String   // KEEP | REDACT_VOICE | REDACT_PII
-  matchScore  Float?
+  id          String @id @default(uuid()) @db.Uuid
+  recordingId String @map("recording_id") @db.Uuid
 
-  recording Recording @relation(fields: [recordingId], references: [id], onDelete: Cascade)
+  // The diarizer's within-file speaker slot ("SPEAKER_00"). Meaningless across
+  // recordings — only `subjectId` identifies a person.
+  speakerId String  @map("speaker_id")
+  subjectId String? @map("subject_id") @db.Uuid
+
+  // Null ONLY where no live ProjectConsent existed at analysis time, exactly as
+  // PhotoSubject.consentId is. A KEEP segment must always carry one.
+  consentId String? @map("consent_id") @db.Uuid
+
+  startSec Float @map("start_sec")
+  endSec   Float @map("end_sec")
+
+  action     AudioSegmentAction
+  matchScore Float?             @map("match_score")
+
+  recording Recording       @relation(fields: [recordingId], references: [id], onDelete: Cascade)
+  subject   Subject?        @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
+  consent   ProjectConsent? @relation(fields: [consentId], references: [consentId], onDelete: SetNull)
+
+  @@index([recordingId])
+  // The DSAR discovery probe: every recording this person is audible in.
+  @@index([subjectId])
+  @@index([consentId])
+  @@map("audio_segments")
 }

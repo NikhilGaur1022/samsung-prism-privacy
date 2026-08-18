@@ -120,8 +120,13 @@ export function createApp() {
   // dataOwner and dataAdmin to the derivatives, and the agent-only floor below
   // would 403 them first.
   app.use('/api/v1/sessions', sessionMediaRoutes)
+  // Audio, mounted ahead of sessionRoutes for the same reason as the two above:
+  // its read routes admit dataOwner and dataAdmin, and sessionRoutes' ROUTER-LEVEL
+  // requireRole('collectionAgent','super_admin') runs on every request that
+  // reaches that router — whether or not a route inside it matches — so mounted
+  // after, those reads 403 before ever arriving here.
+  app.use('/api/v1/sessions', recordingRoutes)
   app.use('/api/v1/sessions', sessionRoutes)
-  app.use('/api/v1/sessions', recordingRoutes) 
   app.use('/api/v1/consent', consentRoutes)
   app.use('/auth/subject', authSubjectRoutes)
   app.use('/auth/admin', authAdminRoutes)

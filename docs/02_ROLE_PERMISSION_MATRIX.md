@@ -56,6 +56,41 @@ Approval is a hard gate: `Session` creation must reject any project whose `statu
 | `GET /sessions/:id/faces` (crops) | ✗ | ✗ | ✗ | ✓ TAGGING only | ✗ | ⚑ |
 | `POST /sessions/:id/finalize` | ✗ | ✗ | ✗ | ✓ own | ✗ | ✓ |
 
+#### Audio (behind `AUDIO_CAPTURE_ENABLED`)
+
+Capture is the owning agent's act. Reads are wider — §D gives a `dataOwner` the redacted derivatives of their own project and a `dataAdmin` the lineage — and every one of them is re-scoped inside `recording.service.js` through `loadSessionForMedia()`, so a wider role floor here is not a wider reach for any individual caller.
+
+Audio shipped once without an erasure path: a recording was absent from `DataItemType`, so `runDiscovery()` never named it and an erasure signed a certificate while the voice data survived. **No capture route for a new modality may be mounted before its `DataItemType` value, its discovery locations and its purge handlers exist in the same change.**
+
+| Endpoint | Subject | dpo | dataOwner | collectionAgent | dataAdmin | super |
+|---|---|---|---|---|---|---|
+| `POST /sessions/:id/recordings` | ✗ | ✗ | ✗ | ✓ own ACTIVE | ✗ | ✓ |
+| `POST /sessions/:id/recordings/:rid/analyze` | ✗ | ✗ | ✗ | ✓ own | ✗ | ✓ |
+| `POST /sessions/:id/recordings/:rid/redact` | ✗ | ✗ | ✗ | ✓ own | ✗ | ✓ |
+| `GET /sessions/:id/recordings` | ✗ | ✗ | ✓ own project | ✓ own | ✓ | ✓ |
+| `GET /sessions/:id/recordings/:rid` | ✗ | ✗ | ✓ own project | ✓ own | ✓ | ✓ |
+| `GET /sessions/:id/recordings/:rid/redacted` | ✗ | ✗ | ✓ own project | ✓ own | ✓ | ✓ |
+
+#### Voice enrollment (behind `AUDIO_CAPTURE_ENABLED`)
+
+A voice print is §2 sensitive personal data on the same footing as a face embedding, so it carries the same rules: capture is gated on `Subject.biometricMatch`, withdrawing that consent destroys every clip and vector through `deleteAllVoiceEnrollments()`, and erasure names them explicitly as **L16** (clip) and **L17** (embedding) rather than folding them into the face codes — a purge handler dispatches on the location code and then deletes from one specific table, so an L5 row carrying a voice id would report SKIPPED while the voice print survived.
+
+`POST .../analyze` no longer accepts `voice_snippets`. Speaker identity comes from these enrollments, loaded into a per-recording Qdrant gallery inside the service. An agent cannot hand-feed reference audio at analyze time, and therefore cannot decide who gets kept unmuted.
+
+**There is no agent-facing playback route, and none may be added.** A selfie can be shown back so an agent can confirm they captured the right face; an enrollment clip tells them nothing the duration does not, and a route for it would make every enrolled subject's recorded voice listenable by any agent holding the role. The principal can play back their own — that is §11 — and nobody else can.
+
+| Endpoint | Subject | dpo | dataOwner | collectionAgent | dataAdmin | super |
+|---|---|---|---|---|---|---|
+| `POST /subjects/:id/voice-enrollments` (agent) | ✗ | ✗ | ✗ | ✓ | ✗ | ✓ |
+| `GET /subjects/:id/voice-enrollments` (metadata only) | ✗ | ✗ | ✗ | ✓ | ✗ | ✓ |
+| `DELETE /subjects/:id/voice-enrollments/:eid` | ✗ | ✗ | ✗ | ✓ | ✗ | ✓ |
+| `POST /me/voice-enrollments` | ✓ self | ✗ | ✗ | ✗ | ✗ | ✗ |
+| `GET /me/voice-enrollments` | ✓ self | ✗ | ✗ | ✗ | ✗ | ✗ |
+| `GET /me/voice-enrollments/status` | ✓ self | ✗ | ✗ | ✗ | ✗ | ✗ |
+| `GET /me/voice-enrollments/:eid/audio` | ✓ self | ✗ | ✗ | ✗ | ✗ | ✗ |
+| `DELETE /me/voice-enrollments/:eid` | ✓ self | ✗ | ✗ | ✗ | ✗ | ✗ |
+| **voice embedding bytes** | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ — no route exists, none may be added |
+
 ### Subject / biometrics
 | Endpoint | Subject | dpo | dataOwner | collectionAgent | dataAdmin | super |
 |---|---|---|---|---|---|---|
@@ -156,3 +191,65 @@ Access token for the object is scoped: signed URL, 5-minute TTL, single-use, bou
 | Subject portal | own everything | any other subject |
 
 Enforce via Prisma `select` allowlists in each service — never `include` a whole relation on a governance route.
+
+---
+
+## E. Portal page table (front-end derivation of §B)
+
+§B is the enforcement. This section records the **navigation** derived from it, which is a different question: not "may this role call this endpoint" but "should this role be shown this screen at all".
+
+The table lives in `admin-portal/src/roles.js` as `PAGES` — the page is the row, the roles are the column — and `App.jsx` generates one route per page carrying every role that page admits. It replaced a per-role `nav` array that emitted `allow={[role.key]}`, which made a page two roles legitimately share reachable by exactly one of them, and made `super_admin` — which had no `nav` array of its own — reach nothing.
+
+**The subset rule.** `PAGES` must stay a subset of §B. A page is listed for a role only if **every endpoint that page calls on mount** admits that role. Where a page calls a narrower endpoint from a *button* rather than on mount, the page hides that button itself and states why in place of it.
+
+| Page | dpo | dataOwner | collectionAgent | dataAdmin | super | Narrowest endpoint on mount |
+|---|---|---|---|---|---|---|
+| `/project-approvals` | ✓ | ✗ | ✗ | ✗ | ✓ | `POST /projects/:id/approve` |
+| `/consent-templates` | ✓ | ✗ | ✗ | ✗ | ✓ | `POST /consent-templates` |
+| `/my-projects` | ✗ | ✓ | ✗ | ✗ | ✓ | `POST /projects/:id/assignments` |
+| `/create-project` | ✗ | ✓ | ✗ | ✗ | ✓ | `GET /consent-templates` (excludes dataAdmin) |
+| `/data-requirements` | ✗ | ✓ | ✗ | ✗ | ✓ | `PATCH /projects/:id` |
+| `/collection-progress` | ✗ | ✓ | ✗ | ✗ | ✓ | `GET /dashboard/summary` |
+| `/processed-data` | ✗ | ✓ | ✗ | ✗ | ✓ | `GET /projects/:id/sessions` |
+| `/project-reports` | ✓ | ✓ | ✗ | ✗ | ✓ | `GET /projects/:id/report` |
+| `/assignments` | ✗ | ✗ | ✓ | ✗ | ✓ | `GET /projects` (assigned) |
+| `/new-session` | ✗ | ✗ | ✓ | ✗ | ✓ | `POST /sessions` |
+| `/sessions` | ✗ | ✗ | ✓ | ✗ | ✓ | `GET /sessions` |
+| `/subject-verification` | ✗ | ✗ | ✓ | ✗ | ✓ | `POST /subjects/:id/enrollments` |
+| `/consent-check` | ✗ | ✗ | ✓ | ✗ | ✓ | `GET /projects/:id/subjects` — names, so §D keeps dpo/dataOwner out |
+| `/dsar-queue` | ✓ | ✓ | ✗ | ✓ | ✓ | `GET /dsar` |
+| `/import` | ✗ | ✗ | ✗ | ✓ | ✓ | `POST /imports` |
+| `/discovery-workspace` | ✗ | ✗ | ✗ | ✓ | ✓ | `POST /handoffs` |
+| `/data-lineage` | ✗ | ✗ | ✗ | ✓ | ✓ | `GET /handoffs/lineage` |
+| `/collection-sessions` | ✗ | ✗ | ✗ | ✓ | ✓ | `GET /projects/:id/sessions` |
+| `/purge-export` | ✗ | ✗ | ✗ | ✓ | ✓ | `POST /dsar/:id/execute` |
+| `/evidence-vault` | ✗ | ✓ | ✗ | ✓ | ✓ | `POST /dsar/:id/evidence` |
+| `/sla-monitoring` | ✓ | ✗ | ✗ | ✓ | ✓ | `GET /dsar/sla` — excludes dataOwner |
+| `/compliance-reports` | ✓ | ✗ | ✗ | ✓ | ✓ | `GET /audit/verify` — excludes dataOwner |
+| `/audit-logs` | ✓ | ✓ | ✗ | ✓ | ✓ | `GET /audit` |
+
+**No new page for voice.** The agent-facing voice enrollment UI is a section of the existing enrollment panel on `/subject-verification`, not a route of its own, so the table above is unchanged: the voice routes admit `collectionAgent` and `super_admin` exactly as the selfie routes do, and the narrowest endpoint on mount is still `POST /subjects/:id/enrollments`. The voice list is fetched when the panel is opened rather than when the page mounts, and it treats a `503` from the `AUDIO_CAPTURE_ENABLED` gate as "not offered in this deployment" — the section collapses to one line instead of rendering an error, because the kill switch being off is not a fault. The panel offers **no playback control**, matching the absence of an agent-facing playback route in §B.
+
+Two widenings against the original per-role navs, both justified by §B: `/project-reports` gains `dpo`, and `/audit-logs` gains `dataOwner`. One retirement: **`/request-oversight` is gone.** It was a dpo-only DSAR list that `/dsar-queue` supersedes in every respect — the queue already renders the SLA line, the breach-tone pill, the assignment and the item counters, and it honours §D identically by rendering whichever of `subjectRef` / `subjectId` the server chose to send. Its one unique capability, an *Overdue only* filter, moved to the queue.
+
+### Pages that gate their own controls
+
+| Page | Shown to | Withheld from | What is withheld |
+|---|---|---|---|
+| `/dsar-queue` | dpo, dataOwner, dataAdmin, super | dpo, dataOwner | identity search (`GET /dsar/subjects/search`) and the import shortcut |
+| `/dsar/:requestId` | dpo, dataOwner, dataAdmin, super | dataOwner | Data / Timeline / Actions tabs — the three endpoints behind them are dpo/dataAdmin/super |
+| `/dsar/:requestId` | " | dpo, dataOwner | item actions and package build (`POST /dsar/:id/items/actions`, `/package`) |
+| `/dsar/:requestId` | " | dpo | Run discovery (`POST /dsar/:id/discovery` is dataOwner/dataAdmin/super) |
+| `/dsar/:requestId` | " | dpo, dataOwner | Execute (`POST /dsar/:id/execute` is dataAdmin/super) |
+
+The DSAR workspace closes through two endpoints rather than one: `POST /close` for dpo/dataAdmin/super, `POST /approve` for dpo/dataOwner/super. The service implements `approve` as the same `REVIEW → CLOSED` transition, so a dataOwner signs a request off through it.
+
+**A refusal is stated, never silent.** `RequireRole` used to `<Navigate to="/dashboard">` on a role mismatch, which is indistinguishable from a broken link. It now renders a refusal naming the signed-in role, the path, and the roles the path is reserved for — so a genuine permission bug is reportable by the person who hit it.
+
+### Subject portal
+
+The user portal has no roles, but it has the same failure mode: thirteen signed-in routes sat under a bare layout with **no auth gate at all**, and the nav exposed four of them, leaving the whole §11–§13 rights surface reachable only by typing the URL. `RequireAuth` now wraps the layout, and `NAV_SECTIONS` is built around the rights (Overview / Consent / Your rights / Account) with a five-entry primary bar on mobile.
+
+Voice enrollment is managed from a card on the Consent Hub, alongside the face card, and it renders **nothing at all** when the audio kill switch is off — advertising a feature whose every button answers 503 is worse than not offering it. Playback of a subject's own clip lives only here, which is the one place §B permits it.
+
+One consent flag governs both modalities: `Subject.biometricMatch` is the only biometric-specific consent that exists, so agreeing on either card enables the other and withdrawing on either erases both. Both cards say so in those words. Saying it is not a nicety — someone who ticks the voice box without being told they have also switched face matching on has not consented to face matching. The two cards also re-read each other whenever the flag moves, so the one that did not make the change cannot keep displaying clips or photos the server has already erased.

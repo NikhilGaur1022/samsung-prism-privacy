@@ -6,6 +6,10 @@ import { logger } from '../../lib/logger.js'
 import { readFile, shredFile, fileExists } from '../../lib/storage.js'
 import { destroySubjectKey } from '../../lib/keyring.js'
 import { rebuildRedactedForRemaining } from '../sessions/session.service.js'
+import {
+  destroyRecording,
+  rebuildRedactedForRemainingSpeakers,
+} from '../recordings/recording.service.js'
 import { runDiscovery } from './discovery.service.js'
 
 // The erasure executor.
@@ -30,12 +34,19 @@ import { runDiscovery } from './discovery.service.js'
 const PHASE_ORDER = [
   'LINK',       // drop the consent links first — they are the erasure key, and
                 // L6 reads them to decide rebuild-vs-delete
+  'SEGMENT',    // the audio counterpart of LINK, and for the same reason: L15
+                // decides mute-vs-delete from what attributions remain
   'L6',         // rebuild survivors' derivatives, or delete when nobody is left
+  'L15',        // re-mute survivors' recordings — AFTER SEGMENT, which is what
+                // turns the erased speaker's spans into mute intervals
   'L3',         // face crops
   'L7',         // per-person derivative cache
   'L2',         // originals — AFTER L6, which needs them to rebuild
+  'L14',        // recording originals — AFTER L15, same reason as L2/L6
   'L4',         // enrollment selfies
   'L5_ROW',     // embedding rows
+  'L16',        // voice enrollment clips
+  'L17_ROW',    // voice embedding rows
   'ROSTER',
   'CONSENT',
   'PII',
@@ -51,6 +62,7 @@ const PHASE_ORDER = [
 function phaseOf(loc) {
   if (loc.objectType === 'SubjectKey') return 'SUBJECT_KEY'
   if (loc.locationCode === 'L5') return 'L5_ROW'
+  if (loc.locationCode === 'L17') return 'L17_ROW'
   return loc.locationCode
 }
 
@@ -84,8 +96,12 @@ async function locationsForItems(subjectId, items) {
   const enrollmentIds = items
     .filter((i) => i.sourceTable === 'subject_face_enrollments')
     .map((i) => i.sourceId)
+  const recordingIds = items.filter((i) => i.sourceTable === 'recordings').map((i) => i.sourceId)
+  const voiceEnrollmentIds = items
+    .filter((i) => i.sourceTable === 'subject_voice_enrollments')
+    .map((i) => i.sourceId)
 
-  const [links, enrollments] = await Promise.all([
+  const [links, enrollments, recordings, voiceEnrollments] = await Promise.all([
     linkIds.length
       ? prisma.photoSubject.findMany({
           where: { id: { in: linkIds }, subjectId },
@@ -101,6 +117,21 @@ async function locationsForItems(subjectId, items) {
       ? prisma.subjectFaceEnrollment.findMany({
           where: { id: { in: enrollmentIds }, subjectId },
           select: { id: true, imagePath: true, embedding: true },
+        })
+      : [],
+    // Scoped to recordings this subject is actually on: an item id names a
+    // recording, and a caller must not be able to reach one they are not a
+    // speaker in by passing its id.
+    recordingIds.length
+      ? prisma.recording.findMany({
+          where: { id: { in: recordingIds }, segments: { some: { subjectId } } },
+          select: { id: true, storagePath: true, redactedPath: true },
+        })
+      : [],
+    voiceEnrollmentIds.length
+      ? prisma.subjectVoiceEnrollment.findMany({
+          where: { id: { in: voiceEnrollmentIds }, subjectId },
+          select: { id: true, audioPath: true, embedding: true },
         })
       : [],
   ])
@@ -145,6 +176,29 @@ async function locationsForItems(subjectId, items) {
     })
   }
 
+  for (const recording of recordings) {
+    locations.push({
+      locationCode: 'SEGMENT',
+      objectType: 'AudioSegment',
+      objectId: recording.id,
+      storagePath: null,
+    })
+    if (recording.redactedPath) {
+      locations.push({
+        locationCode: 'L15',
+        objectType: 'Recording.redactedPath',
+        objectId: recording.id,
+        storagePath: recording.redactedPath,
+      })
+    }
+    locations.push({
+      locationCode: 'L14',
+      objectType: 'Recording.storagePath',
+      objectId: recording.id,
+      storagePath: recording.storagePath,
+    })
+  }
+
   for (const face of faces) {
     locations.push({
       locationCode: 'L3',
@@ -165,6 +219,23 @@ async function locationsForItems(subjectId, items) {
       locations.push({
         locationCode: 'L5',
         objectType: 'SubjectFaceEnrollment.embedding',
+        objectId: enrollment.id,
+        storagePath: null,
+      })
+    }
+  }
+
+  for (const enrollment of voiceEnrollments) {
+    locations.push({
+      locationCode: 'L16',
+      objectType: 'SubjectVoiceEnrollment.audioPath',
+      objectId: enrollment.id,
+      storagePath: enrollment.audioPath,
+    })
+    if (enrollment.embedding) {
+      locations.push({
+        locationCode: 'L17',
+        objectType: 'SubjectVoiceEnrollment.embedding',
         objectId: enrollment.id,
         storagePath: null,
       })
@@ -326,6 +397,64 @@ const handlers = {
     return 'DONE'
   },
 
+  // --- audio ---------------------------------------------------------------
+
+  async SEGMENT(loc, job) {
+    // The rows are NOT deleted, they are stripped of the person.
+    //
+    // Deleting them would destroy the start/end timings, and those timings are
+    // the only thing that can mute this voice out of a recording other speakers
+    // are still entitled to. What makes a segment personal data is the
+    // attribution — subjectId, consentId, the match score that says "this is
+    // them". With those gone the row is redaction metadata: "someone spoke here,
+    // and it is muted".
+    const { count } = await prisma.audioSegment.updateMany({
+      where: { recordingId: loc.objectId, subjectId: job.subjectId },
+      data: { subjectId: null, consentId: null, action: 'REDACT_VOICE', matchScore: null },
+    })
+    return count > 0 ? 'DONE' : 'SKIPPED'
+  },
+
+  async L15(loc, job) {
+    const remaining = await prisma.audioSegment.count({
+      where: { recordingId: loc.objectId, subjectId: { not: null } },
+    })
+
+    if (remaining > 0) {
+      // Other identified speakers are still on this recording, and their consent
+      // to their own voice survives this subject's erasure. Rebuild with the
+      // erased speaker muted rather than destroying their recording too.
+      await rebuildRedactedForRemainingSpeakers(loc.objectId)
+      return 'DONE'
+    }
+
+    if (loc.storagePath && (await fileExists(loc.storagePath))) await shredFile(loc.storagePath)
+    await prisma.recording.updateMany({ where: { id: loc.objectId }, data: { redactedPath: null } })
+    return 'DONE'
+  },
+
+  async L14(loc, job) {
+    // Mirrors L2 exactly. The original is retained while any identified speaker
+    // remains, because it is the source every future re-mute is built from —
+    // shredding it would leave a row pointing at bytes that no longer exist and
+    // make the recording permanently un-re-mutable, so a second speaker's
+    // erasure could never be honoured.
+    const remaining = await prisma.audioSegment.count({
+      where: { recordingId: loc.objectId, subjectId: { not: null } },
+    })
+
+    if (remaining > 0) {
+      logger.info(
+        { recordingId: loc.objectId, remaining, purgeJobId: job.id },
+        'recording original retained — other speakers still hold consent to this recording',
+      )
+      return 'SKIPPED'
+    }
+
+    const { destroyed } = await destroyRecording(loc.objectId)
+    return destroyed ? 'DONE' : 'SKIPPED'
+  },
+
   async L4(loc) {
     if (loc.storagePath && (await fileExists(loc.storagePath))) await shredFile(loc.storagePath)
     return 'DONE'
@@ -333,6 +462,20 @@ const handlers = {
 
   async L5_ROW(loc) {
     const { count } = await prisma.subjectFaceEnrollment.deleteMany({ where: { id: loc.objectId } })
+    return count > 0 ? 'DONE' : 'SKIPPED'
+  },
+
+  // The voice pair, identical in shape to L4/L5_ROW. Separate handlers rather
+  // than a shared one keyed on objectType: these delete from different tables,
+  // and a single handler that guessed which would be one refactor away from
+  // reporting DONE on a row it never touched.
+  async L16(loc) {
+    if (loc.storagePath && (await fileExists(loc.storagePath))) await shredFile(loc.storagePath)
+    return 'DONE'
+  },
+
+  async L17_ROW(loc) {
+    const { count } = await prisma.subjectVoiceEnrollment.deleteMany({ where: { id: loc.objectId } })
     return count > 0 ? 'DONE' : 'SKIPPED'
   },
 

@@ -45,6 +45,19 @@ async function loadSession(sessionId, admin, { include } = {}) {
   return session
 }
 
+/**
+ * The session-scoping half of the two-guard pattern, exported for other media
+ * modules to reuse.
+ *
+ * The router proves the ROLE may touch session media; this proves THIS caller
+ * may touch THIS session — agent-owns-session, dataOwner-owns-project. Audio
+ * shipped without it and was reachable across sessions by uuid alone; anything
+ * that adds a new media type must route through here rather than reimplement it.
+ */
+export async function loadSessionForMedia(sessionId, admin, options) {
+  return loadSession(sessionId, admin, options)
+}
+
 function assertStatus(session, ...allowed) {
   if (!allowed.includes(session.status)) {
     throw new ApiError(409, `Session is ${session.status} — this action is not allowed`)

@@ -193,8 +193,20 @@ async function checkDatabase() {
       pass('postgrest-exposure', 'anon and authenticated hold no table privileges')
     }
 
+    // `rolled_back_at IS NULL` is load-bearing. A migration resolved with
+    // `prisma migrate resolve --rolled-back` keeps its row with finished_at
+    // still null, forever — that is how Prisma records "this attempt failed and
+    // was retired", and `prisma migrate status` correctly ignores those rows.
+    // Counting them made this check permanently red on any database where a
+    // migration had ever been retried, which here means every one of them: the
+    // DIRECT_URL/42501 trap fails a migration part-way, you resolve it, you
+    // re-run it, and the successful attempt lands as a second row. Four such
+    // rows had accumulated, all with a rolled_back_at, all superseded — while
+    // Prisma itself reported the schema up to date. A production start would
+    // have been blocked by history rather than by anything pending.
     const pending = await prisma.$queryRawUnsafe(
-      `SELECT count(*)::int AS n FROM "_prisma_migrations" WHERE finished_at IS NULL`,
+      `SELECT count(*)::int AS n FROM "_prisma_migrations"
+        WHERE finished_at IS NULL AND rolled_back_at IS NULL`,
     )
     if (pending[0]?.n > 0) fail('migrations', `${pending[0].n} migration(s) not finished`)
     else pass('migrations', 'all applied')

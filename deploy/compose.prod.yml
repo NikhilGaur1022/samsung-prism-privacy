@@ -1,0 +1,131 @@
+# PRISM — always-on demo stack, single host.
+#
+# Differs from backend/docker-compose.yml (a dev dependency-only stack) by
+# running the API, all four workers, and a TLS terminator as well.
+#
+# The four workers are separate services but share `media` with the API on
+# purpose: storage.js is a local-disk store and retention.worker.js plus the
+# DSAR purge/export services all write into the same tree. Splitting them
+# across hosts needs an S3 port first — see docs/DEPLOY.md §6.
+
+name: prism
+
+x-backend-env: &backend-env
+  # Container-internal addresses, set here rather than in prod.env so a stale
+  # localhost value copied from a dev .env cannot override them.
+  QDRANT_URL: http://qdrant:6333
+  REDIS_URL: redis://redis:6379
+  FACE_SERVICE_URL: http://face-worker:8001
+  PII_SERVICE_URL: http://image-pii-worker:8002
+  AUDIO_SERVICE_URL: http://audio-worker:8003
+  STORAGE_ROOT: /data/media
+  NODE_ENV: production
+  AUTH_PROVIDER: real
+  PORT: "4000"
+  APP_BASE_URL: https://${USER_HOST}
+  USER_PORTAL_URL: https://${USER_HOST}
+  ADMIN_APP_BASE_URL: https://${ADMIN_HOST}
+  CORS_ORIGINS: https://${USER_HOST},https://${ADMIN_HOST}
+
+x-backend-base: &backend-base
+  build:
+    context: ../backend
+  image: prism-backend:local
+  env_file: [./prod.env]
+  environment: *backend-env
+  volumes:
+    - media:/data/media
+  depends_on:
+    redis: { condition: service_healthy }
+    qdrant: { condition: service_started }
+  restart: unless-stopped
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    ports: ["80:80", "443:443"]
+    environment:
+      USER_HOST: ${USER_HOST}
+      ADMIN_HOST: ${ADMIN_HOST}
+      API_HOST: ${API_HOST}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./www/user:/srv/user:ro
+      - ./www/admin:/srv/admin:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [backend]
+    restart: unless-stopped
+
+  backend:
+    <<: *backend-base
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:4000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # All four are long-lived and unsupervised by the API process. An absent one
+  # fails silently rather than loudly — see docs/DEPLOY.md §6 for what each
+  # stops doing.
+  worker-recognition:
+    <<: *backend-base
+    command: ["node", "src/workers/recognition.worker.js"]
+
+  worker-redaction:
+    <<: *backend-base
+    command: ["node", "src/workers/redaction.worker.js"]
+
+  worker-purge:
+    <<: *backend-base
+    command: ["node", "src/workers/purge.worker.js"]
+
+  worker-retention:
+    <<: *backend-base
+    command: ["node", "src/workers/retention.worker.js"]
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    volumes: [qdrant_storage:/qdrant/storage]
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: [redis_data:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  face-worker:
+    build: ../face-worker
+    # ~300MB of insightface weights fetch on first run. Without this volume
+    # they re-download on every restart.
+    volumes: [face_models:/models]
+    restart: unless-stopped
+
+  image-pii-worker:
+    build: ../ai-core/image-pii-worker
+    restart: unless-stopped
+
+  # Off unless explicitly enabled: `docker compose --profile audio up -d`.
+  # Needs HF_TOKEN in ../ai-core/audio-worker/.env and roughly 4GB of RAM on
+  # CPU. Leave AUDIO_CAPTURE_ENABLED unset in prod.env when this is not running
+  # — the recording routes then answer 503 instead of hanging.
+  audio-worker:
+    profiles: [audio]
+    build: ../ai-core/audio-worker
+    env_file: [../ai-core/audio-worker/.env]
+    restart: unless-stopped
+
+volumes:
+  media:
+  qdrant_storage:
+  redis_data:
+  face_models:
+  caddy_data:
+  caddy_config:

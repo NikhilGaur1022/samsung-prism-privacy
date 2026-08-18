@@ -1,0 +1,28 @@
+# Certificates are issued over the HTTP-01 challenge, so ports 80 AND 443 must
+# be reachable from the internet — on Oracle that means the VCN security list
+# *and* the instance's own iptables. See README §2.
+
+{$USER_HOST} {
+	root * /srv/user
+	encode gzip zstd
+	# SPA: react-router owns the path space, so unknown paths are the app's
+	# problem, not a 404.
+	try_files {path} /index.html
+	file_server
+}
+
+{$ADMIN_HOST} {
+	root * /srv/admin
+	encode gzip zstd
+	try_files {path} /index.html
+	file_server
+}
+
+{$API_HOST} {
+	# Media downloads and DSAR export packages can be large and slow to build.
+	reverse_proxy backend:4000 {
+		transport http {
+			read_timeout 300s
+		}
+	}
+}

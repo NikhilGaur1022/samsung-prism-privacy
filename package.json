@@ -1,0 +1,32 @@
+{
+  "name": "prism",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Root task runner. Nothing is built or published from here \u2014 this exists so the nine processes the stack needs can be started with one command instead of nine terminals.",
+  "scripts": {
+    "up": "npm run stop:apps && node scripts/ensure-docker.js && npm run deps && npm run dev",
+    "stop": "npm run stop:apps && npm run deps:down",
+    "stop:apps": "node scripts/free-ports.js",
+    "dev": "concurrently -k -p \"[{name}]\" -n api,recognition,redaction,purge,retention,user,admin -c blue,magenta,yellow,red,gray,green,cyan \"npm run dev:api\" \"npm run dev:recognition\" \"npm run dev:redaction\" \"npm run dev:purge\" \"npm run dev:retention\" \"npm run dev:user\" \"npm run dev:admin\"",
+    "deps": "docker compose -f backend/docker-compose.yml up -d",
+    "deps:down": "docker compose -f backend/docker-compose.yml down",
+    "deps:logs": "docker compose -f backend/docker-compose.yml logs -f",
+    "dev:api": "npm --prefix backend run dev",
+    "dev:recognition": "npm --prefix backend run worker",
+    "dev:redaction": "npm --prefix backend run worker:redaction",
+    "dev:purge": "npm --prefix backend run worker:purge",
+    "dev:retention": "npm --prefix backend run worker:retention",
+    "dev:user": "npm --prefix user-portal run dev",
+    "dev:admin": "npm --prefix admin-portal run dev",
+    "preflight": "npm --prefix backend run preflight",
+    "migrate": "npm --prefix backend exec -- prisma migrate deploy",
+    "seed:admins": "node backend/scripts/dev-seed-admins.js",
+    "test": "npm --prefix backend test",
+    "lint": "npm --prefix user-portal run lint && npm --prefix admin-portal run lint",
+    "install:all": "npm install && npm --prefix backend ci && npm --prefix user-portal ci && npm --prefix admin-portal ci"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  },
+  "type": "module"
+}

@@ -502,11 +502,7 @@ export default function SessionDetail() {
                 </ul>
               </div>
             )}
-            <RecordingsPanel
-              sessionId={sessionId}
-              participants={session.participants}
-              capturing={capturing}
-            />
+            <RecordingsPanel sessionId={sessionId} capturing={capturing} />
           </section>
 
           <section className="rounded-card bg-surface p-6 shadow-card">

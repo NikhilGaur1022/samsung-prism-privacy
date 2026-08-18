@@ -1,5 +1,6 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import AppLayout from './components/AppLayout'
+import RequireAuth from './components/RequireAuth'
 import Login from './pages/Login'
 import Register from './pages/Register'
 import Verify from './pages/Verify'
@@ -30,7 +31,14 @@ export default function App() {
         <Route path="/enroll" element={<Enroll />} />
         <Route path="/join/:token" element={<Join />} />
         <Route path="/" element={<Navigate to="/login" replace />} />
-        <Route element={<AppLayout />}>
+        {/* Everything below this line requires a subject session. */}
+        <Route
+          element={
+            <RequireAuth>
+              <AppLayout />
+            </RequireAuth>
+          }
+        >
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/projects" element={<Projects />} />
           <Route path="/consent" element={<ConsentHub />} />

@@ -4,17 +4,21 @@ import PageHeader from '../../components/PageHeader'
 import ListPanel from '../../components/ListPanel'
 import StatusPill from '../../components/StatusPill'
 import SelfieCapture from '../../components/SelfieCapture'
+import VoiceCapture from '../../components/VoiceCapture'
 import { useMockQuery } from '../../lib/useMockQuery'
 import {
   addEnrollment,
+  addVoiceEnrollment,
   deleteEnrollment,
+  deleteVoiceEnrollment,
   enrollmentImageUrl,
   listEnrollments,
   listSubjects,
+  listVoiceEnrollments,
   registerSubject,
   verifySubjectOtp,
 } from '../../lib/api'
-import { ScanFace, Trash2, UserCheck, UserPlus, X } from 'lucide-react'
+import { Mic, ScanFace, Trash2, UserCheck, UserPlus, X } from 'lucide-react'
 
 const GROUPS = [
   { value: 'SAMSUNG_EMPLOYEE', label: 'Samsung Employee' },
@@ -30,6 +34,112 @@ const FIELD_CLASS =
 // Without an enrolled photo a subject can never be auto-matched — every one of
 // their faces lands in the agent's manual queue instead.
 const POSES = ['FRONT', 'LEFT', 'RIGHT', 'UP', 'DOWN']
+
+// Voice half of the enrollment panel. Kept as its own component with its own
+// state so that a failure on one modality does not blank the other: with audio
+// switched off the whole voice block collapses to a single line, and the face
+// flow above it carries on exactly as before.
+//
+// Without an enrolled voice a subject is not recognised in any recording, and
+// every turn they speak is muted as unidentified — the audio equivalent of
+// landing in the manual queue, except there is no queue to rescue it from.
+function VoiceEnrollmentSection({ subject }) {
+  const [data, setData] = useState(null)
+  const [disabledReason, setDisabledReason] = useState(null)
+  const [error, setError] = useState(null)
+  const [busy, setBusy] = useState(false)
+
+  const reload = useCallback(
+    () =>
+      listVoiceEnrollments(subject.masterUserId)
+        .then((res) => {
+          setData(res)
+          setDisabledReason(null)
+        })
+        .catch((err) => {
+          // 503 is the AUDIO_CAPTURE_ENABLED kill switch, not a fault. Rendering
+          // it as an error would train agents to ignore the banner in the one
+          // environment where it does mean something broke.
+          if (err.status === 503) setDisabledReason(err.message)
+          else setError(err)
+        }),
+    [subject.masterUserId],
+  )
+
+  useEffect(() => {
+    reload()
+  }, [reload])
+
+  const run = async (fn) => {
+    setBusy(true)
+    setError(null)
+    try {
+      await fn()
+      await reload()
+    } catch (err) {
+      setError(err)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (disabledReason) {
+    return (
+      <div className="mt-5 border-t border-border pt-5">
+        <p className="flex items-start gap-1.5 text-xs font-medium text-ink-faint">
+          <Mic size={13} strokeWidth={2} className="mt-0.5 shrink-0" />
+          {/* The server's 503 text is an ops instruction naming an environment
+              variable. Held in state for the console, not shown to the agent. */}
+          Voice enrollment is switched off for this deployment — photo enrollment only.
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="mt-5 border-t border-border pt-5">
+      {data && data.items.length > 0 && (
+        <ul className="mb-4 space-y-2">
+          {data.items.map((clip) => (
+            <li
+              key={clip.id}
+              className="flex items-center justify-between gap-3 rounded-lg bg-canvas px-3 py-2"
+            >
+              {/*
+                Duration and date, no player. An agent confirms the capture
+                worked from the fact that a clip of a plausible length exists;
+                the backend exposes playback to the subject alone.
+              */}
+              <span className="text-xs font-semibold text-ink">
+                {clip.durationSec == null ? '—' : `${clip.durationSec.toFixed(1)}s`}
+                <span className="ml-2 font-medium text-ink-faint">
+                  {clip.source === 'SELF' ? 'self-recorded' : 'agent-recorded'} ·{' '}
+                  {new Date(clip.createdAt).toLocaleDateString()}
+                </span>
+              </span>
+              <button
+                onClick={() => run(() => deleteVoiceEnrollment(subject.masterUserId, clip.id))}
+                disabled={busy}
+                className="rounded-md p-1 text-ink-faint hover:text-danger disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger"
+                aria-label="Delete voice clip"
+              >
+                <Trash2 size={13} strokeWidth={2} />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <VoiceCapture
+        onCapture={(blob) => run(() => addVoiceEnrollment(subject.masterUserId, blob))}
+        busy={busy}
+        error={error?.message}
+        count={data?.items.length ?? 0}
+        max={data?.max ?? 3}
+      />
+    </div>
+  )
+}
 
 function EnrollmentPanel({ subject, onClose, onCountChange }) {
   const [data, setData] = useState(null)
@@ -71,10 +181,11 @@ function EnrollmentPanel({ subject, onClose, onCountChange }) {
     <div className="mt-6 max-w-xl rounded-card bg-surface p-6 shadow-card">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <h2 className="text-sm font-bold text-ink">Face enrollment — {subject.fullName}</h2>
+          <h2 className="text-sm font-bold text-ink">Enrollment — {subject.fullName}</h2>
           <p className="mt-0.5 text-xs font-medium text-ink-faint">
-            The photo and the face measurements taken from it are stored encrypted, used only to
-            match this person to their own pictures, and deleted when consent is withdrawn.
+            The photo and voice clip, and the measurements taken from them, are stored encrypted,
+            used only to match this person to their own pictures and their own speech, and deleted
+            when consent is withdrawn.
           </p>
         </div>
         <button
@@ -135,6 +246,8 @@ function EnrollmentPanel({ subject, onClose, onCountChange }) {
           max={data?.max ?? 3}
         />
       </div>
+
+      <VoiceEnrollmentSection subject={subject} />
     </div>
   )
 }
@@ -309,7 +422,7 @@ export default function SubjectVerification() {
                       onClick={() => setEnrolling(s)}
                       className="flex items-center gap-1.5 rounded-lg bg-brand-soft px-3 py-1.5 text-xs font-semibold text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
                     >
-                      <ScanFace size={14} strokeWidth={2} /> Face photos
+                      <ScanFace size={14} strokeWidth={2} /> Enrollment
                     </button>
                   </div>
                 ) : (

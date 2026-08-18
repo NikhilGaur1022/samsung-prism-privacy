@@ -37,10 +37,20 @@ services:
       - "8002:8002"
     restart: unless-stopped
   audio-worker:
+    # Opt-in: `docker compose --profile audio up -d`. The image is built from
+    # nvidia/cuda and pulls ~270 apt packages plus torch — a multi-GB, ~20min
+    # build. Nothing else in the stack needs it, and with AUDIO_CAPTURE_ENABLED
+    # unset the backend's recording routes answer 503 without ever calling it,
+    # so building it by default costs a long wait for an unreachable service.
+    profiles: [audio]
     build: ../ai-core/audio-worker
     container_name: prism-audio-worker
+    # Optional so the whole stack still comes up on a machine that has not
+    # configured audio. Without `required: false` a missing .env fails every
+    # service in the file, not just this one.
     env_file:
-      - ../ai-core/audio-worker/.env
+      - path: ../ai-core/audio-worker/.env
+        required: false
     ports:
       - "8003:8003"
     restart: unless-stopped

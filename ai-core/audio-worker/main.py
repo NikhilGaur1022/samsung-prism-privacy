@@ -14,7 +14,6 @@ import logging
 import os
 import shutil
 import tempfile
-import uuid
 
 from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
 
@@ -22,8 +21,14 @@ from config import settings
 from diarization import diarize
 from pii_text import find_pii_spans
 from redact import apply_mute_intervals
-from schemas import AnalyzeResponse, DiarizedSegment, PiiSpan, SpeakerMatch
-from speaker_id import extract_voice_vector, match_speaker
+from schemas import (
+    AnalyzeResponse,
+    DiarizedSegment,
+    EmbedResponse,
+    PiiSpan,
+    SpeakerEmbedding,
+)
+from speaker_id import audio_duration_sec, extract_voice_vector
 from transcription import transcribe
 
 logger = logging.getLogger("audio-worker")
@@ -49,50 +54,65 @@ def _speaker_at(turns: list[dict], t: float) -> str | None:
     return None
 
 
-@app.post(f"{settings.API_V1_STR}/analyze", response_model=AnalyzeResponse)
-async def analyze(
-    main_audio: UploadFile = File(...),
-    voice_snippets: list[UploadFile] = File(default=[]),
-    snippet_muids: str = Form(default="[]"),
-):
-    """Detection only — no consent lookups, no redaction decisions.
+@app.post(f"{settings.API_V1_STR}/embed", response_model=EmbedResponse)
+async def embed(audio: UploadFile = File(...)):
+    """One clip in, one 192-d speaker vector out. The enrollment path.
 
-    `snippet_muids` is a JSON array positionally aligned with
-    `voice_snippets`, e.g. '["<subject-uuid-1>", "<subject-uuid-2>"]' for two
-    uploaded reference snippets. The caller (backend) already knows which
-    subjects are on this project and supplies their enrollment voice clips —
-    this worker never looks that up itself.
+    Deliberately says nothing about identity: it does not know whose voice
+    this is, does not compare it to anything, and has no way to. The backend
+    seals what comes back under the subject's own DEK and stores it as a
+    SubjectVoiceEnrollment — see backend/src/modules/enrollment/
+    voiceEnrollment.service.js.
     """
-    try:
-        muids = json.loads(snippet_muids)
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=400, detail="snippet_muids must be a JSON array")
+    with tempfile.TemporaryDirectory() as tmp:
+        ext = os.path.splitext(audio.filename or "")[1] or ".wav"
+        path = os.path.join(tmp, f"clip{ext}")
+        with open(path, "wb") as f:
+            shutil.copyfileobj(audio.file, f)
 
-    if len(muids) != len(voice_snippets):
-        raise HTTPException(
-            status_code=400,
-            detail="snippet_muids length must match voice_snippets length",
-        )
+        try:
+            duration = audio_duration_sec(path)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400, detail=f"Unreadable audio: {exc}"
+            ) from exc
 
+        if duration <= 0:
+            raise HTTPException(status_code=400, detail="Clip contains no audio")
+
+        try:
+            vector = extract_voice_vector(path)
+        except Exception as exc:
+            # 502, not 400: the clip was readable, so this is the model
+            # failing, not the caller. The distinction matters because the
+            # backend turns 400 into "re-record" advice for the subject and
+            # 502 into an operational error — telling someone to re-record
+            # because a model crashed wastes their time and hides an outage.
+            logger.exception("Voice embedding failed")
+            raise HTTPException(
+                status_code=502, detail=f"Voice embedding failed: {exc}"
+            ) from exc
+
+    return EmbedResponse(embedding=vector, dim=len(vector), duration_sec=duration)
+
+
+@app.post(f"{settings.API_V1_STR}/analyze", response_model=AnalyzeResponse)
+async def analyze(main_audio: UploadFile = File(...)):
+    """Detection only — no consent lookups, no redaction decisions, and as of
+    the gallery migration, no identity decisions either.
+
+    This endpoint used to accept `voice_snippets` + `snippet_muids`: reference
+    clips uploaded alongside every request and re-embedded on every call. That
+    made speaker identity depend on whoever remembered to attach the right
+    WAVs, and meant the worker was matching people. Now it returns one
+    embedding per diarized speaker slot and the backend searches its own
+    gallery of enrolled subjects, which is where consent lives.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         audio_ext = os.path.splitext(main_audio.filename or "")[1] or ".wav"
         audio_path = os.path.join(tmp, f"main{audio_ext}")
         with open(audio_path, "wb") as f:
             shutil.copyfileobj(main_audio.file, f)
-
-        registered_vectors: dict[str, list[float]] = {}
-        for muid, snippet in zip(muids, voice_snippets):
-            snippet_ext = os.path.splitext(snippet.filename or "")[1] or ".wav"
-            snippet_path = os.path.join(tmp, f"snippet_{uuid.uuid4().hex}{snippet_ext}")
-            with open(snippet_path, "wb") as f:
-                shutil.copyfileobj(snippet.file, f)
-            try:
-                registered_vectors[muid] = extract_voice_vector(snippet_path)
-            except Exception as exc:
-                # One bad reference snippet must not fail the whole request —
-                # that subject simply can't be matched, which the response
-                # will reflect via an unmatched speaker slot.
-                logger.warning("Could not embed voice snippet for %s: %s", muid, exc)
 
         try:
             turns = diarize(audio_path)
@@ -113,24 +133,40 @@ async def analyze(
             if current is None or duration > (current["end"] - current["start"]):
                 best_turn_by_speaker[turn["speaker_id"]] = turn
 
-        speaker_matches: list[SpeakerMatch] = []
+        speaker_embeddings: list[SpeakerEmbedding] = []
         for speaker_id, turn in best_turn_by_speaker.items():
             duration = turn["end"] - turn["start"]
-            if duration < settings.MIN_UTTERANCE_DURATION or not registered_vectors:
-                speaker_matches.append(
-                    SpeakerMatch(speaker_id=speaker_id, matched_muid=None, score=0.0)
+            if duration < settings.MIN_UTTERANCE_DURATION:
+                speaker_embeddings.append(
+                    SpeakerEmbedding(
+                        speaker_id=speaker_id,
+                        embedding=None,
+                        longest_turn_sec=duration,
+                        reason="TURN_TOO_SHORT",
+                    )
                 )
                 continue
             try:
-                embedding = extract_voice_vector(audio_path, turn["start"], turn["end"])
-                muid, score = match_speaker(
-                    embedding, registered_vectors, settings.SIMILARITY_THRESHOLD
-                )
+                vector = extract_voice_vector(audio_path, turn["start"], turn["end"])
             except Exception as exc:
-                logger.warning("Speaker match failed for %s: %s", speaker_id, exc)
-                muid, score = None, 0.0
-            speaker_matches.append(
-                SpeakerMatch(speaker_id=speaker_id, matched_muid=muid, score=score)
+                # One slot failing must not fail the whole analysis: the other
+                # speakers' results are still valid and still needed. This slot
+                # comes back with no embedding, which the backend reads as
+                # unidentifiable and therefore mutes.
+                logger.warning("Speaker embedding failed for %s: %s", speaker_id, exc)
+                speaker_embeddings.append(
+                    SpeakerEmbedding(
+                        speaker_id=speaker_id,
+                        embedding=None,
+                        longest_turn_sec=duration,
+                        reason="EMBEDDING_FAILED",
+                    )
+                )
+                continue
+            speaker_embeddings.append(
+                SpeakerEmbedding(
+                    speaker_id=speaker_id, embedding=vector, longest_turn_sec=duration
+                )
             )
 
         segments_out: list[DiarizedSegment] = []
@@ -166,7 +202,7 @@ async def analyze(
 
         return AnalyzeResponse(
             segments=segments_out,
-            speaker_matches=speaker_matches,
+            speaker_embeddings=speaker_embeddings,
             pii_spans=pii_spans_out,
         )
 

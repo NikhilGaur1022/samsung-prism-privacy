@@ -294,6 +294,43 @@ export function deleteEnrollment(subjectId, id) {
 export const enrollmentImageUrl = (subjectId, id) =>
   `${BASE_URL}/api/v1/subjects/${subjectId}/enrollments/${id}/image`
 
+// --- Voice enrollment --------------------------------------------------------
+
+// These answer 503 unless AUDIO_CAPTURE_ENABLED is on, which is why the panel
+// treats that one status as "voice capture is off here" rather than an error to
+// shout about — and only that one, so a real fault still surfaces.
+//
+// There is deliberately no voiceEnrollmentAudioUrl to match enrollmentImageUrl:
+// the backend exposes playback only to the subject themselves. An agent confirms
+// a capture worked from its duration, not by listening to it.
+export async function addVoiceEnrollment(subjectId, blob) {
+  const form = new FormData()
+  form.append('audio', blob, blob.name ?? 'voice.webm')
+
+  const res = await fetch(`${BASE_URL}/api/v1/subjects/${subjectId}/voice-enrollments`, {
+    method: 'POST',
+    credentials: 'include',
+    body: form,
+  })
+
+  const body = await res.json().catch(() => null)
+  if (!res.ok) {
+    const error = new Error(body?.error ?? `Voice enrollment failed with status ${res.status}`)
+    error.status = res.status
+    throw error
+  }
+  clearApiCache()
+  return body
+}
+
+export function listVoiceEnrollments(subjectId) {
+  return request(`/api/v1/subjects/${subjectId}/voice-enrollments`)
+}
+
+export function deleteVoiceEnrollment(subjectId, id) {
+  return request(`/api/v1/subjects/${subjectId}/voice-enrollments/${id}`, { method: 'DELETE' })
+}
+
 // --- Handoffs (data admin) ---------------------------------------------------
 
 export function listHandoffs(params = {}) {
@@ -674,24 +711,23 @@ export async function uploadRecording(sessionId, file) {
   return body
 }
 
-// `snippets` is an array of { subjectId, file } — built by the UI from
-// explicit (subject, file) pairs the agent chose, not by positional index.
-// That's a deliberate difference from how this endpoint was first tested by
-// hand with curl: pairing by array position there was a trust-the-caller
-// shortcut for testing, not something a real UI should reproduce. Here the
-// pairing is structural (each snippet carries its own subjectId), so it's
-// still sent as two positionally-aligned arrays on the wire (that's the
-// backend's contract), but the *construction* of that alignment happens from
-// real (subject, file) objects, so there's no window for a UI bug to send
-// mismatched pairs the way a hand-typed curl command could.
-export async function analyzeRecording(sessionId, recordingId, snippets) {
-  const form = new FormData()
-  form.append('snippet_muids', JSON.stringify(snippets.map((s) => s.subjectId)))
-  for (const s of snippets) form.append('voice_snippets', s.file)
-
+// No body. This used to upload reference clips as `voice_snippets` paired with
+// `snippet_muids`, and the comment here was about getting that pairing right —
+// the UI built it from explicit (subject, file) objects so a positional bug
+// could not mismatch them. That whole problem is gone: speaker identity now
+// comes from the subjects' persisted voice enrollments, which the backend loads
+// into a per-recording gallery itself. The client cannot influence who gets
+// recognised, which is a stronger guarantee than pairing carefully.
+//
+// Returns { segments, gallery }. `gallery` reports how the roster was covered —
+// `notEnrolled` are people with no voice print (an agent can fix that by
+// enrolling them), `broken` are people who have one that could not be loaded (a
+// fault, not a gap). Both end up muted, so the UI has to be able to tell the
+// operator which happened.
+export async function analyzeRecording(sessionId, recordingId) {
   const res = await fetch(
     `${BASE_URL}/api/v1/sessions/${sessionId}/recordings/${recordingId}/analyze`,
-    { method: 'POST', credentials: 'include', body: form },
+    { method: 'POST', credentials: 'include' },
   )
 
   const body = await res.json().catch(() => null)

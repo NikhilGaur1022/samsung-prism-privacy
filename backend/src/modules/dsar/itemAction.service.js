@@ -6,7 +6,8 @@ import { logger } from '../../lib/logger.js'
 import { enqueueRedaction } from '../../lib/redactionQueue.js'
 import { enqueueItemAction } from '../../lib/itemActionQueue.js'
 import { createPurgeJob, executePurgeJob } from './purge.service.js'
-import { markItemDeleted } from './itemIndex.service.js'
+import { markItemDeleted, indexRecording } from './itemIndex.service.js'
+import { rebuildRedactedForRemainingSpeakers } from '../recordings/recording.service.js'
 
 // The action surface. The highest-risk file in the DSAR module, because one of
 // the three verbs it exposes is irreversible.
@@ -321,6 +322,40 @@ export async function executeAction(actionId) {
     }
 
     if (action.kind === 'REDACT') {
+      // Audio: strip this subject's attributions, flip their spans to
+      // REDACT_VOICE, and rebuild the derivative with them muted. Exactly what
+      // the purge L15 handler does, because "redact me out of this recording" and
+      // "erase me from this recording someone else is still on" are the same
+      // operation — the only difference is who asked for it.
+      if (item.sourceTable === 'recordings') {
+        const recording = await prisma.recording.findUnique({
+          where: { id: item.sourceId },
+          select: { id: true },
+        })
+        if (!recording) {
+          return await finish(actionId, 'SKIPPED', { error: 'The recording no longer exists' })
+        }
+
+        await prisma.audioSegment.updateMany({
+          where: { recordingId: item.sourceId, subjectId: action.request.subjectId },
+          data: { subjectId: null, consentId: null, action: 'REDACT_VOICE', matchScore: null },
+        })
+
+        try {
+          await rebuildRedactedForRemainingSpeakers(item.sourceId)
+        } catch (err) {
+          // The derivative has already been retracted by the rebuild's own
+          // failure path, so nothing serves the un-muted voice. The action is
+          // FAILED rather than DONE because the muted copy does not exist yet.
+          return await finish(actionId, 'FAILED', {
+            error: `Re-mute failed: ${err?.message ?? err}`,
+          })
+        }
+
+        await indexRecording(item.sourceId)
+        return await finish(actionId, 'DONE')
+      }
+
       if (item.sourceTable !== 'photo_subjects') {
         // An enrollment selfie has no bystanders to blur and no derivative to
         // rebuild. Refusing is honest; pretending to redact it would not be.

@@ -99,6 +99,29 @@ export async function ingestHandoff(handoffId, admin) {
     )
   }
 
+  // The same gate for audio, which this check ignored entirely — a Recording
+  // still DEFERRED or with no muted derivative did not block a handoff, so an
+  // unmasked VOICE could leave the platform inside a dataset while an unmasked
+  // face could not. A voice is §2 sensitive personal data on the same footing.
+  //
+  // Stated as "not confirmably clear" rather than as a list of bad statuses:
+  // the clear case is exactly isRecordingRedactedAvailable's (REDACTED with a
+  // derivative on disk), and a status added later must default to blocking.
+  // DEFERRED specifically means the worker was unreachable, which schema.prisma
+  // is explicit is NOT the same as clean.
+  const unmuted = await prisma.recording.count({
+    where: {
+      sessionId: handoff.sessionId,
+      NOT: { AND: [{ status: 'REDACTED' }, { redactedPath: { not: null } }] },
+    },
+  })
+  if (unmuted > 0) {
+    throw new ApiError(
+      409,
+      `REDACTION_INCOMPLETE — ${unmuted} recording(s) in this batch have no confirmed muted copy. Ingest is blocked until the audio redaction completes.`,
+    )
+  }
+
   const updated = await prisma.sessionHandoff.update({
     where: { id: handoffId },
     data: { status: 'INGESTED', ingestedAt: new Date() },

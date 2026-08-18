@@ -23,6 +23,12 @@ import { ADMIN_ACCESS_COOKIE, SUBJECT_ACCESS_COOKIE } from '../../src/lib/cookie
 // counts as allowed — the authorization layer let it through, which is the only
 // thing this file is testing. 401/403 counts as denied.
 
+// The audio routes answer 503 when the capture flag is off, and a 503 is not a
+// refusal of WHO you are — so with the flag off this suite would pass those rows
+// without ever exercising their role gate. The middleware reads the variable per
+// request, so setting it here (after imports, before any request) is enough.
+process.env.AUDIO_CAPTURE_ENABLED = 'on'
+
 const ROLES = ['dpo', 'dataOwner', 'collectionAgent', 'dataAdmin', 'super_admin']
 const ALL = [...ROLES, 'subject', 'anon']
 
@@ -137,6 +143,40 @@ const MATRIX = {
   // enforced inside requireBreakGlass and covered by its own assertions below.
   'GET /api/v1/sessions/:sessionId/photos/:photoId/raw': A('dataAdmin', 'super_admin'),
 
+  // --- audio (matrix §B "Collection") ---
+  //
+  // NOTE: these six are gated by AUDIO_CAPTURE_ENABLED. With the flag off every
+  // caller gets 503, which this harness reads as ALLOWED — 503 is not a refusal
+  // of WHO you are. That is the correct reading (the role gate is what is under
+  // test) but it means the rows below only bite with the flag on, so the suite
+  // sets it. See `process.env.AUDIO_CAPTURE_ENABLED` at the top of this file.
+  //
+  // Capture is the owning agent's. Reads are wider because matrix §D gives
+  // dataOwner the redacted derivatives of their own project and dataAdmin the
+  // lineage — both re-scoped inside recording.service via loadSessionForMedia,
+  // so a wider role floor is not a wider reach.
+  'POST /api/v1/sessions/:sessionId/recordings': A('collectionAgent', 'super_admin'),
+  'POST /api/v1/sessions/:sessionId/recordings/:recordingId/analyze': A('collectionAgent', 'super_admin'),
+  'POST /api/v1/sessions/:sessionId/recordings/:recordingId/redact': A('collectionAgent', 'super_admin'),
+  'GET /api/v1/sessions/:sessionId/recordings': A(
+    'collectionAgent',
+    'dataOwner',
+    'dataAdmin',
+    'super_admin',
+  ),
+  'GET /api/v1/sessions/:sessionId/recordings/:recordingId': A(
+    'collectionAgent',
+    'dataOwner',
+    'dataAdmin',
+    'super_admin',
+  ),
+  'GET /api/v1/sessions/:sessionId/recordings/:recordingId/redacted': A(
+    'collectionAgent',
+    'dataOwner',
+    'dataAdmin',
+    'super_admin',
+  ),
+
   // --- subjects (identity + biometrics) ---
   'POST /api/v1/subjects': A('collectionAgent', 'super_admin'),
   'GET /api/v1/subjects': A('collectionAgent', 'super_admin'),
@@ -148,6 +188,19 @@ const MATRIX = {
   'GET /api/v1/subjects/:subjectId/enrollments': A('collectionAgent', 'super_admin'),
   'GET /api/v1/subjects/:subjectId/enrollments/:id/image': A('collectionAgent', 'super_admin'),
   'DELETE /api/v1/subjects/:subjectId/enrollments/:id': A('collectionAgent', 'super_admin'),
+  // Voice prints, on exactly the terms selfies get: capture and curation are the
+  // agent's, and both are also behind AUDIO_CAPTURE_ENABLED (see the audio note
+  // above — the flag is on for this suite, so these rows bite).
+  //
+  // There is deliberately no agent-facing playback row here. A selfie can be
+  // shown back so an agent can confirm they captured the right face; an
+  // enrollment clip tells them nothing the duration does not, and a route for it
+  // would make every enrolled subject's recorded voice listenable by any agent.
+  // If one ever appears in the router, this suite fails as unclassified, which is
+  // the intended outcome.
+  'POST /api/v1/subjects/:subjectId/voice-enrollments': A('collectionAgent', 'super_admin'),
+  'GET /api/v1/subjects/:subjectId/voice-enrollments': A('collectionAgent', 'super_admin'),
+  'DELETE /api/v1/subjects/:subjectId/voice-enrollments/:id': A('collectionAgent', 'super_admin'),
 
   // --- the principal's own surface ---
   'PATCH /api/v1/me/biometric-consent': A('subject'),
@@ -161,6 +214,14 @@ const MATRIX = {
   'GET /api/v1/me/enrollments': A('subject'),
   'GET /api/v1/me/enrollments/:id/image': A('subject'),
   'DELETE /api/v1/me/enrollments/:id': A('subject'),
+  // The principal's own voice print. Playback exists on this side and only this
+  // side — it is the §11 access right, and the subject is the one person whose
+  // hearing it discloses nothing.
+  'POST /api/v1/me/voice-enrollments': A('subject'),
+  'GET /api/v1/me/voice-enrollments': A('subject'),
+  'GET /api/v1/me/voice-enrollments/status': A('subject'),
+  'GET /api/v1/me/voice-enrollments/:id/audio': A('subject'),
+  'DELETE /api/v1/me/voice-enrollments/:id': A('subject'),
   'POST /api/v1/me/dsar': A('subject'),
   'GET /api/v1/me/dsar': A('subject'),
   'GET /api/v1/me/dsar/:requestId': A('subject'),

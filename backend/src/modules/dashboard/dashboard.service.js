@@ -45,7 +45,9 @@ async function dpoSummary() {
       tile('Awaiting approval', pendingApprovals, { href: '/dpo/project-approvals', emphasis: pendingApprovals > 0 }),
       tile('Approved projects', activeProjects),
       tile('Published notices', templates, { href: '/dpo/consent-templates' }),
-      tile('Open requests', openRequests.length, { href: '/dpo/request-oversight' }),
+      // Request Oversight was retired: the DSAR queue is now the one shared
+      // request screen and a dpo reaches the same rows, still pseudonymised.
+      tile('Open requests', openRequests.length, { href: '/dpo/dsar-queue' }),
       tile('SLA breached', breached.length, { emphasis: breached.length > 0, tone: breached.length > 0 ? 'danger' : 'ok' }),
       tile('Past internal target', internalBreached.length, { tone: internalBreached.length > 0 ? 'warn' : 'ok' }),
       tile('Open breach records', breachesOpen, { tone: breachesOpen > 0 ? 'danger' : 'ok' }),
@@ -248,13 +250,24 @@ async function superAdminSummary() {
 
   return {
     role: 'super_admin',
+    // Every other role's tiles carry an href; these did not, which made the one
+    // dashboard that can reach the whole platform the only one you could not
+    // navigate from. Unprefixed on purpose — super_admin's routes are the flat
+    // paths, and resolveHref() in the portal passes anything unprefixed through.
+    //
+    // Admin accounts, data principals and breach records have no screen of their
+    // own yet, so those three stay as counts rather than pointing somewhere that
+    // 404s. They are the standing gap on this dashboard.
     tiles: [
       tile('Admin accounts', admins),
-      tile('Projects', projects),
+      tile('Projects', projects, { href: '/my-projects' }),
       tile('Data principals', subjects),
-      tile('Open DSAR', openDsar),
+      tile('Open DSAR', openDsar, { href: '/dsar-queue', emphasis: openDsar > 0 }),
       tile('Open breaches', breaches, { tone: breaches > 0 ? 'danger' : 'ok' }),
-      tile('Break-glass (30d)', breakGlass, { tone: breakGlass > 0 ? 'warn' : 'ok' }),
+      tile('Break-glass (30d)', breakGlass, {
+        href: '/audit-logs',
+        tone: breakGlass > 0 ? 'warn' : 'ok',
+      }),
     ],
   }
 }
