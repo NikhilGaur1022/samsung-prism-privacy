@@ -28,6 +28,7 @@ import {
   UploadCloud,
   UserCheck,
   UserPlus,
+  UserX,
   Users,
   Volume2,
   VolumeX,
@@ -99,10 +100,14 @@ export default function AudioSessionDetail() {
   const [searchResults, setSearchResults] = useState([])
   const [searching, setSearching] = useState(false)
 
-  // Voice Snippets for Active Recording Analysis
-  const [snippets, setSnippets] = useState([]) // [{ subjectId, fullName, file }]
-  const [snippetSubjectId, setSnippetSubjectId] = useState('')
-  const snippetFileRef = useRef(null)
+  // Voice identification coverage for the active recording
+  // What the last analyze run was actually able to recognise. Replaces the
+  // snippet builder that used to live here: an agent no longer picks which
+  // roster member gets compared against what audio — identity comes from the
+  // subjects' own enrolled voice prints, matched in the backend against its
+  // gallery. Attaching the wrong person's clip decided who stayed unmuted, and
+  // nothing downstream could tell it had happened.
+  const [gallery, setGallery] = useState(null)
 
   // Live microphone recording state
   const [isRecordingLive, setIsRecordingLive] = useState(false)
@@ -215,28 +220,13 @@ export default function AudioSessionDetail() {
     }
   }
 
-  // Snippet attachment
-  const addSnippet = (file) => {
-    if (!snippetSubjectId || !file) return
-    const subject = session.participants?.find((p) => p.subjectId === snippetSubjectId)
-    setSnippets((prev) => [
-      ...prev.filter((s) => s.subjectId !== snippetSubjectId),
-      { subjectId: snippetSubjectId, fullName: subject?.fullName || 'Unknown', file },
-    ])
-    setSnippetSubjectId('')
-  }
-
-  const removeSnippet = (subjectId) => {
-    setSnippets((prev) => prev.filter((s) => s.subjectId !== subjectId))
-  }
-
   // Analyze active recording
   const handleAnalyze = async (recId) => {
     setBusy(true)
     setError(null)
     try {
-      await analyzeRecording(sessionId, recId, snippets)
-      setSnippets([])
+      const res = await analyzeRecording(sessionId, recId)
+      setGallery(res.gallery ?? null)
       await loadData()
     } catch (err) {
       setError(err)
@@ -600,79 +590,47 @@ export default function AudioSessionDetail() {
               </div>
             </section>
 
-            {/* Voice Snippets (Reference Voices) Section */}
-            {!isArchived && (
+            {/*
+              Who this run was actually able to recognise. Without it "everyone
+              was muted" is unreadable: it could mean nobody on the roster has
+              enrolled a voice, or that their enrollments could not be loaded.
+              Those look identical in the segment counts and call for opposite
+              responses, so they are reported as separate lines and `broken` is
+              styled as the fault it is.
+            */}
+            {gallery && (
               <section className="rounded-2xl border border-border bg-surface p-5 shadow-xs">
                 <div className="flex items-center justify-between border-b border-border pb-3">
                   <div className="flex items-center gap-2">
                     <Mic size={18} className="text-brand" />
-                    <h3 className="text-sm font-bold text-ink">Voice Identification Snippets</h3>
+                    <h3 className="text-sm font-bold text-ink">Voice Identification</h3>
                   </div>
                 </div>
 
                 <p className="mt-2 text-xs text-ink-faint">
-                  Attach reference voice clips for consented subjects. The ECAPA-TDNN neural worker uses these to match speaking turns to consenting principals.
+                  Matched against {gallery.points} enrolled voice print
+                  {gallery.points === 1 ? '' : 's'} from {gallery.enrolled} roster member
+                  {gallery.enrolled === 1 ? '' : 's'}.
                 </p>
 
-                {/* Snippets List */}
-                {snippets.length > 0 && (
-                  <div className="mt-3 space-y-1.5">
-                    {snippets.map((s) => (
-                      <div
-                        key={s.subjectId}
-                        className="flex items-center justify-between rounded-lg bg-canvas px-3 py-2 text-xs border border-border"
-                      >
-                        <div className="flex items-center gap-2">
-                          <CheckCircle2 size={14} className="text-emerald-600" />
-                          <span className="font-semibold text-ink">{s.fullName}</span>
-                          <span className="text-[10px] text-ink-faint">({s.file?.name})</span>
-                        </div>
-                        <button
-                          onClick={() => removeSnippet(s.subjectId)}
-                          className="text-ink-faint hover:text-danger"
-                        >
-                          <X size={14} />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
+                {gallery.notEnrolled > 0 && (
+                  <p className="mt-2 flex items-start gap-1.5 text-xs font-medium text-ink-faint">
+                    <UserX size={13} strokeWidth={2} className="mt-0.5 shrink-0" />
+                    {gallery.notEnrolled} roster member
+                    {gallery.notEnrolled === 1 ? ' has' : 's have'} no voice enrollment and{' '}
+                    {gallery.notEnrolled === 1 ? 'was' : 'were'} muted as unidentified. Enrol them
+                    to keep their consented speech.
+                  </p>
                 )}
 
-                {/* Add Snippet Inputs */}
-                <div className="mt-4 flex flex-col gap-2">
-                  <select
-                    value={snippetSubjectId}
-                    onChange={(e) => setSnippetSubjectId(e.target.value)}
-                    className="w-full rounded-lg border border-border bg-canvas px-3 py-2 text-xs text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
-                  >
-                    <option value="">Select roster subject…</option>
-                    {session.participants
-                      ?.filter((p) => !snippets.some((s) => s.subjectId === p.subjectId))
-                      .map((p) => (
-                        <option key={p.subjectId} value={p.subjectId}>
-                          {p.fullName} ({p.consentStatus})
-                        </option>
-                      ))}
-                  </select>
-
-                  <button
-                    onClick={() => snippetFileRef.current?.click()}
-                    disabled={!snippetSubjectId}
-                    className="w-full rounded-lg border border-border bg-canvas py-2 text-xs font-semibold text-ink hover:bg-surface disabled:opacity-50 transition"
-                  >
-                    Attach Voice Audio Clip…
-                  </button>
-                  <input
-                    ref={snippetFileRef}
-                    type="file"
-                    accept="audio/*"
-                    className="hidden"
-                    onChange={(e) => {
-                      addSnippet(e.target.files?.[0] || null)
-                      e.target.value = ''
-                    }}
-                  />
-                </div>
+                {gallery.broken > 0 && (
+                  <p className="mt-2 flex items-start gap-1.5 text-xs font-semibold text-danger">
+                    <AlertTriangle size={13} strokeWidth={2} className="mt-0.5 shrink-0" />
+                    {gallery.broken} roster member{gallery.broken === 1 ? ' has' : 's have'} an
+                    enrolled voice that could not be loaded. They were muted, but this is a fault —
+                    not a gap in the roster. Report it before relying on this result.
+                  </p>
+                )}
               </section>
             )}
           </div>
