@@ -72,6 +72,8 @@ model Subject {
   dataItems           SubjectDataItem[]
   importBatches       ImportBatch[]
   audioSegments       AudioSegment[]
+  taggedVideoTracks   VideoFaceTrack[]
+  videoLinks          VideoSubject[]
 
   // Intake-time UX defaults ONLY. Once project_consent_matrix exists (backend-plan.md
   // Phase 2), THAT table is the sole authority for any gating/consent-check logic.
@@ -458,6 +460,7 @@ model ProjectConsent {
   sessionParticipants SessionParticipant[]
   photos              PhotoSubject[]
   audioSegments       AudioSegment[]
+  videos              VideoSubject[]
 
   @@unique([subjectId, projectId])
   @@index([projectId, status])
@@ -492,6 +495,7 @@ model Session {
   handoff      SessionHandoff?
   invites      SessionInvite[]
   recordings   Recording[]
+  videos       VideoAsset[]
 
   @@index([agentId, status])
   @@index([projectId])
@@ -629,6 +633,10 @@ model FaceCluster {
   id                 String        @id @default(uuid()) @db.Uuid
   sessionId          String        @db.Uuid
   repFaceId          String?       @db.Uuid
+  // Photo faces only. Deliberately NOT redefined to include video tracks when
+  // video was added: the admin portal and the handoff counts already read this
+  // column, and silently changing what it counts would have moved numbers on
+  // screens nobody was touching. Video is counted alongside it, never inside it.
   faceCount          Int           @default(0)
   suggestedSubjectId String?       @db.Uuid
   tagStatus          FaceTagStatus @default(PENDING)
@@ -640,8 +648,19 @@ model FaceCluster {
   matchScore Float?  @map("match_score")
   autoTagged Boolean @default(false) @map("auto_tagged")
 
+  // The video half of the same card. A cluster can hold photo faces, video
+  // tracks, or both — one person tagged once covers every appearance of them in
+  // the session, which is the whole reason tracks join the existing clusters
+  // instead of getting a parallel tagging queue.
+  videoTrackCount Int     @default(0) @map("video_track_count")
+  // Set when the best representative of this cluster is a video track rather
+  // than a still. A track's crop is cut from the sharpest of several frames, so
+  // it is frequently the better card image.
+  repTrackId      String? @map("rep_track_id") @db.Uuid
+
   session          Session         @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   faces            FaceDetection[]
+  videoTracks      VideoFaceTrack[]
   suggestedSubject Subject?        @relation(fields: [suggestedSubjectId], references: [masterUserId], onDelete: SetNull)
 
   @@index([sessionId, tagStatus])
@@ -1107,6 +1126,12 @@ enum DataItemType {
   // path makes the deletion certificate a false statement, which is the one
   // failure mode this platform cannot have.
   AUDIO
+  // A session video this subject is visible in. Same rule as AUDIO: the capture
+  // path (video.service.analyzeVideo) and the erasure path (purge.service L16/
+  // L17 + rebuildRedactedVideoForRemaining) landed in the same change, because a
+  // data class that can be collected but not erased makes the deletion
+  // certificate a false statement.
+  VIDEO
 }
 
 // How the item entered the system. IMPORT items have no capture-time consent
@@ -1328,4 +1353,173 @@ model AudioSegment {
   @@index([subjectId])
   @@index([consentId])
   @@map("audio_segments")
+}
+
+// ---------------------------------------------------------------------------
+// Video capture (L16 original / L17 redacted derivative / L18 track crop)
+// ---------------------------------------------------------------------------
+
+enum VideoStatus {
+  PENDING_ANALYSIS
+  ANALYZED
+  REDACTED
+  // Fail-closed, identical in meaning to RecordingStatus.DEFERRED and
+  // PiiStatus.DEFERRED: the worker was unreachable or errored, so this clip has
+  // NOT been cleared. No derivative may be served and the handoff must not
+  // ingest the batch until a retry clears it.
+  DEFERRED
+}
+
+// A session video. Deliberately shaped like Recording, which is itself shaped
+// like Photo — same integrity columns (sha256/sizeBytes/mimeType), same encKeyId
+// so a key rotation knows what sealed it, same fail-closed status. A clip that
+// does not carry these cannot be hashed before destruction, which is what a
+// deletion certificate attests to.
+//
+// Video is NOT modelled as many Photo rows. Beyond the cost, a 2-minute clip
+// would become ~3,600 rows and the DSAR item grid would tell a principal we hold
+// three thousand photographs of them, which is false in the way that matters.
+model VideoAsset {
+  id        String  @id @default(uuid()) @db.Uuid
+  // Nullable for the same reason Photo.sessionId is: an imported clip has no
+  // capture event, therefore no session, agent or project to hang one on.
+  sessionId String? @map("session_id") @db.Uuid
+
+  storagePath  String  @map("storage_path")
+  // Bystander-blurred derivative. The original at storagePath is never
+  // overwritten — same rule as Photo.redactedPath and Recording.redactedPath.
+  redactedPath String? @map("redacted_path")
+
+  mimeType  String @default("video/mp4") @map("mime_type")
+  sha256    String @default("")
+  sizeBytes Int    @default(0) @map("size_bytes")
+
+  durationSec Float? @map("duration_sec")
+  fps         Float?
+  width       Int?
+  height      Int?
+  frameCount  Int?   @default(0) @map("frame_count")
+
+  status VideoStatus @default(PENDING_ANALYSIS)
+  // Tracked separately from `status` for the same reason Photo has both a
+  // redactedPath and a piiStatus: "faces were handled" and "printed text was
+  // handled" are different claims, and an outage in the PII detector must not
+  // be reported as a clean clip.
+  piiStatus PiiStatus @default(PENDING) @map("pii_status")
+
+  // keyId of the DEK that sealed storagePath / redactedPath. Mirrors
+  // Photo.encKeyId and Recording.encKeyId.
+  encKeyId String? @map("enc_key_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  session  Session?         @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  tracks   VideoFaceTrack[]
+  piiSpans VideoPiiSpan[]
+  subjects VideoSubject[]
+
+  @@unique([sessionId, sha256])
+  @@index([sessionId])
+  @@index([status])
+  @@map("video_assets")
+}
+
+// One person's continuous appearance in a clip — the temporal analogue of
+// FaceDetection, and the unit an agent tags.
+//
+// Face embeddings are NEVER persisted here, exactly as they are not on
+// FaceDetection. The worker returns one averaged vector per track, the
+// recognition pass clusters and matches with it in memory, and drops it. Only
+// the boxes, the crop, and (once tagged) the subject link survive.
+model VideoFaceTrack {
+  id      String  @id @default(uuid()) @db.Uuid
+  videoId String  @map("video_id") @db.Uuid
+  // Points at the SAME FaceCluster a photo face would. One card per person per
+  // session, covering both media.
+  clusterId String? @map("cluster_id") @db.Uuid
+
+  // The worker's within-clip track slot ("t0"). Meaningless across clips — only
+  // taggedSubjectId identifies a person.
+  trackId String @map("track_id")
+
+  startFrame Int   @map("start_frame")
+  endFrame   Int   @map("end_frame")
+  startSec   Float @map("start_sec")
+  endSec     Float @map("end_sec")
+
+  // Keyframed boxes: [{frame,x1,y1,x2,y2}, ...] at the detection stride. The
+  // redactor interpolates between them and holds past the ends. Storing every
+  // frame's box instead would be ~3,600 rows per person per clip to describe a
+  // path that is smooth by construction.
+  boxes Json
+
+  detScore Float? @map("det_score")
+  // Whether this track's vector could be computed at all. 0 means no frame was
+  // embeddable, which the match step must read as "not identifiable" — never as
+  // "no match", which would be indistinguishable from a confident rejection.
+  embeddedFrames Int @default(0) @map("embedded_frames")
+
+  repFrame Int?    @map("rep_frame")
+  cropPath String? @map("crop_path")
+
+  taggedSubjectId String?       @db.Uuid @map("tagged_subject_id")
+  tagStatus       FaceTagStatus @default(PENDING) @map("tag_status")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  video         VideoAsset   @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  cluster       FaceCluster? @relation(fields: [clusterId], references: [id], onDelete: SetNull)
+  taggedSubject Subject?     @relation(fields: [taggedSubjectId], references: [masterUserId], onDelete: SetNull)
+
+  @@index([videoId])
+  @@index([clusterId])
+  @@map("video_face_tracks")
+}
+
+// A run of frames over which sensitive printed text was visible.
+//
+// Carries no subjectId and no consentId, deliberately: printed PII is masked
+// whoever is holding it. That is the same rule the stills path applies (text
+// masking is not gated on biometric consent) and the audio path applies to
+// REDACT_PII spans.
+model VideoPiiSpan {
+  id      String @id @default(uuid()) @db.Uuid
+  videoId String @map("video_id") @db.Uuid
+
+  startFrame Int   @map("start_frame")
+  endFrame   Int   @map("end_frame")
+  startSec   Float @map("start_sec")
+  endSec     Float @map("end_sec")
+
+  boxes Json
+  kind  String @default("TEXT")
+
+  video VideoAsset @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@index([videoId])
+  @@map("video_pii_spans")
+}
+
+// Written at finalize. Links a clip to a person AND to the consent that permits
+// holding it — purge/DSAR walks consentId, exactly like photo_subjects and
+// audio_segments. This is the erasure key for video.
+model VideoSubject {
+  id        String @id @default(uuid()) @db.Uuid
+  videoId   String @map("video_id") @db.Uuid
+  subjectId String @map("subject_id") @db.Uuid
+  // Null ONLY on an import link for which no live ProjectConsent existed at
+  // ingest, matching PhotoSubject.consentId. The capture path never writes null:
+  // finalizeSession refuses to create a link without a consent id.
+  consentId String? @map("consent_id") @db.Uuid
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  video   VideoAsset      @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  subject Subject         @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
+  consent ProjectConsent? @relation(fields: [consentId], references: [consentId], onDelete: Cascade)
+
+  @@unique([videoId, subjectId])
+  @@index([subjectId])
+  @@index([consentId])
+  @@map("video_subjects")
 }

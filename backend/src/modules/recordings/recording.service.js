@@ -65,6 +65,36 @@ export class AudioUnavailableError extends Error {
   }
 }
 
+/**
+ * Pulls the worker's own explanation out of a failed response.
+ *
+ * Without this the backend recorded only a bare status, and the one sentence
+ * that says WHY — "HF_TOKEN is not set", "Unreadable audio", "Diarization
+ * failed" — stayed in the worker's console where nothing collects it. A 502
+ * from /analyze has at least four distinct causes and the status alone
+ * separates none of them; the audit row written on failure then carries a
+ * message no one can act on.
+ *
+ * Never throws. This runs on a path that is already failing, and losing the
+ * status because the body could not be read would be the worse trade.
+ */
+async function workerDetail(res) {
+  try {
+    const body = await res.text()
+    if (!body) return ''
+    try {
+      const detail = JSON.parse(body)?.detail
+      if (typeof detail === 'string') return ` — ${detail}`
+    } catch {
+      // Not JSON — a proxy's HTML page, say. The raw text is still better than
+      // nothing, truncated so an error page cannot flood the audit payload.
+    }
+    return ` — ${body.slice(0, 500)}`
+  } catch {
+    return ''
+  }
+}
+
 async function callAnalyze(buffer, filename) {
   const form = new FormData()
   form.append('main_audio', new Blob([buffer]), filename)
@@ -76,7 +106,9 @@ async function callAnalyze(buffer, filename) {
     throw new AudioUnavailableError(`Audio worker unreachable while analyzing ${filename}`, err)
   }
   if (!res.ok) {
-    throw new AudioUnavailableError(`Audio worker returned ${res.status} while analyzing ${filename}`)
+    throw new AudioUnavailableError(
+      `Audio worker returned ${res.status} while analyzing ${filename}${await workerDetail(res)}`,
+    )
   }
   return res.json()
 }
@@ -93,7 +125,9 @@ async function callRedact(buffer, filename, intervals) {
     throw new AudioUnavailableError(`Audio worker unreachable while redacting ${filename}`, err)
   }
   if (!res.ok) {
-    throw new AudioUnavailableError(`Audio worker returned ${res.status} while redacting ${filename}`)
+    throw new AudioUnavailableError(
+      `Audio worker returned ${res.status} while redacting ${filename}${await workerDetail(res)}`,
+    )
   }
   return Buffer.from(await res.arrayBuffer())
 }

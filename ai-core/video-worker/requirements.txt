@@ -1,0 +1,18 @@
+# Unpinned for the ML stack for the same reason face-worker is: the pinned
+# insightface 0.7.3 has no wheel for Python 3.13+ and would need a C++ toolchain
+# to build from source. This service loads the SAME buffalo_l pack face-worker
+# does — that is a correctness requirement, not a convenience. A video track
+# embedded with a different model gets compared against the session gallery's
+# ArcFace vectors by cosine similarity and produces confident nonsense.
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic
+pydantic-settings
+requests
+insightface>=1.0.1
+onnxruntime
+numpy
+# headless: this container has no display and the GUI build drags in X11 libs
+# that do nothing here but add ~120MB.
+opencv-python-headless

@@ -29,6 +29,7 @@ import { dsarRoutes } from './modules/dsar/dsar.routes.js'
 import { importRoutes } from './modules/import/import.routes.js'
 import { dashboardRoutes } from './modules/dashboard/dashboard.routes.js'
 import { recordingRoutes } from './modules/recordings/recording.routes.js'
+import { videoRoutes } from './modules/videos/video.routes.js'
 
 // The app is built here and listened to in server.js. The split exists so the
 // RBAC matrix test can mount the real application — the same routers, in the same
@@ -126,6 +127,11 @@ export function createApp() {
   // reaches that router — whether or not a route inside it matches — so mounted
   // after, those reads 403 before ever arriving here.
   app.use('/api/v1/sessions', recordingRoutes)
+  // Video, mounted ahead of sessionRoutes for exactly the reason recordingRoutes
+  // is. Its requireVideoEnabled gate is scoped to this router's own subpaths
+  // rather than the whole mount, so with VIDEO_CAPTURE_ENABLED unset the video
+  // routes 503 and every other /api/v1/sessions route falls through untouched.
+  app.use('/api/v1/sessions', videoRoutes)
   app.use('/api/v1/sessions', sessionRoutes)
   app.use('/api/v1/consent', consentRoutes)
   app.use('/auth/subject', authSubjectRoutes)

@@ -51,11 +51,45 @@ services:
     env_file:
       - path: ../ai-core/audio-worker/.env
         required: false
+    # Whisper's weights and the gated pyannote checkpoints land in the HF cache
+    # on first analyze — roughly a gigabyte, pulled over a slow gated download.
+    # Without a volume that cache lives in the container's writable layer and is
+    # thrown away by every `up --force-recreate`, so each rebuild pays for it
+    # again. Same reasoning as face_models below.
+    volumes:
+      - audio_models:/root/.cache/huggingface
     ports:
       - "8003:8003"
+    restart: unless-stopped
+
+  # Opt-in: `docker compose --profile video up -d`. Same reasoning as
+  # audio-worker above — nothing else in the stack needs it, and with no
+  # VideoAsset rows the recognition pass never calls it, so a session of photos
+  # behaves identically whether this is running or not. Building it by default
+  # would add an opencv/insightface image to every `npm run deps`.
+  video-worker:
+    profiles: [video]
+    build: ../ai-core/video-worker
+    container_name: prism-video-worker
+    environment:
+      # Reached over the compose network, not localhost: the PII detector is a
+      # fail-closed dependency of /analyze, and pointing this at the host would
+      # make every analyze 503 with a connection error that looks like the
+      # detector is broken rather than misaddressed.
+      PII_SERVICE_URL: http://image-pii-worker:8002
+    depends_on:
+      - image-pii-worker
+    # Shares face-worker's model volume. Both load the identical buffalo_l pack
+    # (a correctness requirement, not a convenience — see the worker README), so
+    # a second copy would be 300MB of duplicate download for identical bytes.
+    volumes:
+      - face_models:/models
+    ports:
+      - "8004:8004"
     restart: unless-stopped
 
 volumes:
   qdrant_storage:
   redis_data:
   face_models:
+  audio_models:

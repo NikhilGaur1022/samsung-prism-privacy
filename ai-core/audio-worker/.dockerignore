@@ -1,0 +1,7 @@
+# The token reaches the container through compose's env_file at run time. Left
+# in the build context it would be baked into an image layer by `COPY . .`, so
+# every copy of the image would carry the secret.
+.env
+.venv/
+__pycache__/
+*.pyc

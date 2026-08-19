@@ -77,10 +77,16 @@ function Bad  ($m) { Write-Host "  [fail] $m" -ForegroundColor Red }
 
 # --- probes -----------------------------------------------------------------
 function Test-Port([int]$Port) {
-  $c = [System.Net.Sockets.TcpClient]::new()
-  try { return $c.ConnectAsync('127.0.0.1', $Port).Wait(400) -and $c.Connected }
-  catch { return $false }
-  finally { $c.Dispose() }
+  # Both loopback families, because a v4-only probe lies. Vite binds ::1 only,
+  # so the portals were reported DOWN - and the whole run reported degraded -
+  # while they were serving 200s the entire time.
+  foreach ($addr in @('127.0.0.1', '::1')) {
+    $c = [System.Net.Sockets.TcpClient]::new()
+    try { if ($c.ConnectAsync($addr, $Port).Wait(400) -and $c.Connected) { return $true } }
+    catch { }
+    finally { $c.Dispose() }
+  }
+  return $false
 }
 
 function Test-Health([string]$Url) {
