@@ -30,6 +30,7 @@ import { importRoutes } from './modules/import/import.routes.js'
 import { dashboardRoutes } from './modules/dashboard/dashboard.routes.js'
 import { recordingRoutes } from './modules/recordings/recording.routes.js'
 import { videoRoutes } from './modules/videos/video.routes.js'
+import { documentRoutes } from './modules/documents/document.routes.js'
 
 // The app is built here and listened to in server.js. The split exists so the
 // RBAC matrix test can mount the real application — the same routers, in the same
@@ -132,6 +133,11 @@ export function createApp() {
   // rather than the whole mount, so with VIDEO_CAPTURE_ENABLED unset the video
   // routes 503 and every other /api/v1/sessions route falls through untouched.
   app.use('/api/v1/sessions', videoRoutes)
+  // Text documents, mounted ahead of sessionRoutes for the same reason as the
+  // three above. This router guards on requireAdminAuth alone, so mounted after
+  // sessionRoutes every request to it would hit that router's ROUTER-LEVEL
+  // requireRole('collectionAgent','super_admin') first and 403.
+  app.use('/api/v1/sessions', documentRoutes)
   app.use('/api/v1/sessions', sessionRoutes)
   app.use('/api/v1/consent', consentRoutes)
   app.use('/auth/subject', authSubjectRoutes)

@@ -165,6 +165,109 @@ recordingRoutes.get('/:sessionId/recordings/:recordingId', readRoles, async (req
   }
 })
 
+const segmentItemSchema = z.object({
+  id: z.string().uuid().optional(),
+  speakerId: z.string().default('MANUAL'),
+  subjectId: z.string().uuid().nullable().optional(),
+  consentId: z.string().uuid().nullable().optional(),
+  startSec: z.number().nonnegative(),
+  endSec: z.number().positive(),
+  action: z.enum(['KEEP', 'REDACT_VOICE', 'REDACT_PII']),
+  reason: z.string().nullable().optional(),
+  piiType: z.string().nullable().optional(),
+  matchScore: z.number().nullable().optional(),
+})
+
+const updateSegmentsSchema = z.object({
+  segments: z.array(segmentItemSchema),
+})
+
+// The agent's manual corrections from the timeline. captureRoles, not readRoles:
+// this rewrites what gets muted, and dataOwner/dataAdmin are admitted to the
+// derivatives of a session, never to deciding what goes into them.
+recordingRoutes.put(
+  '/:sessionId/recordings/:recordingId/segments',
+  captureRoles,
+  async (req, res, next) => {
+    try {
+      const sessionId = uuid.parse(req.params.sessionId)
+      const recordingId = uuid.parse(req.params.recordingId)
+      const body = updateSegmentsSchema.parse(req.body)
+      const segments = await recordingService.saveSegments(
+        sessionId,
+        recordingId,
+        body.segments,
+        req.admin,
+      )
+      res.json({ segments })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+// Byte-range aware, because the timeline seeks. Without a 206 the browser
+// re-fetches the whole file for every scrub and <audio>.currentTime on a long
+// recording simply refuses to move.
+function sendAudioWithRange(req, res, buffer, mimeType = 'audio/wav') {
+  const totalSize = buffer.length
+  res.set('Accept-Ranges', 'bytes')
+  res.set('Cache-Control', 'private, no-store')
+
+  const range = req.headers.range
+  if (!range) {
+    res.set('Content-Length', totalSize)
+    res.type(mimeType).status(200).send(buffer)
+    return
+  }
+
+  const parts = range.replace(/bytes=/, '').split('-')
+  const start = parseInt(parts[0], 10)
+  const end = parts[1] ? parseInt(parts[1], 10) : totalSize - 1
+
+  if (Number.isNaN(start) || start >= totalSize || (parts[1] && end < start)) {
+    res.set('Content-Range', `bytes */${totalSize}`)
+    res.status(416).send('Requested Range Not Satisfiable')
+    return
+  }
+
+  const chunkEnd = Math.min(end, totalSize - 1)
+  const chunk = buffer.subarray(start, chunkEnd + 1)
+
+  res.status(206)
+  res.set({
+    'Content-Range': `bytes ${start}-${chunkEnd}/${totalSize}`,
+    'Content-Length': chunk.length,
+    'Content-Type': mimeType,
+  })
+  res.send(chunk)
+}
+
+// Unredacted audio, for the agent working the timeline before archive. This is
+// the rawest read in the audio path, so it is captureRoles — the same floor as
+// upload and analyze — and it carries logAccess for the same reason the
+// break-glass photo route does: an AccessEvent is written before the blob is
+// ever decrypted (invariant 6).
+recordingRoutes.get(
+  '/:sessionId/recordings/:recordingId/raw',
+  captureRoles,
+  logAccess('RECORDING', (req) => req.params.recordingId, { purpose: 'COLLECTION' }),
+  async (req, res, next) => {
+    try {
+      const sessionId = uuid.parse(req.params.sessionId)
+      const recordingId = uuid.parse(req.params.recordingId)
+      const { buffer, mimeType } = await recordingService.readRawRecording(
+        sessionId,
+        recordingId,
+        req.admin,
+      )
+      sendAudioWithRange(req, res, buffer, mimeType)
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
 // This one DOES serve audio bytes, so it gets the same treatment as
 // GET .../photos/:photoId/redacted — an AccessEvent is written before the blob
 // is ever decrypted (invariant 6), and the response is never cached.
@@ -181,8 +284,7 @@ recordingRoutes.get(
         recordingId,
         req.admin,
       )
-      res.set('Cache-Control', 'private, no-store')
-      res.type(mimeType).send(buffer)
+      sendAudioWithRange(req, res, buffer, mimeType)
     } catch (err) {
       next(err)
     }

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { PlayCircle } from 'lucide-react'
+import { Camera, Mic, FileText, PlayCircle } from 'lucide-react'
 import Sidebar from '../../components/Sidebar'
 import PageHeader from '../../components/PageHeader'
 import { createSession, listProjects } from '../../lib/api'
@@ -13,6 +13,7 @@ export default function NewSession() {
   const { state } = useLocation()
   const [projects, setProjects] = useState([])
   const [projectId, setProjectId] = useState(state?.projectId ?? '')
+  const [sessionType, setSessionType] = useState('IMAGE') // 'IMAGE' | 'AUDIO' | 'TEXT'
   const [location, setLocation] = useState('')
   const [error, setError] = useState(null)
   const [submitting, setSubmitting] = useState(false)
@@ -33,8 +34,18 @@ export default function NewSession() {
     setSubmitting(true)
     setError(null)
     try {
-      const session = await createSession({ projectId, location: location.trim() || undefined })
-      navigate(`/sessions/${session.id}`)
+      const session = await createSession({
+        projectId,
+        location: location.trim() || undefined,
+        type: sessionType,
+      })
+      if (sessionType === 'AUDIO') {
+        navigate(`/sessions/${session.id}/audio`)
+      } else if (sessionType === 'TEXT') {
+        navigate(`/sessions/${session.id}/text`)
+      } else {
+        navigate(`/sessions/${session.id}`)
+      }
     } catch (err) {
       setError(err)
       setSubmitting(false)
@@ -63,7 +74,7 @@ export default function NewSession() {
               You have no assigned projects yet — nothing to collect for.
             </p>
           ) : (
-            <form onSubmit={handleSubmit}>
+            <form onSubmit={handleSubmit} className="space-y-5">
               <label className="block text-sm font-semibold text-ink">
                 Project
                 <select
@@ -79,7 +90,69 @@ export default function NewSession() {
                 </select>
               </label>
 
-              <label className="mt-4 block text-sm font-semibold text-ink">
+              {/* Session Modality Selector */}
+              <div>
+                <label className="block text-sm font-semibold text-ink mb-1.5">
+                  Session Type
+                </label>
+                <div className="grid grid-cols-3 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setSessionType('IMAGE')}
+                    className={`flex flex-col items-start p-3.5 rounded-xl border text-left transition ${
+                      sessionType === 'IMAGE'
+                        ? 'border-brand bg-brand-soft/40 ring-2 ring-brand'
+                        : 'border-border bg-canvas hover:bg-surface'
+                    }`}
+                  >
+                    <div className="flex items-center gap-1.5 text-ink font-bold text-xs">
+                      <Camera size={16} className={sessionType === 'IMAGE' ? 'text-brand' : 'text-ink-faint'} />
+                      <span>Image</span>
+                    </div>
+                    <p className="mt-1 text-[11px] leading-tight text-ink-faint">
+                      Face recognition, blurring, and visual PII masking.
+                    </p>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setSessionType('AUDIO')}
+                    className={`flex flex-col items-start p-3.5 rounded-xl border text-left transition ${
+                      sessionType === 'AUDIO'
+                        ? 'border-brand bg-brand-soft/40 ring-2 ring-brand'
+                        : 'border-border bg-canvas hover:bg-surface'
+                    }`}
+                  >
+                    <div className="flex items-center gap-1.5 text-ink font-bold text-xs">
+                      <Mic size={16} className={sessionType === 'AUDIO' ? 'text-brand' : 'text-ink-faint'} />
+                      <span>Audio</span>
+                    </div>
+                    <p className="mt-1 text-[11px] leading-tight text-ink-faint">
+                      Diarization, voice matching, and spoken PII muting.
+                    </p>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setSessionType('TEXT')}
+                    className={`flex flex-col items-start p-3.5 rounded-xl border text-left transition ${
+                      sessionType === 'TEXT'
+                        ? 'border-brand bg-brand-soft/40 ring-2 ring-brand'
+                        : 'border-border bg-canvas hover:bg-surface'
+                    }`}
+                  >
+                    <div className="flex items-center gap-1.5 text-ink font-bold text-xs">
+                      <FileText size={16} className={sessionType === 'TEXT' ? 'text-brand' : 'text-ink-faint'} />
+                      <span>Text</span>
+                    </div>
+                    <p className="mt-1 text-[11px] leading-tight text-ink-faint">
+                      Subject quote tagging, unconsented & PII text redaction.
+                    </p>
+                  </button>
+                </div>
+              </div>
+
+              <label className="block text-sm font-semibold text-ink">
                 Location
                 <input
                   className={FIELD_CLASS}
@@ -92,10 +165,10 @@ export default function NewSession() {
               <button
                 type="submit"
                 disabled={submitting}
-                className="mt-6 flex items-center gap-2 rounded-lg bg-brand px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-dark"
+                className="mt-6 flex items-center gap-2 rounded-lg bg-brand px-5 py-2.5 text-sm font-semibold text-white disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-dark shadow-sm transition hover:bg-brand-dark"
               >
                 <PlayCircle size={16} strokeWidth={2} />
-                {submitting ? 'Starting…' : 'Start session'}
+                {submitting ? 'Starting…' : `Start ${sessionType === 'AUDIO' ? 'Audio' : sessionType === 'TEXT' ? 'Text' : 'Image'} Session`}
               </button>
             </form>
           )}
@@ -104,3 +177,4 @@ export default function NewSession() {
     </div>
   )
 }
+

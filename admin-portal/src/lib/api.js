@@ -750,18 +750,84 @@ export function getRecording(sessionId, recordingId) {
   return request(`/api/v1/sessions/${sessionId}/recordings/${recordingId}`)
 }
 
-// Add this to the existing `mediaUrl` export object, alongside photo/faceCrop/
-// redacted/personRedacted:
-//   redactedRecording: (sessionId, recordingId) =>
-//     `${BASE_URL}/api/v1/sessions/${sessionId}/recordings/${recordingId}/redacted`,
+export function updateRecordingSegments(sessionId, recordingId, segments) {
+  return request(`/api/v1/sessions/${sessionId}/recordings/${recordingId}/segments`, {
+    method: 'PUT',
+    body: JSON.stringify({ segments }),
+  })
+}
 
- export const mediaUrl = {
-   photo: (sessionId, photoId) => `${BASE_URL}/api/v1/sessions/${sessionId}/photos/${photoId}/file`,
-   faceCrop: (sessionId, faceId) => `${BASE_URL}/api/v1/sessions/${sessionId}/faces/${faceId}/crop`,
-   redacted: (sessionId, photoId) =>
-     `${BASE_URL}/api/v1/sessions/${sessionId}/photos/${photoId}/redacted`,
-   personRedacted: (sessionId, subjectId, photoId) =>
-     `${BASE_URL}/api/v1/sessions/${sessionId}/people/${subjectId}/photos/${photoId}/redacted`,
-   redactedRecording: (sessionId, recordingId) =>
-     `${BASE_URL}/api/v1/sessions/${sessionId}/recordings/${recordingId}/redacted`,
- }
+// --- Text Documents (Collection Agent) ---------------------------------------
+
+export function listDocuments(sessionId) {
+  return request(`/api/v1/sessions/${sessionId}/documents`)
+}
+
+export function getDocument(sessionId, documentId) {
+  return request(`/api/v1/sessions/${sessionId}/documents/${documentId}`)
+}
+
+export async function uploadDocument(sessionId, payload) {
+  return request(`/api/v1/sessions/${sessionId}/documents`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function uploadDocumentFile(sessionId, file, name) {
+  const form = new FormData()
+  form.append('file', file, name || file.name)
+  if (name) form.append('name', name)
+
+  const res = await fetch(`${BASE_URL}/api/v1/sessions/${sessionId}/documents`, {
+    method: 'POST',
+    credentials: 'include',
+    body: form,
+  })
+
+  const body = await res.json().catch(() => null)
+  if (!res.ok) {
+    const error = new Error(body?.error ?? `Document upload failed with status ${res.status}`)
+    error.status = res.status
+    throw error
+  }
+  clearApiCache()
+  return body
+}
+
+export function updateDocumentSpans(sessionId, documentId, spans) {
+  return request(`/api/v1/sessions/${sessionId}/documents/${documentId}/spans`, {
+    method: 'PUT',
+    body: JSON.stringify({ spans }),
+  })
+}
+
+export function analyzeDocument(sessionId, documentId) {
+  return request(`/api/v1/sessions/${sessionId}/documents/${documentId}/analyze`, {
+    method: 'POST',
+  })
+}
+
+export function redactDocument(sessionId, documentId) {
+  return request(`/api/v1/sessions/${sessionId}/documents/${documentId}/redact`, {
+    method: 'POST',
+  })
+}
+
+export const mediaUrl = {
+  photo: (sessionId, photoId) => `${BASE_URL}/api/v1/sessions/${sessionId}/photos/${photoId}/file`,
+  faceCrop: (sessionId, faceId) => `${BASE_URL}/api/v1/sessions/${sessionId}/faces/${faceId}/crop`,
+  redacted: (sessionId, photoId) =>
+    `${BASE_URL}/api/v1/sessions/${sessionId}/photos/${photoId}/redacted`,
+  personRedacted: (sessionId, subjectId, photoId) =>
+    `${BASE_URL}/api/v1/sessions/${sessionId}/people/${subjectId}/photos/${photoId}/redacted`,
+  rawRecording: (sessionId, recordingId) =>
+    `${BASE_URL}/api/v1/sessions/${sessionId}/recordings/${recordingId}/raw`,
+  redactedRecording: (sessionId, recordingId) =>
+    `${BASE_URL}/api/v1/sessions/${sessionId}/recordings/${recordingId}/redacted`,
+  rawDocument: (sessionId, documentId) =>
+    `${BASE_URL}/api/v1/sessions/${sessionId}/documents/${documentId}/raw`,
+  redactedDocument: (sessionId, documentId) =>
+    `${BASE_URL}/api/v1/sessions/${sessionId}/documents/${documentId}/redacted`,
+}
+

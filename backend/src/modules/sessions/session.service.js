@@ -64,14 +64,16 @@ function assertStatus(session, ...allowed) {
   }
 }
 
-export async function createSession({ projectId, location }, admin) {
+export async function createSession({ projectId, location, type }, admin) {
   // Hard gate: no collection without a DPO approval and a published notice bound
   // to the project. Throws 403 PROJECT_NOT_APPROVED.
   await assertCollectable(projectId, admin)
 
-  const code = `COL-${randomInt(1000, 9999)}`
+  const sessionType = type === 'AUDIO' ? 'AUDIO' : type === 'TEXT' ? 'TEXT' : 'IMAGE'
+  const prefix = sessionType === 'AUDIO' ? 'AUD' : sessionType === 'TEXT' ? 'TXT' : 'COL'
+  const code = `${prefix}-${randomInt(1000, 9999)}`
   const session = await prisma.session.create({
-    data: { code, projectId, agentId: admin.id, location: location || null },
+    data: { code, projectId, agentId: admin.id, location: location || null, type: sessionType },
     include: { project: { select: { name: true } } },
   })
 
@@ -80,22 +82,23 @@ export async function createSession({ projectId, location }, admin) {
     entityId: session.id,
     action: 'SESSION_STARTED',
     actorId: admin.id,
-    payload: { projectId, code },
+    payload: { projectId, code, type: sessionType },
   })
 
   return session
 }
 
-export async function listSessions(admin, { status }) {
+export async function listSessions(admin, { status, type }) {
   const sessions = await prisma.session.findMany({
     where: {
       ...(admin.role === 'collectionAgent' && { agentId: admin.id }),
       ...(status && { status }),
+      ...(type && { type }),
     },
     orderBy: { createdAt: 'desc' },
     include: {
       project: { select: { id: true, name: true } },
-      _count: { select: { participants: true, photos: true } },
+      _count: { select: { participants: true, photos: true, recordings: true, documents: true } },
     },
   })
 
@@ -103,6 +106,8 @@ export async function listSessions(admin, { status }) {
     ...s,
     participantCount: _count.participants,
     photoCount: _count.photos,
+    recordingCount: _count.recordings,
+    documentCount: _count.documents,
   }))
 }
 
@@ -118,6 +123,22 @@ export async function getSession(sessionId, admin) {
         },
       },
       photos: { orderBy: { createdAt: 'desc' } },
+      recordings: {
+        orderBy: { createdAt: 'desc' },
+        include: {
+          segments: {
+            orderBy: { startSec: 'asc' },
+          },
+        },
+      },
+      documents: {
+        orderBy: { createdAt: 'desc' },
+        include: {
+          spans: {
+            orderBy: { startChar: 'asc' },
+          },
+        },
+      },
       jobs: { orderBy: { createdAt: 'desc' }, take: 1 },
     },
   })
@@ -131,6 +152,7 @@ export async function getSession(sessionId, admin) {
       email: p.subject.email,
       group: p.subject.group,
       consentStatus: p.consent.status,
+      consentId: p.consent.consentId,
       addedAt: p.addedAt,
     })),
     job: session.jobs[0] ?? null,
@@ -822,7 +844,128 @@ export async function getPersonPhotos(sessionId, subjectId, admin) {
 }
 
 export async function finalizeSession(sessionId, admin) {
-  const session = await loadSession(sessionId, admin)
+  const session = await loadSession(sessionId, admin, {
+    include: {
+      recordings: { include: { segments: true } },
+      documents: { include: { spans: true } },
+    },
+  })
+
+  // ---- Text Session Finalization ----
+  if (session.type === 'TEXT') {
+    assertStatus(session, 'ACTIVE', 'TAGGING', 'PROCESSING')
+
+    if (!session.documents || session.documents.length === 0) {
+      throw new ApiError(400, 'Text session has no documents to finalize')
+    }
+
+    const pendingDocs = session.documents.filter(
+      (d) => d.status === 'PENDING_ANALYSIS' || d.status === 'DEFERRED',
+    )
+    if (pendingDocs.length > 0) {
+      throw new ApiError(409, `${pendingDocs.length} document(s) have not been analyzed or redacted yet`)
+    }
+
+    const textSpans = await prisma.textSpan.findMany({
+      where: { documentId: { in: session.documents.map((d) => d.id) } },
+    })
+
+    const subjectCount = new Set(textSpans.map((s) => s.subjectId).filter(Boolean)).size
+
+    await prisma.$transaction(async (tx) => {
+      await tx.session.update({
+        where: { id: sessionId },
+        data: { status: 'ARCHIVED', endedAt: new Date(), archivedAt: new Date() },
+      })
+      await tx.sessionHandoff.upsert({
+        where: { sessionId },
+        create: {
+          sessionId,
+          projectId: session.projectId,
+          photoCount: 0,
+          subjectCount,
+          linkCount: textSpans.filter((s) => s.action === 'KEEP_NON_PII').length,
+        },
+        update: {
+          subjectCount,
+          linkCount: textSpans.filter((s) => s.action === 'KEEP_NON_PII').length,
+        },
+      })
+    })
+
+    await writeAuditLog({
+      entityType: 'Session',
+      entityId: sessionId,
+      action: 'SESSION_FINALIZED',
+      actorId: admin.id,
+      payload: {
+        documents: session.documents.length,
+        subjectCount,
+        type: 'TEXT',
+      },
+    })
+
+    return { id: sessionId, status: 'ARCHIVED', type: 'TEXT' }
+  }
+
+  // ---- Audio Session Finalization ----
+  if (session.type === 'AUDIO' || (session.type !== 'IMAGE' && session.recordings?.length > 0 && session.photos?.length === 0)) {
+    assertStatus(session, 'ACTIVE', 'TAGGING', 'PROCESSING')
+
+    if (!session.recordings || session.recordings.length === 0) {
+      throw new ApiError(400, 'Audio session has no recordings to finalize')
+    }
+
+    const pendingRecordings = session.recordings.filter(
+      (r) => r.status === 'PENDING_ANALYSIS' || r.status === 'DEFERRED',
+    )
+    if (pendingRecordings.length > 0) {
+      throw new ApiError(409, `${pendingRecordings.length} recording(s) have not been analyzed or redacted yet`)
+    }
+
+    const audioSegments = await prisma.audioSegment.findMany({
+      where: { recordingId: { in: session.recordings.map((r) => r.id) } },
+    })
+
+    const subjectCount = new Set(audioSegments.map((s) => s.subjectId).filter(Boolean)).size
+
+    await prisma.$transaction(async (tx) => {
+      await tx.session.update({
+        where: { id: sessionId },
+        data: { status: 'ARCHIVED', endedAt: new Date(), archivedAt: new Date() },
+      })
+      await tx.sessionHandoff.upsert({
+        where: { sessionId },
+        create: {
+          sessionId,
+          projectId: session.projectId,
+          photoCount: 0,
+          subjectCount,
+          linkCount: audioSegments.filter((s) => s.action === 'KEEP').length,
+        },
+        update: {
+          subjectCount,
+          linkCount: audioSegments.filter((s) => s.action === 'KEEP').length,
+        },
+      })
+    })
+
+    await writeAuditLog({
+      entityType: 'Session',
+      entityId: sessionId,
+      action: 'SESSION_FINALIZED',
+      actorId: admin.id,
+      payload: {
+        recordings: session.recordings.length,
+        subjectCount,
+        type: 'AUDIO',
+      },
+    })
+
+    return { id: sessionId, status: 'ARCHIVED', type: 'AUDIO' }
+  }
+
+  // ---- Image Session Finalization ----
   assertStatus(session, 'TAGGING')
 
   const pending = await prisma.faceCluster.count({

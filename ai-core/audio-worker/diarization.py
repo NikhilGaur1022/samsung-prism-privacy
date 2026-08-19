@@ -25,7 +25,11 @@ def get_diarization_pipeline() -> Pipeline:
     return _diarization_pipeline
 
 
-def diarize(audio_path: str) -> list[dict]:
+def diarize(
+    audio_path: str,
+    min_speakers: int | None = None,
+    max_speakers: int | None = None,
+) -> list[dict]:
     """Returns time-sorted diarization turns: [{start, end, speaker_id}].
 
     speaker_id is a diarization-local label (SPEAKER_00, SPEAKER_01, ...),
@@ -33,13 +37,18 @@ def diarize(audio_path: str) -> list[dict]:
     speaker_id.py against uploaded voice snippets.
     """
     pipeline = get_diarization_pipeline()
-    diarization = pipeline(audio_path)
+    kwargs = {}
+    if min_speakers is not None:
+        kwargs["min_speakers"] = int(min_speakers)
+    if max_speakers is not None:
+        kwargs["max_speakers"] = int(max_speakers)
 
+    diarization = pipeline(audio_path, **kwargs)
+
+    annotation = getattr(diarization, "speaker_diarization", diarization)
     turns = [
         {"start": segment.start, "end": segment.end, "speaker_id": speaker_id}
-        for segment, _track, speaker_id in diarization.speaker_diarization.itertracks(
-            yield_label=True
-        )
+        for segment, _track, speaker_id in annotation.itertracks(yield_label=True)
     ]
     turns.sort(key=lambda t: t["start"])
     return turns

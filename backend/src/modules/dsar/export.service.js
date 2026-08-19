@@ -129,7 +129,7 @@ export async function buildAccessPackage(dsarRequestId, admin = null, { selectio
   const { linkIds, recordingIds, descriptor } = await resolveSelection(subjectId, dsarRequestId, selection)
 
   // prettier-ignore
-  const [subject, consents, links, recordings, enrollments, voiceEnrollments, accessEvents] = await Promise.all([
+  const [subject, consents, links, recordings, enrollments, voiceEnrollments, accessEvents, textSpans] = await Promise.all([
     prisma.subject.findUnique({
       where: { masterUserId: subjectId },
       select: {
@@ -214,6 +214,18 @@ export async function buildAccessPackage(dsarRequestId, admin = null, { selectio
       orderBy: { createdAt: 'desc' },
       take: 200,
       select: { objectType: true, action: true, purpose: true, breakGlass: true, createdAt: true },
+    }),
+    // Text documents the principal is named in, selected through the spans for
+    // the same reason recordings are selected through their segments.
+    prisma.textSpan.findMany({
+      where: { subjectId },
+      include: {
+        document: {
+          include: {
+            spans: true,
+          },
+        },
+      },
     }),
   ])
 
@@ -346,8 +358,73 @@ export async function buildAccessPackage(dsarRequestId, admin = null, { selectio
     recordingManifest.push(entry)
   }
 
-  const included = [...photoManifest, ...recordingManifest].filter((e) => e.included)
-  const excluded = [...photoManifest, ...recordingManifest].filter((e) => !e.included)
+  // Text documents, on exactly the terms audio gets. Only the redacted copy
+  // ships: the original carries every other person named in the document in
+  // full.
+  const textManifest = []
+  const seenDocuments = new Set()
+
+  for (const span of textSpans) {
+    const doc = span.document
+    if (!doc || seenDocuments.has(doc.id)) continue
+    seenDocuments.add(doc.id)
+
+    const spans = doc.spans ?? []
+    const mine = spans.filter((sp) => sp.subjectId === subjectId)
+    const otherSubjects = new Set(
+      spans.filter((sp) => sp.subjectId && sp.subjectId !== subjectId).map((sp) => sp.subjectId),
+    )
+
+    const entry = {
+      documentId: doc.id,
+      sessionId: doc.sessionId,
+      name: doc.name,
+      capturedAt: doc.createdAt,
+      // The principal's own share of the document, which is the part of it that
+      // is their personal data. The rest of the text is other people's.
+      yourSpans: mine.length,
+      yourCharacters: mine.reduce((n, sp) => n + Math.max(0, sp.endChar - sp.startChar), 0),
+      sharedDocument: otherSubjects.size > 0,
+      otherSubjectCount: otherSubjects.size,
+      included: false,
+      reason: null,
+    }
+
+    // Fail closed, same rule as photographs and recordings: a document whose
+    // redaction was never confirmed is not shipped. DEFERRED means the text
+    // service could not be reached, and "we could not check" is never "there
+    // was nothing to redact".
+    if (!doc.redactedPath || doc.status !== 'REDACTED') {
+      entry.reason = 'REDACTION_INCOMPLETE — excluded pending redaction; re-request once processing completes'
+      textManifest.push(entry)
+      continue
+    }
+
+    try {
+      const buffer = await readFile(doc.redactedPath)
+      bytes += buffer.length
+      if (bytes > PACKAGE_MAX_BYTES) {
+        throw new ApiError(
+          413,
+          `This package exceeds the ${Math.round(PACKAGE_MAX_BYTES / 1024 / 1024)} MB build ceiling. Build it in parts with a narrower selection.`,
+        )
+      }
+      const name = `documents/${doc.id}.redacted.txt`
+      files.push({ name, data: buffer, date: doc.createdAt })
+      entry.included = true
+      entry.file = name
+      entry.sha256 = createHash('sha256').update(buffer).digest('hex')
+      if (otherSubjects.size > 0) redactedSubstitutions += 1
+    } catch (err) {
+      if (err instanceof ApiError) throw err
+      logger.error({ err, documentId: doc.id }, 'access package: could not read redacted text derivative')
+      entry.reason = 'UNREADABLE — the derivative could not be read at packaging time'
+    }
+    textManifest.push(entry)
+  }
+
+  const included = [...photoManifest, ...recordingManifest, ...textManifest].filter((e) => e.included)
+  const excluded = [...photoManifest, ...recordingManifest, ...textManifest].filter((e) => !e.included)
 
   const manifest = {
     version: 3,
@@ -424,6 +501,7 @@ export async function buildAccessPackage(dsarRequestId, admin = null, { selectio
     },
     photos: photoManifest,
     recordings: recordingManifest,
+    textDocuments: textManifest,
     processingSummary: {
       purposesInForce: consents.filter((c) => c.status === 'ACTIVE').map((c) => c.project?.purpose),
       processors: [
@@ -455,14 +533,16 @@ export async function buildAccessPackage(dsarRequestId, admin = null, { selectio
         'manifest.json holds your profile, your consents, and a summary of how your',
         'data is processed. photos/ holds the redacted copies of images you appear in.',
         'recordings/ holds the redacted copies of audio you were recorded speaking in.',
+        'documents/ holds the redacted copies of text documents you are named in.',
         '',
         manifest.selection.complete
-          ? 'This package covers every image and recording held for you at the time it was generated.'
+          ? 'This package covers every image, recording and document held for you at the time it was generated.'
           : `This package covers a SELECTED SUBSET: ${manifest.selection.itemCount} item(s) included, ${manifest.selection.excludedCount} not included. It is not a complete record of what is held.`,
         '',
         'Images are redacted: other people in the frame are blurred and sensitive text',
         'is masked. Recordings are redacted the same way: everyone else who spoke is',
-        'muted, so what you hear is your own voice. Originals are not included, because',
+        'muted, so what you hear is your own voice. Documents are redacted the same way:',
+        'other people named in them are blanked. Originals are not included, because',
         'exporting them would disclose other people to you.',
         '',
         'Face templates and voice templates are never included in any export.',

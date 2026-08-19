@@ -52,10 +52,10 @@ function RecordingRow({ sessionId, recording, onChanged }) {
     try {
       const res = await analyzeRecording(sessionId, recording.id)
       setGallery(res.gallery ?? null)
-      await onChanged()
     } catch (err) {
       setError(err)
     } finally {
+      await onChanged()
       setBusy(false)
     }
   }
@@ -65,10 +65,10 @@ function RecordingRow({ sessionId, recording, onChanged }) {
     setError(null)
     try {
       await redactRecording(sessionId, recording.id)
-      await onChanged()
     } catch (err) {
       setError(err)
     } finally {
+      await onChanged()
       setBusy(false)
     }
   }

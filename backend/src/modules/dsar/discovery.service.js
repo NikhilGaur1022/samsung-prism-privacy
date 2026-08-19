@@ -35,6 +35,12 @@ export const LOCATIONS = {
   // table is worse than one that names an extra code.
   L16_VOICE_ENROLLMENT: 'L16',
   L17_VOICE_EMBEDDING: 'L17',
+  // The text counterpart of L14/L15, and split off for the same reason those
+  // were: a purge handler dispatches on the code and then deletes from ONE
+  // table, so a TextDocument reported under L2 would be handed to the photo
+  // handler, match nothing, and report SKIPPED while the document survived.
+  L18_TEXT_DOCUMENT: 'L18',
+  L19_TEXT_DOCUMENT_REDACTED: 'L19',
 }
 
 function location(locationCode, objectType, objectId, storagePath = null, meta = {}) {
@@ -58,6 +64,7 @@ export async function runDiscovery(subjectId) {
     voiceEnrollments,
     participations,
     dsarRequests,
+    textSpans,
   ] = await Promise.all([
     prisma.subject.findUnique({
       where: { masterUserId: subjectId },
@@ -100,6 +107,20 @@ export async function runDiscovery(subjectId) {
     prisma.dsarRequest.findMany({
       where: { subjectId },
       select: { id: true, type: true, status: true, createdAt: true },
+    }),
+    prisma.textSpan.findMany({
+      where: { subjectId },
+      include: {
+        document: {
+          select: {
+            id: true,
+            sessionId: true,
+            storagePath: true,
+            redactedPath: true,
+            status: true,
+          },
+        },
+      },
     }),
   ])
 
@@ -339,6 +360,55 @@ export async function runDiscovery(subjectId) {
     locations.push(location('PII', 'Subject', subject.masterUserId, null, { action: 'ANONYMISE' }))
   }
 
+  // ---- L18 text documents, L19 redacted derivatives, SPAN attributions -----
+  // Shaped exactly like the L14/L15 audio block above, and for the same reason:
+  // a document naming A and B, where A erases, must survive for B with A's
+  // spans blanked. Text is selectively rewritable in the same way audio is, so a
+  // shared document is re-redacted rather than destroyed.
+  //
+  // Discovery only. purge.service.js plans its own location list and has no L18/
+  // L19/SPAN handler yet, so an erasure will not touch these — they are listed
+  // here so a DSAR access request is complete and so the gap is visible rather
+  // than silent.
+  const seenDocuments = new Set()
+  for (const span of textSpans) {
+    if (!span.document || seenDocuments.has(span.document.id)) continue
+    seenDocuments.add(span.document.id)
+
+    const mine = textSpans.filter((sp) => sp.documentId === span.documentId)
+
+    locations.push(
+      location('SPAN', 'TextSpan', span.document.id, null, {
+        documentId: span.document.id,
+        spanIds: mine.map((sp) => sp.id),
+        spans: mine.length,
+        note: 'text attributions — deleted per subject, never per document',
+      }),
+    )
+
+    locations.push(
+      location(
+        LOCATIONS.L18_TEXT_DOCUMENT,
+        'TextDocument.storagePath',
+        span.document.id,
+        span.document.storagePath,
+        { sessionId: span.document.sessionId, action: 'REREDACT' },
+      ),
+    )
+
+    if (span.document.redactedPath) {
+      locations.push(
+        location(
+          LOCATIONS.L19_TEXT_DOCUMENT_REDACTED,
+          'TextDocument.redactedPath',
+          span.document.id,
+          span.document.redactedPath,
+          { sessionId: span.document.sessionId, action: 'REBUILD' },
+        ),
+      )
+    }
+  }
+
   // ---- L9/L10 packages ------------------------------------------------------
   const evidence = await prisma.dsarEvidence.findMany({
     where: { dsarRequestId: { in: dsarRequests.map((r) => r.id) }, storagePath: { not: null } },
@@ -421,6 +491,8 @@ export async function runDiscovery(subjectId) {
       consents: consents.length,
       recordings: recordings.length,
       multiSpeakerRecordings: multiSpeakerRecordings.length,
+      textSpans: textSpans.length,
+      textDocuments: seenDocuments.size,
     },
     multiSubjectPhotos,
     multiSpeakerRecordings,

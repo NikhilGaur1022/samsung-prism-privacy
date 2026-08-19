@@ -72,6 +72,7 @@ model Subject {
   dataItems           SubjectDataItem[]
   importBatches       ImportBatch[]
   audioSegments       AudioSegment[]
+  textSpans           TextSpan[]
   taggedVideoTracks   VideoFaceTrack[]
   videoLinks          VideoSubject[]
 
@@ -460,11 +461,22 @@ model ProjectConsent {
   sessionParticipants SessionParticipant[]
   photos              PhotoSubject[]
   audioSegments       AudioSegment[]
+  textSpans           TextSpan[]
   videos              VideoSubject[]
 
   @@unique([subjectId, projectId])
   @@index([projectId, status])
   @@map("project_consent_matrix")
+}
+
+// What a session collects. The three paths do not share a detail page: an audio
+// session's work is a waveform timeline, a text session's is a character-offset
+// editor, and neither makes sense over a photo grid. IMAGE is the default so
+// every session created before the split keeps its existing behaviour.
+enum SessionType {
+  IMAGE
+  AUDIO
+  TEXT
 }
 
 enum SessionStatus {
@@ -480,6 +492,10 @@ model Session {
   code       String        @unique
   projectId  String        @db.Uuid
   agentId    String        @db.Uuid
+  // What this session collects. Defaults to IMAGE so every session that
+  // predates the split keeps behaving exactly as it did; the agent portal
+  // routes on this to decide which detail page a session opens in.
+  type       SessionType   @default(IMAGE)
   status     SessionStatus @default(ACTIVE)
   location   String?
   createdAt  DateTime      @default(now())
@@ -496,6 +512,7 @@ model Session {
   invites      SessionInvite[]
   recordings   Recording[]
   videos       VideoAsset[]
+  documents    TextDocument[]
 
   @@index([agentId, status])
   @@index([projectId])
@@ -986,6 +1003,14 @@ enum AccessObjectType {
   // than leaking. Correct outcome, wrong reason.
   RECORDING
   REDACTED_RECORDING
+  // Video and text, on the same terms and for the same reason. REDACTED_VIDEO
+  // was already being logged by the video media route against a value this enum
+  // did not have — the same failure the RECORDING comment above describes, and
+  // caught the same way: fail-closed, because the AccessEvent is written before
+  // the blob is decrypted.
+  REDACTED_VIDEO
+  TEXT_DOCUMENT
+  REDACTED_TEXT_DOCUMENT
 }
 
 enum AccessAction {
@@ -1288,6 +1313,26 @@ enum AudioSegmentAction {
   REDACT_PII
 }
 
+enum TextDocumentStatus {
+  PENDING_ANALYSIS
+  TAGGED
+  REDACTED
+  // Same meaning as on Recording: the text service could not be reached, so
+  // nothing here has been checked. Never collapsed into PENDING_ANALYSIS —
+  // "we could not check" must not read as "there was nothing to redact".
+  DEFERRED
+}
+
+enum TextSpanAction {
+  KEEP_NON_PII
+  REDACT_ALL
+  REDACT_PII
+  // The agent's own overrides, kept distinct from the detector's actions so an
+  // export or an audit can always say whether a person or the pipeline decided.
+  MANUAL_REDACT
+  MANUAL_UNREDACT
+}
+
 // A session recording. Deliberately shaped like Photo — same integrity columns
 // (sha256/sizeBytes/mimeType), same encKeyId so a key rotation knows what sealed
 // it, same fail-closed status. A recording that does not carry these cannot be
@@ -1341,8 +1386,15 @@ model AudioSegment {
   startSec Float @map("start_sec")
   endSec   Float @map("end_sec")
 
-  action     AudioSegmentAction
-  matchScore Float?             @map("match_score")
+  action AudioSegmentAction
+  // Why this segment got its action, in the row itself. The timeline shows it
+  // verbatim next to every muted span: "matched someone whose consent does not
+  // cover this" and "matched nobody at all" are the two outcomes an agent most
+  // needs told apart, and they are identical in `action` alone.
+  reason  String?
+  piiType String? @map("pii_type")
+
+  matchScore Float? @map("match_score")
 
   recording Recording       @relation(fields: [recordingId], references: [id], onDelete: Cascade)
   subject   Subject?        @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
@@ -1522,4 +1574,65 @@ model VideoSubject {
   @@index([subjectId])
   @@index([consentId])
   @@map("video_subjects")
+}
+
+// ---------------------------------------------------------------------------
+// Text documents (L18) and their spans. Shaped like Recording/AudioSegment for
+// the same reasons: the same integrity columns (sha256/mimeType), the same
+// encKeyId so a key rotation knows what sealed it, the same fail-closed status,
+// and attribution carried on the spans rather than on the document — a document
+// naming several people is not "about" any one of them.
+// ---------------------------------------------------------------------------
+
+model TextDocument {
+  id        String @id @default(uuid()) @db.Uuid
+  sessionId String @map("session_id") @db.Uuid
+
+  name String @default("Untitled Document")
+
+  storagePath  String  @map("storage_path")
+  redactedPath String? @map("redacted_path")
+
+  status   TextDocumentStatus @default(PENDING_ANALYSIS)
+  mimeType String?            @default("text/plain") @map("mime_type")
+  sha256   String?
+  charCount Int?              @default(0) @map("char_count")
+  encKeyId String?            @map("enc_key_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  session Session    @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  spans   TextSpan[]
+
+  @@index([sessionId])
+  @@map("text_documents")
+}
+
+model TextSpan {
+  id         String @id @default(uuid()) @db.Uuid
+  documentId String @map("document_id") @db.Uuid
+
+  subjectId String? @map("subject_id") @db.Uuid
+  // Null ONLY where no live ProjectConsent existed at analysis time, exactly as
+  // AudioSegment.consentId is. A KEEP_NON_PII span must always carry one.
+  consentId String? @map("consent_id") @db.Uuid
+
+  startChar Int @map("start_char")
+  endChar   Int @map("end_char")
+
+  action      TextSpanAction @default(KEEP_NON_PII)
+  reason      String?
+  piiType     String?        @map("pii_type")
+  textSnippet String?        @map("text_snippet")
+
+  document TextDocument    @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  subject  Subject?        @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
+  consent  ProjectConsent? @relation(fields: [consentId], references: [consentId], onDelete: SetNull)
+
+  @@index([documentId])
+  // The DSAR discovery probe: every document this person is named in.
+  @@index([subjectId])
+  @@index([consentId])
+  @@map("text_spans")
 }

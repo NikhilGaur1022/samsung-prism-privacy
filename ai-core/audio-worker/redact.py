@@ -12,13 +12,22 @@ def apply_mute_intervals(input_path: str, output_path: str, intervals: list[dict
     deliberate: it is the one piece of the pipeline that must behave
     identically regardless of who's asking or why.
     """
-    if intervals:
+    valid_intervals = [
+        i
+        for i in intervals
+        if isinstance(i, dict)
+        and "start" in i
+        and "end" in i
+        and float(i["end"]) > float(i["start"])
+    ]
+    if valid_intervals:
+        sorted_intervals = sorted(valid_intervals, key=lambda x: float(x["start"]))
         filter_expr = ",".join(
-            f"volume=0:enable='between(t,{i['start']},{i['end']})'" for i in intervals
+            f"volume=0:enable='between(t,{i['start']},{i['end']})'" for i in sorted_intervals
         )
-        cmd = ["ffmpeg", "-y", "-i", input_path, "-af", filter_expr, "-c:v", "copy", output_path]
+        cmd = ["ffmpeg", "-y", "-i", input_path, "-af", filter_expr, output_path]
     else:
-        cmd = ["ffmpeg", "-y", "-i", input_path, "-c", "copy", output_path]
+        cmd = ["ffmpeg", "-y", "-i", input_path, output_path]
 
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:

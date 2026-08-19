@@ -28,6 +28,8 @@ dist-ssr
 !.env.example
 
 __pycache__/
+cookies.txt
+backend/prisma/schema.prisma.mine
 
 # Pre-delete database backups land here. They are verbatim row dumps -- admin
 # email addresses, subject records -- so they are exactly what must not be
@@ -54,3 +56,10 @@ dump.rdb
 deploy/prod.env
 deploy/.env
 deploy/www/
+
+# Supabase CLI local scratch state. .temp/start-secrets holds the CLI's
+# well-known local demo keys and a generated DB password — worthless off this
+# machine, but a secret-shaped file in git history is a liability regardless, and
+# .branches is per-developer state that conflicts on every merge.
+backend/supabase/.temp/
+backend/supabase/.branches/

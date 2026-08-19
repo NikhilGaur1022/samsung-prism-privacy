@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     # no longer changes who gets identified is worse than no knob — someone tunes
     # it, sees no effect, and concludes the matching is broken.
     MIN_UTTERANCE_DURATION: float = Field(default=1.5)
+    MIN_SPEAKERS: int | None = Field(default=None)
+    MAX_SPEAKERS: int | None = Field(default=None)
 
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore"

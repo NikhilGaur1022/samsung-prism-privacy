@@ -392,6 +392,15 @@ export async function analyzeRecording(sessionId, recordingId, admin) {
     const keep = Boolean(hit?.eligible)
     decisionBySpeaker.set(match.speaker_id, {
       action: keep ? 'KEEP' : 'REDACT_VOICE',
+      // Why, in the row itself. The timeline shows this verbatim next to every
+      // muted span, and "matched someone whose consent does not cover this" and
+      // "matched nobody at all" are the two outcomes an agent most needs told
+      // apart — they look identical in the action alone.
+      reason: keep
+        ? 'CONSENTED_SPEAKER'
+        : match.matched_muid
+          ? 'CONSENT_INELIGIBLE'
+          : 'UNIDENTIFIED_SPEAKER',
       subjectId: keep ? match.matched_muid : null,
       consentId: keep ? hit.consentId : null,
       matchScore: match.score ?? null,
@@ -415,6 +424,8 @@ export async function analyzeRecording(sessionId, recordingId, admin) {
       startSec: seg.start,
       endSec: seg.end,
       action: decision.action,
+      reason: decision.reason,
+      piiType: null,
       matchScore: decision.matchScore,
     }
   })
@@ -430,6 +441,8 @@ export async function analyzeRecording(sessionId, recordingId, admin) {
     startSec: span.start,
     endSec: span.end,
     action: 'REDACT_PII',
+    reason: `PII_${span.type || 'DETECTED'}_FOUND`,
+    piiType: span.type ?? null,
     matchScore: null,
   }))
 
@@ -557,7 +570,21 @@ export async function redactRecording(sessionId, recordingId, admin) {
     entityId: recordingId,
     action: 'RECORDING_REDACTED',
     actorId: admin.id,
-    payload: { intervalsMuted: intervals.length },
+    payload: {
+      recordingId,
+      sessionId,
+      intervalsMuted: intervals.length,
+      redactionManifest: segments.map((s) => ({
+        speakerId: s.speakerId,
+        subjectId: s.subjectId,
+        consentId: s.consentId,
+        startSec: s.startSec,
+        endSec: s.endSec,
+        action: s.action,
+        reason: s.reason || (s.action === 'REDACT_VOICE' ? 'UNIDENTIFIED_SPEAKER' : `PII_${s.piiType || 'DETECTED'}_FOUND`),
+        piiType: s.piiType,
+      })),
+    },
   })
 
   return updated
@@ -646,6 +673,89 @@ export async function getRecording(sessionId, recordingId, admin) {
     orderBy: { startSec: 'asc' },
   })
   return { recording, segments }
+}
+
+// The unredacted recording, for the agent working the timeline before the
+// session is archived. It goes through loadRecording — and therefore
+// loadSessionForMedia — for the same reason every other media read does: the
+// route's role floor says which ROLES may ask, and only the service can say
+// whether THIS caller owns THIS session. readFile() is storage.js's, so the
+// session DEK is applied here exactly as it is for the redacted copy; reading
+// recording.storagePath off the disk directly would hand back ciphertext.
+export async function readRawRecording(sessionId, recordingId, admin) {
+  const recording = await loadRecording(sessionId, recordingId, admin)
+  const buffer = await readFile(recording.storagePath)
+  return { buffer, mimeType: recording.mimeType }
+}
+
+// The agent's manual corrections from the timeline, replacing the analysed
+// decisions wholesale. Deliberately a full replace rather than a patch: the
+// mute list the redact step reads is the segment table, so a partial write that
+// left a stale REDACT row behind would mute speech the agent had just cleared,
+// and a dropped one would release speech they had just muted.
+//
+// This is the one path where a human overrides a consent-derived decision, so
+// it writes its own audit action — RECORDING_ANALYZED tells you the pipeline
+// decided something, and that must never be confused with a person deciding it.
+export async function saveSegments(sessionId, recordingId, segmentList, admin) {
+  await loadRecording(sessionId, recordingId, admin)
+
+  const rows = segmentList.map((seg) => {
+    if (!(seg.endSec > seg.startSec)) {
+      throw new ApiError(400, `Invalid interval: [${seg.startSec}, ${seg.endSec}]`)
+    }
+    return {
+      recordingId,
+      speakerId: seg.speakerId || 'MANUAL',
+      subjectId: seg.subjectId ?? null,
+      consentId: seg.consentId ?? null,
+      startSec: seg.startSec,
+      endSec: seg.endSec,
+      action: seg.action,
+      reason:
+        seg.reason ??
+        (seg.action === 'KEEP'
+          ? 'AGENT_MANUAL_KEEP'
+          : seg.action === 'REDACT_VOICE'
+            ? 'AGENT_MANUAL_REDACTION'
+            : 'AGENT_MANUAL_PII_REDACTION'),
+      piiType: seg.piiType ?? null,
+      matchScore: typeof seg.matchScore === 'number' ? seg.matchScore : null,
+    }
+  })
+
+  await prisma.$transaction([
+    prisma.audioSegment.deleteMany({ where: { recordingId } }),
+    prisma.audioSegment.createMany({ data: rows }),
+    prisma.recording.update({ where: { id: recordingId }, data: { status: 'ANALYZED' } }),
+  ])
+
+  // Same reasoning as in analyzeRecording: who is audible in this recording has
+  // just changed, so what DSAR can find and erase has to change with it.
+  try {
+    await indexRecording(recordingId)
+  } catch (err) {
+    logger.error(
+      { alert: 'ITEM_INDEX_REFRESH_FAILED', err, recordingId, at: 'saveSegments' },
+      'item index refresh failed after manual segment edit — DSAR completeness may be stale until the next discovery',
+    )
+  }
+
+  await writeAuditLog({
+    entityType: 'Recording',
+    entityId: recordingId,
+    action: 'AUDIO_SEGMENTS_MANUALLY_UPDATED',
+    actorId: admin.id,
+    payload: {
+      recordingId,
+      sessionId,
+      segmentCount: rows.length,
+      kept: rows.filter((r) => r.action === 'KEEP').length,
+      muted: rows.filter((r) => r.action !== 'KEEP').length,
+    },
+  })
+
+  return prisma.audioSegment.findMany({ where: { recordingId }, orderBy: { startSec: 'asc' } })
 }
 
 export async function readRedactedRecording(sessionId, recordingId, admin) {

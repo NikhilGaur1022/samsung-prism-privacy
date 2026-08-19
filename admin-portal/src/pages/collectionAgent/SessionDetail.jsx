@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { QRCodeSVG } from 'qrcode.react'
-import RecordingsPanel from '../../components/RecordingsPanel'
 import {
   Camera,
   CircleSlash,
@@ -259,8 +258,14 @@ export default function SessionDetail() {
   }, [session?.status, reload])
 
   useEffect(() => {
-    if (session?.status === 'TAGGING') navigate(`/sessions/${sessionId}/tagging`)
-  }, [session?.status, sessionId, navigate])
+    if (session?.type === 'AUDIO') {
+      navigate(`/sessions/${sessionId}/audio`, { replace: true })
+    } else if (session?.type === 'TEXT') {
+      navigate(`/sessions/${sessionId}/text`, { replace: true })
+    } else if (session?.status === 'TAGGING') {
+      navigate(`/sessions/${sessionId}/tagging`)
+    }
+  }, [session?.type, session?.status, sessionId, navigate])
 
   // People join by scanning, with nothing to tell the agent it happened. Poll the
   // roster while the QR is on screen — through getSessionFresh, because the 60s
@@ -502,7 +507,6 @@ export default function SessionDetail() {
                 </ul>
               </div>
             )}
-            <RecordingsPanel sessionId={sessionId} capturing={capturing} />
           </section>
 
           <section className="rounded-card bg-surface p-6 shadow-card">

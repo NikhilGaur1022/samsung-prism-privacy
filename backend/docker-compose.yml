@@ -60,6 +60,18 @@ services:
       - audio_models:/root/.cache/huggingface
     ports:
       - "8003:8003"
+    volumes:
+      - ../ai-core/audio-worker:/app
+      - /app/.venv
+    restart: unless-stopped
+
+  text-worker:
+    build: ../ai-core/text-services
+    container_name: prism-text-worker
+    ports:
+      - "8004:8004"
+    volumes:
+      - ../ai-core/text-services:/app
     restart: unless-stopped
 
   # Opt-in: `docker compose --profile video up -d`. Same reasoning as

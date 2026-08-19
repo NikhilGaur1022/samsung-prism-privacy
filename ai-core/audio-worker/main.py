@@ -46,12 +46,83 @@ def health():
     return {"status": "ok"}
 
 
-def _speaker_at(turns: list[dict], t: float) -> str | None:
-    """Which diarization speaker slot was talking at time t (seconds)."""
+def _speaker_for_segment(turns: list[dict], seg_start: float, seg_end: float) -> str | None:
+    """Which diarization speaker slot was talking during [seg_start, seg_end].
+
+    Scored by maximum time overlap rather than by whoever held the midpoint.
+    Whisper's segment boundaries and pyannote's turn boundaries are drawn by
+    different models and rarely line up, so a midpoint that lands a few tens of
+    milliseconds inside a gap returned None and the whole segment fell to
+    UNKNOWN — which the backend reads as an unidentified speaker and mutes.
+    Overlap degrades gracefully where the midpoint did not; the two fallbacks
+    below cover the case where a segment overlaps no turn at all.
+    """
+    if not turns:
+        return None
+
+    best_speaker = None
+    max_overlap = 0.0
     for turn in turns:
-        if turn["start"] <= t <= turn["end"]:
+        overlap = max(0.0, min(seg_end, turn["end"]) - max(seg_start, turn["start"]))
+        if overlap > max_overlap:
+            max_overlap = overlap
+            best_speaker = turn["speaker_id"]
+
+    if best_speaker is not None and max_overlap > 0:
+        return best_speaker
+
+    mid = (seg_start + seg_end) / 2
+    for turn in turns:
+        if turn["start"] <= mid <= turn["end"]:
             return turn["speaker_id"]
-    return None
+
+    return min(
+        turns,
+        key=lambda t: min(abs(t["start"] - seg_end), abs(t["end"] - seg_start)),
+    )["speaker_id"]
+
+
+def _map_pii_span_to_time(seg, span: dict) -> tuple[float, float]:
+    """Presidio's span is a character offset local to seg.text; map it to word
+    timestamps when available, else fall back to the whole segment's time range
+    so nothing gets silently dropped for lack of word-level alignment.
+
+    faster-whisper's Word carries `word`, `start` and `end` but no character
+    offsets, so the offsets are recovered by walking seg.text and locating each
+    word in order. An earlier version read `w.start_char`/`w.end_char`, which
+    never exist — every PII span silently widened to its whole segment, muting
+    far more speech than the detection asked for.
+    """
+    words = getattr(seg, "words", None) or []
+    seg_text = getattr(seg, "text", "") or ""
+    if not words or not seg_text:
+        return seg.start, seg.end
+
+    span_start = span["start"]
+    span_end = span["end"]
+
+    word_spans = []
+    curr_idx = 0
+    for w in words:
+        w_text = getattr(w, "word", "").strip()
+        if not w_text:
+            continue
+        idx = seg_text.find(w_text, curr_idx)
+        if idx == -1:
+            idx = curr_idx
+        w_end_char = idx + len(w_text)
+        curr_idx = w_end_char
+        word_spans.append((idx, w_end_char, w.start, w.end))
+
+    matching = [
+        (ws, we)
+        for w_sc, w_ec, ws, we in word_spans
+        if not (w_ec <= span_start or w_sc >= span_end)
+    ]
+    if matching:
+        return matching[0][0], matching[-1][1]
+
+    return seg.start, seg.end
 
 
 @app.post(f"{settings.API_V1_STR}/embed", response_model=EmbedResponse)
@@ -97,7 +168,11 @@ async def embed(audio: UploadFile = File(...)):
 
 
 @app.post(f"{settings.API_V1_STR}/analyze", response_model=AnalyzeResponse)
-async def analyze(main_audio: UploadFile = File(...)):
+async def analyze(
+    main_audio: UploadFile = File(...),
+    min_speakers: int | None = Form(default=None),
+    max_speakers: int | None = Form(default=None),
+):
     """Detection only — no consent lookups, no redaction decisions, and as of
     the gallery migration, no identity decisions either.
 
@@ -115,7 +190,11 @@ async def analyze(main_audio: UploadFile = File(...)):
             shutil.copyfileobj(main_audio.file, f)
 
         try:
-            turns = diarize(audio_path)
+            turns = diarize(
+                audio_path,
+                min_speakers=min_speakers or settings.MIN_SPEAKERS,
+                max_speakers=max_speakers or settings.MAX_SPEAKERS,
+            )
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Diarization failed: {exc}") from exc
 
@@ -172,7 +251,7 @@ async def analyze(main_audio: UploadFile = File(...)):
         segments_out: list[DiarizedSegment] = []
         pii_spans_out: list[PiiSpan] = []
         for seg in transcript_segments:
-            speaker_id = _speaker_at(turns, (seg.start + seg.end) / 2) or "UNKNOWN"
+            speaker_id = _speaker_for_segment(turns, seg.start, seg.end) or "UNKNOWN"
             segments_out.append(
                 DiarizedSegment(
                     start=seg.start, end=seg.end, speaker_id=speaker_id, transcript=seg.text
@@ -180,22 +259,7 @@ async def analyze(main_audio: UploadFile = File(...)):
             )
 
             for span in find_pii_spans(seg.text):
-                # Presidio's span is a character offset local to seg.text;
-                # map it to word timestamps when available, else fall back to
-                # the whole segment's time range so nothing gets silently
-                # dropped for lack of word-level alignment.
-                word_start, word_end = seg.start, seg.end
-                words = getattr(seg, "words", None) or []
-                matching_words = [
-                    w
-                    for w in words
-                    if getattr(w, "start_char", None) is not None
-                    and not (w.end_char <= span["start"] or w.start_char >= span["end"])
-                ]
-                if matching_words:
-                    word_start = matching_words[0].start
-                    word_end = matching_words[-1].end
-
+                word_start, word_end = _map_pii_span_to_time(seg, span)
                 pii_spans_out.append(
                     PiiSpan(start=word_start, end=word_end, type=span["type"], speaker_id=speaker_id)
                 )
