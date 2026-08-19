@@ -48,6 +48,15 @@ services:
       - /app/.venv
     restart: unless-stopped
 
+  text-worker:
+    build: ../ai-core/text-services
+    container_name: prism-text-worker
+    ports:
+      - "8004:8004"
+    volumes:
+      - ../ai-core/text-services:/app
+    restart: unless-stopped
+
 volumes:
   qdrant_storage:
   redis_data:

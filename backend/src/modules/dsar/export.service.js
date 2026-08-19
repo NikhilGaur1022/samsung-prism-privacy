@@ -110,6 +110,16 @@ export async function buildAccessPackage(dsarRequestId, admin = null) {
         },
       },
     }),
+    prisma.textSpan.findMany({
+      where: { subjectId },
+      include: {
+        document: {
+          include: {
+            spans: true,
+          },
+        },
+      },
+    }),
   ])
 
   if (!subject) throw new ApiError(404, 'Subject not found')
@@ -207,6 +217,61 @@ export async function buildAccessPackage(dsarRequestId, admin = null) {
     audioManifest.push(entry)
   }
 
+  const textManifest = []
+  const processedDocuments = new Set()
+
+  for (const span of textSpans) {
+    const doc = span.document
+    if (!doc || processedDocuments.has(doc.id)) continue
+    processedDocuments.add(doc.id)
+
+    const entry = {
+      documentId: doc.id,
+      sessionId: doc.sessionId,
+      name: doc.name,
+      consentId: span.consentId,
+      included: false,
+      reason: null,
+      taggedSpans: (doc.spans || [])
+        .filter((s) => s.subjectId === subjectId && s.action === 'KEEP_NON_PII')
+        .map((s) => ({
+          startChar: s.startChar,
+          endChar: s.endChar,
+          action: s.action,
+          reason: s.reason || 'CONSENTED_SUBJECT',
+          consentId: s.consentId,
+        })),
+      redactions: (doc.spans || [])
+        .filter((s) => s.action === 'REDACT_ALL' || s.action === 'REDACT_PII' || s.action === 'MANUAL_REDACT')
+        .map((s) => ({
+          startChar: s.startChar,
+          endChar: s.endChar,
+          action: s.action,
+          reason: s.reason,
+          piiType: s.piiType,
+        })),
+    }
+
+    if (!doc.redactedPath || doc.status !== 'REDACTED') {
+      entry.reason = 'REDACTION_INCOMPLETE — excluded pending masking; re-request once processing completes'
+      textManifest.push(entry)
+      continue
+    }
+
+    try {
+      const buffer = await readFile(doc.redactedPath)
+      const fileName = `documents/${doc.id}.redacted.txt`
+      files.push({ name: fileName, data: buffer, date: doc.createdAt })
+      entry.included = true
+      entry.file = fileName
+      entry.sha256 = createHash('sha256').update(buffer).digest('hex')
+    } catch (err) {
+      logger.error({ err, documentId: doc.id }, 'access package: could not read redacted text derivative')
+      entry.reason = 'UNREADABLE — the derivative could not be read at packaging time'
+    }
+    textManifest.push(entry)
+  }
+
   const manifest = {
     version: 1,
     packageType: 'DPDP_SECTION_11_ACCESS',
@@ -245,6 +310,7 @@ export async function buildAccessPackage(dsarRequestId, admin = null) {
     },
     photos: photoManifest,
     audioRecordings: audioManifest,
+    textDocuments: textManifest,
     processingSummary: {
       purposesInForce: consents.filter((c) => c.status === 'ACTIVE').map((c) => c.project?.purpose),
       processors: [

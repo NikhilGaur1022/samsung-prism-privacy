@@ -36,7 +36,7 @@ function location(locationCode, objectType, objectId, storagePath = null, meta =
  *   re-redacted, and never be handed to a delete.
  */
 export async function runDiscovery(subjectId) {
-  const [subject, consents, photoLinks, enrollments, participations, dsarRequests, audioSegments] = await Promise.all([
+  const [subject, consents, photoLinks, enrollments, participations, dsarRequests, audioSegments, textSpans] = await Promise.all([
     prisma.subject.findUnique({
       where: { masterUserId: subjectId },
       select: { masterUserId: true, fullName: true, email: true, status: true, createdAt: true },
@@ -79,6 +79,20 @@ export async function runDiscovery(subjectId) {
       where: { subjectId },
       include: {
         recording: {
+          select: {
+            id: true,
+            sessionId: true,
+            storagePath: true,
+            redactedPath: true,
+            status: true,
+          },
+        },
+      },
+    }),
+    prisma.textSpan.findMany({
+      where: { subjectId },
+      include: {
+        document: {
           select: {
             id: true,
             sessionId: true,
@@ -257,6 +271,40 @@ export async function runDiscovery(subjectId) {
     }
   }
 
+  // ---- Text documents & spans ---------------------------------------------
+  const seenDocuments = new Set()
+  for (const span of textSpans) {
+    locations.push(
+      location('TEXT_SPAN', 'TextSpan', span.id, null, {
+        documentId: span.documentId,
+        consentId: span.consentId,
+        startChar: span.startChar,
+        endChar: span.endChar,
+        action: span.action,
+        reason: span.reason,
+      }),
+    )
+
+    if (span.document && !seenDocuments.has(span.document.id)) {
+      seenDocuments.add(span.document.id)
+      locations.push(
+        location(LOCATIONS.L2_ORIGINAL, 'TextDocument.storagePath', span.document.id, span.document.storagePath, {
+          sessionId: span.document.sessionId,
+          consentId: span.consentId,
+        }),
+      )
+      if (span.document.redactedPath) {
+        locations.push(
+          location(LOCATIONS.L6_REDACTED, 'TextDocument.redactedPath', span.document.id, span.document.redactedPath, {
+            sessionId: span.document.sessionId,
+            consentId: span.consentId,
+            action: 'REREDACT',
+          }),
+        )
+      }
+    }
+  }
+
   // ---- L9/L10 packages ------------------------------------------------------
   const evidence = await prisma.dsarEvidence.findMany({
     where: { dsarRequestId: { in: dsarRequests.map((r) => r.id) }, storagePath: { not: null } },
@@ -314,6 +362,8 @@ export async function runDiscovery(subjectId) {
       consents: consents.length,
       audioSegments: audioSegments.length,
       recordings: seenRecordings.size,
+      textSpans: textSpans.length,
+      textDocuments: seenDocuments.size,
     },
     multiSubjectPhotos,
     locations,

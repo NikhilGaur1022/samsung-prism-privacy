@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Camera, Mic } from 'lucide-react'
+import { Camera, Mic, FileText } from 'lucide-react'
 import Sidebar from '../../components/Sidebar'
 import PageHeader from '../../components/PageHeader'
 import ListPanel from '../../components/ListPanel'
@@ -39,6 +39,8 @@ export default function Sessions() {
   const open = (session) => {
     if (session.type === 'AUDIO') {
       navigate(`/sessions/${session.id}/audio`)
+    } else if (session.type === 'TEXT') {
+      navigate(`/sessions/${session.id}/text`)
     } else if (session.status === 'TAGGING') {
       navigate(`/sessions/${session.id}/tagging`)
     } else {
@@ -64,6 +66,7 @@ export default function Sessions() {
             emptyMessage="Start one from New Session."
             renderRow={(s) => {
               const isAudio = s.type === 'AUDIO'
+              const isText = s.type === 'TEXT'
               return (
                 <button
                   key={s.id}
@@ -72,9 +75,13 @@ export default function Sessions() {
                 >
                   <div className="flex items-center gap-3.5 min-w-0">
                     <div className={`p-2.5 rounded-xl border ${
-                      isAudio ? 'bg-amber-500/10 border-amber-500/20 text-amber-600' : 'bg-brand-soft/50 border-brand/20 text-brand'
+                      isAudio
+                        ? 'bg-amber-500/10 border-amber-500/20 text-amber-600'
+                        : isText
+                        ? 'bg-purple-500/10 border-purple-500/20 text-purple-600'
+                        : 'bg-brand-soft/50 border-brand/20 text-brand'
                     }`}>
-                      {isAudio ? <Mic size={18} /> : <Camera size={18} />}
+                      {isAudio ? <Mic size={18} /> : isText ? <FileText size={18} /> : <Camera size={18} />}
                     </div>
 
                     <div className="min-w-0">
@@ -83,9 +90,13 @@ export default function Sessions() {
                           {s.code} — {s.project.name}
                         </p>
                         <span className={`text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-md ${
-                          isAudio ? 'bg-amber-100 text-amber-800' : 'bg-blue-100 text-blue-800'
+                          isAudio
+                            ? 'bg-amber-100 text-amber-800'
+                            : isText
+                            ? 'bg-purple-100 text-purple-800'
+                            : 'bg-blue-100 text-blue-800'
                         }`}>
-                          {isAudio ? 'Audio' : 'Image'}
+                          {isAudio ? 'Audio' : isText ? 'Text' : 'Image'}
                         </span>
                       </div>
 
@@ -93,6 +104,8 @@ export default function Sessions() {
                         {s.participantCount} on roster ·{' '}
                         {isAudio
                           ? `${s.recordingCount || 0} recording${s.recordingCount === 1 ? '' : 's'}`
+                          : isText
+                          ? `${s.documentCount || 0} document${s.documentCount === 1 ? '' : 's'}`
                           : `${s.photoCount || 0} photo${s.photoCount === 1 ? '' : 's'}`}
                         {s.location ? ` · ${s.location}` : ''}
                       </p>
@@ -109,3 +122,4 @@ export default function Sessions() {
     </div>
   )
 }
+

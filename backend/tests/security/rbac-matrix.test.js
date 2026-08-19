@@ -120,6 +120,27 @@ const MATRIX = {
   'GET /api/v1/sessions/:sessionId/invite': A('collectionAgent', 'super_admin'),
   'POST /api/v1/sessions/:sessionId/invite': A('collectionAgent', 'super_admin'),
   'DELETE /api/v1/sessions/:sessionId/invite': A('collectionAgent', 'super_admin'),
+
+  // --- recordings (audio collection) ---
+  'POST /api/v1/sessions/:sessionId/recordings': A('collectionAgent', 'super_admin'),
+  'GET /api/v1/sessions/:sessionId/recordings': A('collectionAgent', 'super_admin'),
+  'GET /api/v1/sessions/:sessionId/recordings/:recordingId': A('collectionAgent', 'super_admin'),
+  'PUT /api/v1/sessions/:sessionId/recordings/:recordingId/segments': A('collectionAgent', 'super_admin'),
+  'POST /api/v1/sessions/:sessionId/recordings/:recordingId/analyze': A('collectionAgent', 'super_admin'),
+  'POST /api/v1/sessions/:sessionId/recordings/:recordingId/redact': A('collectionAgent', 'super_admin'),
+  'GET /api/v1/sessions/:sessionId/recordings/:recordingId/raw': A('collectionAgent', 'super_admin'),
+  'GET /api/v1/sessions/:sessionId/recordings/:recordingId/redacted': A('collectionAgent', 'super_admin'),
+
+  // --- documents (text collection) ---
+  'POST /api/v1/sessions/:sessionId/documents': A('collectionAgent', 'super_admin'),
+  'GET /api/v1/sessions/:sessionId/documents': A('collectionAgent', 'super_admin'),
+  'GET /api/v1/sessions/:sessionId/documents/:documentId': A('collectionAgent', 'super_admin'),
+  'PUT /api/v1/sessions/:sessionId/documents/:documentId/spans': A('collectionAgent', 'super_admin'),
+  'POST /api/v1/sessions/:sessionId/documents/:documentId/analyze': A('collectionAgent', 'super_admin'),
+  'POST /api/v1/sessions/:sessionId/documents/:documentId/redact': A('collectionAgent', 'super_admin'),
+  'GET /api/v1/sessions/:sessionId/documents/:documentId/raw': A('collectionAgent', 'super_admin'),
+  'GET /api/v1/sessions/:sessionId/documents/:documentId/redacted': A('collectionAgent', 'super_admin'),
+
   // Break-glass: role gate only here; the DSAR binding and justification are
   // enforced inside requireBreakGlass and covered by its own assertions below.
   'GET /api/v1/sessions/:sessionId/photos/:photoId/raw': A('dataAdmin', 'super_admin'),

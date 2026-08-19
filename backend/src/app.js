@@ -24,6 +24,7 @@ import { auditRoutes, accessEventRoutes } from './modules/audit/audit.routes.js'
 import { dsarRoutes } from './modules/dsar/dsar.routes.js'
 import { dashboardRoutes } from './modules/dashboard/dashboard.routes.js'
 import { recordingRoutes } from './modules/recordings/recording.routes.js'
+import { documentRoutes } from './modules/documents/document.routes.js'
 
 // The app is built here and listened to in server.js. The split exists so the
 // RBAC matrix test can mount the real application — the same routers, in the same
@@ -108,6 +109,7 @@ export function createApp() {
   app.use('/api/v1/sessions', sessionBreakGlassRoutes)
   app.use('/api/v1/sessions', sessionRoutes)
   app.use('/api/v1/sessions', recordingRoutes) 
+  app.use('/api/v1/sessions', documentRoutes)
   app.use('/api/v1/consent', consentRoutes)
   app.use('/auth/subject', authSubjectRoutes)
   app.use('/auth/admin', authAdminRoutes)

@@ -31,6 +31,7 @@ import ConsentCheck from './pages/collectionAgent/ConsentCheck'
 import Sessions from './pages/collectionAgent/Sessions'
 import SessionDetail from './pages/collectionAgent/SessionDetail'
 import AudioSessionDetail from './pages/collectionAgent/AudioSessionDetail'
+import TextSessionDetail from './pages/collectionAgent/TextSessionDetail'
 import Tagging from './pages/collectionAgent/Tagging'
 import ReviewPhotos from './pages/collectionAgent/ReviewPhotos'
 import People from './pages/collectionAgent/People'
@@ -82,6 +83,14 @@ export default function App() {
             element={
               <RequireRole allow={['collectionAgent']}>
                 <AudioSessionDetail />
+              </RequireRole>
+            }
+          />
+          <Route
+            path="/sessions/:sessionId/text"
+            element={
+              <RequireRole allow={['collectionAgent']}>
+                <TextSessionDetail />
               </RequireRole>
             }
           />

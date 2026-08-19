@@ -260,6 +260,8 @@ export default function SessionDetail() {
   useEffect(() => {
     if (session?.type === 'AUDIO') {
       navigate(`/sessions/${sessionId}/audio`, { replace: true })
+    } else if (session?.type === 'TEXT') {
+      navigate(`/sessions/${sessionId}/text`, { replace: true })
     } else if (session?.status === 'TAGGING') {
       navigate(`/sessions/${sessionId}/tagging`)
     }

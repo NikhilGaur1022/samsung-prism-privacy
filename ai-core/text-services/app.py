@@ -7,12 +7,26 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
-import streamlit as st
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
+
+try:
+    import streamlit as st
+except ImportError:
+    st = None
 from presidio_analyzer import AnalyzerEngine, EntityRecognizer, Pattern, PatternRecognizer, RecognizerResult
 from presidio_analyzer.nlp_engine import NlpEngineProvider
-from presidio_anonymizer import AnonymizerEngine
-from presidio_anonymizer.entities import OperatorConfig
+try:
+    from presidio_anonymizer import AnonymizerEngine
+    from presidio_anonymizer.entities import OperatorConfig
+except ImportError:
+    AnonymizerEngine = None
+    class OperatorConfig:
+        def __init__(self, operator_name="replace", params=None):
+            self.operator_name = operator_name
+            self.params = params or {}
 
 try:
     from openai import OpenAI
@@ -1320,7 +1334,10 @@ def load_policy(policy_name: str, project_policy_text: str) -> TextPolicy:
     )
 
 
-@st.cache_resource
+def _cache_decorator(func):
+    return st.cache_resource(func) if (st and hasattr(st, 'cache_resource')) else func
+
+@_cache_decorator
 def load_engines():
     configuration = {
         "nlp_engine_name": "spacy",

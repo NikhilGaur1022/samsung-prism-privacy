@@ -234,6 +234,7 @@ model ProjectConsent {
   subject             Subject              @relation(fields: [subjectId], references: [masterUserId], onDelete: Cascade)
   sessionParticipants SessionParticipant[]
   audioSegments       AudioSegment[]
+  textSpans           TextSpan[]
 
   @@unique([subjectId, projectId])
   @@index([projectId, status])
@@ -252,6 +253,7 @@ model Session {
   endedAt      DateTime?
   archivedAt   DateTime?
   recordings   Recording[]
+  documents    TextDocument[]
   clusters     FaceCluster[]
   photos       Photo[]
   jobs         RecognitionJob[]
@@ -350,6 +352,7 @@ model FaceCluster {
   createdAt          DateTime        @default(now())
   matchScore         Float?          @map("match_score")
   autoTagged         Boolean         @default(false) @map("auto_tagged")
+  videoTrackCount    Int?            @default(0) @map("video_track_count")
   session            Session         @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   suggestedSubject   Subject?        @relation(fields: [suggestedSubjectId], references: [masterUserId])
   faces              FaceDetection[]
@@ -632,6 +635,46 @@ model AudioSegment {
   @@map("audio_segments")
 }
 
+model TextDocument {
+  id           String             @id @default(uuid()) @db.Uuid
+  sessionId    String             @map("session_id") @db.Uuid
+  name         String             @default("Untitled Document")
+  storagePath  String             @map("storage_path")
+  redactedPath String?            @map("redacted_path")
+  status       TextDocumentStatus @default(PENDING_ANALYSIS)
+  mimeType     String?            @default("text/plain") @map("mime_type")
+  sha256       String?
+  charCount    Int?               @default(0) @map("char_count")
+  encKeyId     String?            @map("enc_key_id")
+  createdAt    DateTime           @default(now()) @map("created_at")
+  updatedAt    DateTime           @updatedAt @map("updated_at")
+  spans        TextSpan[]
+  session      Session            @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@map("text_documents")
+}
+
+model TextSpan {
+  id          String          @id @default(uuid()) @db.Uuid
+  documentId  String          @map("document_id") @db.Uuid
+  subjectId   String?         @map("subject_id") @db.Uuid
+  consentId   String?         @map("consent_id") @db.Uuid
+  startChar   Int             @map("start_char")
+  endChar     Int             @map("end_char")
+  action      TextSpanAction  @default(KEEP_NON_PII)
+  reason      String?
+  piiType     String?         @map("pii_type")
+  textSnippet String?         @map("text_snippet")
+  document    TextDocument    @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  consent     ProjectConsent? @relation(fields: [consentId], references: [consentId], onDelete: SetNull)
+
+  @@index([documentId])
+  @@index([subjectId])
+  @@index([consentId])
+  @@map("text_spans")
+}
+
 /// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model dsar_item_actions {
   id                    String               @id @db.Uuid
@@ -902,6 +945,8 @@ enum AccessObjectType {
   SUBJECT_DATA_ITEM
   RECORDING
   REDACTED_RECORDING
+  TEXT_DOCUMENT
+  REDACTED_TEXT_DOCUMENT
 }
 
 enum AccessAction {
@@ -943,6 +988,8 @@ enum DataItemOrigin {
 enum DataItemType {
   PHOTO
   AUDIO
+  VIDEO
+  TEXT
 }
 
 enum DsarItemActionKind {
@@ -983,7 +1030,24 @@ enum AudioSegmentAction {
   REDACT_PII
 }
 
+enum TextDocumentStatus {
+  PENDING_ANALYSIS
+  TAGGED
+  REDACTED
+  DEFERRED
+}
+
+enum TextSpanAction {
+  KEEP_NON_PII
+  REDACT_ALL
+  REDACT_PII
+  MANUAL_REDACT
+  MANUAL_UNREDACT
+}
+
 enum SessionType {
   IMAGE
   AUDIO
+  TEXT
 }
+
