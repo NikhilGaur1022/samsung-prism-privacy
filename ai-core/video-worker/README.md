@@ -1,7 +1,7 @@
 # video-worker
 
 Face detection, tracking and sparse embedding for session video, plus a separate
-box-schedule execution step. Port **8004**.
+box-schedule execution step. Port **8005** — 8004 is the text worker.
 
 Stateless. No database, no consent decision, no memory between calls — the same
 contract `face-worker`, `image-pii-worker` and `audio-worker` hold.

@@ -38,5 +38,5 @@ COPY config.py schemas.py tracking.py analyze.py redact.py main.py ./
 # copy would be 300MB of duplicate download for bytes that must match anyway.
 ENV INSIGHTFACE_HOME=/models
 
-EXPOSE 8004
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8004"]
+EXPOSE 8005
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8005"]

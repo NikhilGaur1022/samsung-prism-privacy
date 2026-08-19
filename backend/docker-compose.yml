@@ -96,8 +96,13 @@ services:
     # a second copy would be 300MB of duplicate download for identical bytes.
     volumes:
       - face_models:/models
+    # 8005, not 8004: text-worker above already owns 8004. Both published on it
+    # meant `docker compose --profile video up` failed to bind whichever came
+    # second, and the backend's VIDEO_SERVICE_URL default reached the text
+    # service instead — a 404 from the wrong worker, which reads like the video
+    # worker is broken rather than absent.
     ports:
-      - "8004:8004"
+      - "8005:8005"
     restart: unless-stopped
 
 volumes:

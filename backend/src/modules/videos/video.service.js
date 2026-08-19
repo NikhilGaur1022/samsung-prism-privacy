@@ -6,7 +6,7 @@ import { writeAuditLog } from '../../lib/auditLog.js'
 import { logger } from '../../lib/logger.js'
 import { loadSessionForMedia } from '../sessions/session.service.js'
 
-const VIDEO_SERVICE_URL = process.env.VIDEO_SERVICE_URL ?? 'http://localhost:8004'
+const VIDEO_SERVICE_URL = process.env.VIDEO_SERVICE_URL ?? 'http://localhost:8005'
 
 // Relaxable, but not by accident. Video capture in this platform is muted by
 // contract: no voice-consent decision is attached to a clip, and the worker's
