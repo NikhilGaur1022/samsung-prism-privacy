@@ -28,6 +28,7 @@ import { ADMIN_ACCESS_COOKIE, SUBJECT_ACCESS_COOKIE } from '../../src/lib/cookie
 // without ever exercising their role gate. The middleware reads the variable per
 // request, so setting it here (after imports, before any request) is enough.
 process.env.AUDIO_CAPTURE_ENABLED = 'on'
+process.env.VIDEO_CAPTURE_ENABLED = 'on'
 
 const ROLES = ['dpo', 'dataOwner', 'collectionAgent', 'dataAdmin', 'super_admin']
 const ALL = [...ROLES, 'subject', 'anon']
@@ -192,6 +193,38 @@ const MATRIX = {
     'super_admin',
   ),
   'GET /api/v1/sessions/:sessionId/recordings/:recordingId/redacted': A(
+    'collectionAgent',
+    'dataOwner',
+    'dataAdmin',
+    'super_admin',
+  ),
+
+  // --- video (matrix §B "Collection") ---
+  //
+  // Same shape as audio, and the same caveat: VIDEO_CAPTURE_ENABLED gates these
+  // and a 503 would read as ALLOWED here, so the suite sets that flag too.
+  // Capture is the owning agent's; reads are wider for the same §D reason and
+  // are re-scoped inside video.service via loadSessionForMedia.
+  'POST /api/v1/sessions/:sessionId/videos': A('collectionAgent', 'super_admin'),
+  'GET /api/v1/sessions/:sessionId/videos': A(
+    'collectionAgent',
+    'dataOwner',
+    'dataAdmin',
+    'super_admin',
+  ),
+  'GET /api/v1/sessions/:sessionId/videos/:videoId': A(
+    'collectionAgent',
+    'dataOwner',
+    'dataAdmin',
+    'super_admin',
+  ),
+  'GET /api/v1/sessions/:sessionId/videos/:videoId/redacted': A(
+    'collectionAgent',
+    'dataOwner',
+    'dataAdmin',
+    'super_admin',
+  ),
+  'GET /api/v1/sessions/:sessionId/video-tracks/:trackId/crop': A(
     'collectionAgent',
     'dataOwner',
     'dataAdmin',

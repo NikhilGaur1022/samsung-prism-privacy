@@ -2,6 +2,7 @@ import { Router } from 'express'
 import multer from 'multer'
 import { z } from 'zod'
 import { requireAdminAuth } from '../../middleware/requireAdminAuth.js'
+import { requireRole } from '../../middleware/requireRole.js'
 import { logAccess } from '../../middleware/logAccess.js'
 import * as documentService from './document.service.js'
 
@@ -36,8 +37,21 @@ const updateSpansSchema = z.object({
 
 documentRoutes.use(requireAdminAuth)
 
+// Per-route, never a bare `documentRoutes.use(requireRole(...))`: this router
+// shares the /api/v1/sessions mount with sessionRoutes and is mounted ahead of
+// it, so an unpathed router-level guard would run for every request under that
+// prefix — including the photo reads that deliberately admit dataOwner and
+// dataAdmin — and 403 them before sessionRoutes ever sees them.
+//
+// Text is a capture surface like audio: the owning agent writes it, and
+// super_admin is admitted for break-glass. Unlike the audio reads there is no
+// wider oversight floor here, because a document is raw text — there is no
+// metadata-only projection of it that withholds the personal data the way a
+// recording's duration does. Matrix §B classifies all eight rows the same way.
+const textRoles = requireRole('collectionAgent', 'super_admin')
+
 // 1. Upload or paste document
-documentRoutes.post('/:sessionId/documents', upload.single('file'), async (req, res, next) => {
+documentRoutes.post('/:sessionId/documents', textRoles, upload.single('file'), async (req, res, next) => {
   try {
     const sessionId = uuid.parse(req.params.sessionId)
     let name = req.body.name || 'Untitled Document'
@@ -64,7 +78,7 @@ documentRoutes.post('/:sessionId/documents', upload.single('file'), async (req, 
 })
 
 // 2. List documents
-documentRoutes.get('/:sessionId/documents', async (req, res, next) => {
+documentRoutes.get('/:sessionId/documents', textRoles, async (req, res, next) => {
   try {
     const sessionId = uuid.parse(req.params.sessionId)
     const result = await documentService.listDocuments(sessionId, req.admin)
@@ -75,7 +89,7 @@ documentRoutes.get('/:sessionId/documents', async (req, res, next) => {
 })
 
 // 3. Get single document with spans
-documentRoutes.get('/:sessionId/documents/:documentId', async (req, res, next) => {
+documentRoutes.get('/:sessionId/documents/:documentId', textRoles, async (req, res, next) => {
   try {
     const sessionId = uuid.parse(req.params.sessionId)
     const documentId = uuid.parse(req.params.documentId)
@@ -87,7 +101,7 @@ documentRoutes.get('/:sessionId/documents/:documentId', async (req, res, next) =
 })
 
 // 4. Update spans and tags
-documentRoutes.put('/:sessionId/documents/:documentId/spans', async (req, res, next) => {
+documentRoutes.put('/:sessionId/documents/:documentId/spans', textRoles, async (req, res, next) => {
   try {
     const sessionId = uuid.parse(req.params.sessionId)
     const documentId = uuid.parse(req.params.documentId)
@@ -100,7 +114,7 @@ documentRoutes.put('/:sessionId/documents/:documentId/spans', async (req, res, n
 })
 
 // 5. Analyze document for PII
-documentRoutes.post('/:sessionId/documents/:documentId/analyze', async (req, res, next) => {
+documentRoutes.post('/:sessionId/documents/:documentId/analyze', textRoles, async (req, res, next) => {
   try {
     const sessionId = uuid.parse(req.params.sessionId)
     const documentId = uuid.parse(req.params.documentId)
@@ -112,7 +126,7 @@ documentRoutes.post('/:sessionId/documents/:documentId/analyze', async (req, res
 })
 
 // 6. Execute redaction
-documentRoutes.post('/:sessionId/documents/:documentId/redact', async (req, res, next) => {
+documentRoutes.post('/:sessionId/documents/:documentId/redact', textRoles, async (req, res, next) => {
   try {
     const sessionId = uuid.parse(req.params.sessionId)
     const documentId = uuid.parse(req.params.documentId)
@@ -126,6 +140,7 @@ documentRoutes.post('/:sessionId/documents/:documentId/redact', async (req, res,
 // 7. Stream raw text (with audit access logging)
 documentRoutes.get(
   '/:sessionId/documents/:documentId/raw',
+  textRoles,
   logAccess('TEXT_DOCUMENT', (req) => req.params.documentId, { purpose: 'COLLECTION' }),
   async (req, res, next) => {
     try {
@@ -143,6 +158,7 @@ documentRoutes.get(
 // 8. Stream redacted text (with audit access logging)
 documentRoutes.get(
   '/:sessionId/documents/:documentId/redacted',
+  textRoles,
   logAccess('REDACTED_TEXT_DOCUMENT', (req) => req.params.documentId, { purpose: 'COLLECTION' }),
   async (req, res, next) => {
     try {
