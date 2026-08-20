@@ -303,6 +303,11 @@ export default function TextSessionDetail() {
   }
 
   const isArchived = session?.status === 'ARCHIVED'
+
+  // The subject search is project-wide, so it returns people who are already
+  // on this roster; they are filtered out of the add list rather than offered
+  // a second Add that would only collide on the participant row.
+  const rosterIds = new Set(session?.participants?.map((p) => p.subjectId) ?? [])
   const unredactedDocs = documents.filter((d) => d.status !== 'REDACTED')
 
   return (
@@ -382,7 +387,7 @@ export default function TextSessionDetail() {
               {invite && !isArchived && (
                 <div className="my-4 rounded-xl border border-brand/20 bg-brand-soft/30 p-4 text-center animate-in fade-in">
                   <div className="inline-block rounded-lg bg-white p-2.5 shadow-sm">
-                    <QRCodeSVG value={invite.joinUrl} size={130} />
+                    <QRCodeSVG value={invite.url} size={130} />
                   </div>
                   <p className="mt-2 text-xs font-bold text-ink">Scan to Join Session</p>
                   <p className="text-[11px] text-ink-faint">
@@ -391,7 +396,7 @@ export default function TextSessionDetail() {
                   <button
                     type="button"
                     onClick={() => {
-                      navigator.clipboard.writeText(invite.joinUrl)
+                      navigator.clipboard.writeText(invite.url)
                       setCopied(true)
                       setTimeout(() => setCopied(false), 2000)
                     }}
@@ -417,25 +422,41 @@ export default function TextSessionDetail() {
 
                   {searchResults.length > 0 && (
                     <div className="absolute left-0 right-0 top-10 z-20 rounded-lg border border-border bg-surface shadow-lg max-h-48 overflow-y-auto divide-y divide-border">
-                      {searchResults.map((sub) => (
-                        <div
-                          key={sub.masterUserId}
-                          className="flex items-center justify-between p-2.5 text-xs hover:bg-canvas transition"
-                        >
-                          <div>
-                            <p className="font-bold text-ink">{sub.fullName}</p>
-                            <p className="text-[11px] text-ink-faint">{sub.email}</p>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => handleAddParticipant(sub.masterUserId)}
-                            className="p-1 rounded bg-brand text-white hover:bg-brand-dark transition"
-                            title="Add to roster"
-                          >
-                            <UserPlus size={14} />
-                          </button>
-                        </div>
-                      ))}
+                      {searchResults
+                        .filter((sub) => !rosterIds.has(sub.masterUserId))
+                        .map((sub) => {
+                          // See the photo session's add list: addToRoster re-reads
+                          // consent and answers 409, so an ineligible subject gets
+                          // the reason instead of a button that only fails.
+                          const eligible = sub.verdict === 'ELIGIBLE'
+                          return (
+                            <div
+                              key={sub.masterUserId}
+                              className={`flex items-center justify-between p-2.5 text-xs hover:bg-canvas transition ${
+                                eligible ? '' : 'opacity-60'
+                              }`}
+                            >
+                              <div>
+                                <p className="font-bold text-ink">{sub.fullName}</p>
+                                <p className="text-[11px] text-ink-faint">{sub.email}</p>
+                              </div>
+                              {eligible ? (
+                                <button
+                                  type="button"
+                                  onClick={() => handleAddParticipant(sub.masterUserId)}
+                                  className="p-1 rounded bg-brand text-white hover:bg-brand-dark transition"
+                                  title="Add to roster"
+                                >
+                                  <UserPlus size={14} />
+                                </button>
+                              ) : (
+                                <span className="rounded-pill bg-danger-soft px-2 py-1 text-[10px] font-semibold text-danger">
+                                  {VERDICT_LABEL[sub.verdict] ?? 'Not eligible'}
+                                </span>
+                              )}
+                            </div>
+                          )
+                        })}
                     </div>
                   )}
                 </div>

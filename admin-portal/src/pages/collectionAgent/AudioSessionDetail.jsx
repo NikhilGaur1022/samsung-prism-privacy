@@ -145,7 +145,14 @@ export default function AudioSessionDetail() {
 
   useEffect(() => {
     loadData()
-    getInvite(sessionId).then(setInvite).catch(() => {})
+    // res.invite, not res: GET /invite answers { invite } (or { invite: null }),
+    // unlike POST which answers the invite flat. Unwrapping it here matters
+    // beyond the field read - the wrapper object is always truthy, so storing
+    // it whole made the QR render with value undefined and hid the Generate
+    // button behind a session that had no invite at all.
+    getInvite(sessionId)
+      .then((res) => setInvite(res.invite))
+      .catch(() => {})
   }, [loadData, sessionId])
 
   // Subject search for roster add
@@ -254,6 +261,10 @@ export default function AudioSessionDetail() {
   const activeRecording = recordings.find((r) => r.id === selectedRecordingId) || recordings[0]
   const isArchived = session?.status === 'ARCHIVED'
   const isCapturing = session?.status === 'ACTIVE'
+
+  // Roster membership is what the add list filters on, not the search: the
+  // search is project-wide and will happily return someone already added.
+  const rosterIds = new Set(session?.participants?.map((p) => p.subjectId) ?? [])
 
   if (loading) {
     return (
@@ -533,25 +544,50 @@ export default function AudioSessionDetail() {
 
                   {searchResults.length > 0 && (
                     <ul className="mt-2 max-h-40 overflow-y-auto divide-y divide-border rounded-lg border border-border bg-canvas">
-                      {searchResults.map((s) => (
-                        <li key={s.masterUserId} className="flex items-center justify-between p-2 text-xs">
-                          <div>
-                            <p className="font-semibold text-ink">{s.fullName}</p>
-                            <p className="text-[10px] text-ink-faint">{s.email}</p>
-                          </div>
-                          <button
-                            onClick={async () => {
-                              await addParticipant(sessionId, s.masterUserId)
-                              setSearchQuery('')
-                              setSearchResults([])
-                              await loadData()
-                            }}
-                            className="rounded bg-brand px-2 py-1 text-[11px] font-semibold text-white hover:bg-brand-dark"
-                          >
-                            Add
-                          </button>
-                        </li>
-                      ))}
+                      {searchResults
+                        .filter((s) => !rosterIds.has(s.masterUserId))
+                        .map((s) => {
+                          // Mirrors the photo session's add list. The button is
+                          // withheld rather than left to fail because addToRoster
+                          // re-reads consent and answers 409 - an Add that throws
+                          // silently reads as a broken button, when the real answer
+                          // is that this person has not consented to this project.
+                          const eligible = s.verdict === 'ELIGIBLE'
+                          return (
+                            <li
+                              key={s.masterUserId}
+                              className={`flex items-center justify-between p-2 text-xs ${
+                                eligible ? '' : 'opacity-60'
+                              }`}
+                            >
+                              <div>
+                                <p className="font-semibold text-ink">{s.fullName}</p>
+                                <p className="text-[10px] text-ink-faint">{s.email}</p>
+                              </div>
+                              {eligible ? (
+                                <button
+                                  onClick={async () => {
+                                    try {
+                                      await addParticipant(sessionId, s.masterUserId)
+                                      setSearchQuery('')
+                                      setSearchResults([])
+                                      await loadData()
+                                    } catch (err) {
+                                      setError(err)
+                                    }
+                                  }}
+                                  className="rounded bg-brand px-2 py-1 text-[11px] font-semibold text-white hover:bg-brand-dark"
+                                >
+                                  Add
+                                </button>
+                              ) : (
+                                <span className="rounded-pill bg-danger-soft px-2 py-1 text-[10px] font-semibold text-danger">
+                                  {VERDICT_LABEL[s.verdict] ?? 'Not eligible'}
+                                </span>
+                              )}
+                            </li>
+                          )
+                        })}
                     </ul>
                   )}
                 </div>
