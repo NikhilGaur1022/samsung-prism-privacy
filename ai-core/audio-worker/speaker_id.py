@@ -1,8 +1,9 @@
-import soundfile as sf
 import torch
 import torchaudio
 from speechbrain.inference.speaker import SpeakerRecognition
 from speechbrain.utils.fetching import LocalStrategy
+
+from audio_io import duration_sec, load_waveform
 
 _speaker_embedding_model: SpeakerRecognition | None = None
 
@@ -30,14 +31,11 @@ def extract_voice_vector(
 ) -> list[float]:
     """Extracts a speaker embedding using SpeechBrain ECAPA-TDNN, optionally
     sliced to [start_sec, end_sec] of the file."""
-    # soundfile, not torchaudio.load: as of torchaudio 2.9 that delegates to
-    # torchcodec, which dlopens the system FFmpeg shared libraries and raises
-    # if they are absent or too new. libsndfile ships inside the soundfile
-    # wheel, so this has no system dependency at all. Nothing is lost by it:
-    # both portals convert every clip to 16 kHz mono PCM WAV in the browser
-    # before upload (see VoiceCapture.jsx), which is plain PCM.
-    samples, sr = sf.read(audio_path, dtype="float32", always_2d=True)
-    waveform = torch.from_numpy(samples.T.copy())  # (frames, ch) -> (ch, frames)
+    # Not torchaudio.load - see audio_io for why nothing here decodes through
+    # torchaudio or torchcodec. Enrollment clips arrive as browser-converted
+    # 16 kHz PCM WAV, but /analyze calls this on the session recording too,
+    # which is whatever the device recorded.
+    waveform, sr = load_waveform(audio_path)
     if sr != 16000:
         waveform = torchaudio.transforms.Resample(sr, 16000)(waveform)
 
@@ -57,13 +55,7 @@ def audio_duration_sec(audio_path: str) -> float:
     decoding — /embed reports it back so the backend can enforce its minimum
     enrollment length against what the worker actually received, not against
     what a client claimed in a form field."""
-    # torchaudio.info was removed in 2.9 with the rest of the legacy backend
-    # dispatcher, and this project is pinned to >=2.11. sf.info reads the
-    # header only, which is what the docstring above promises.
-    info = sf.info(audio_path)
-    if not info.samplerate:
-        return 0.0
-    return float(info.frames) / float(info.samplerate)
+    return duration_sec(audio_path)
 
 
 # match_speaker() and cosine_similarity() used to live here, comparing a turn

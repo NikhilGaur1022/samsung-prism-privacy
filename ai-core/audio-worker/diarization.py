@@ -1,6 +1,7 @@
 import torch
 from pyannote.audio import Pipeline
 
+from audio_io import load_waveform
 from config import settings
 
 _diarization_pipeline: Pipeline | None = None
@@ -43,7 +44,15 @@ def diarize(
     if max_speakers is not None:
         kwargs["max_speakers"] = int(max_speakers)
 
-    diarization = pipeline(audio_path, **kwargs)
+    # A waveform dictionary rather than the filename: handed a path, pyannote
+    # decodes through torchcodec (pyannote/audio/core/io.py), which is the one
+    # thing audio_io exists to avoid. The dictionary is pyannote's own
+    # documented alternative - see AudioFileDocString in that module - and joins
+    # the same code path immediately after loading.
+    waveform, sample_rate = load_waveform(audio_path)
+    audio = {"waveform": waveform, "sample_rate": sample_rate}
+
+    diarization = pipeline(audio, **kwargs)
 
     annotation = getattr(diarization, "speaker_diarization", diarization)
     turns = [
