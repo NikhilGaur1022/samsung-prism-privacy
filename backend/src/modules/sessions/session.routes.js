@@ -6,6 +6,11 @@ import { requireRole } from '../../middleware/requireRole.js'
 import { logAccess } from '../../middleware/logAccess.js'
 import { requireBreakGlass } from '../../middleware/requireBreakGlass.js'
 import * as sessionService from './session.service.js'
+import { mimeFilter, withUploadErrors, diskStorage, uploadTmpDir } from '../../middleware/uploads.js'
+import { rm as fsRm } from 'node:fs/promises'
+import { ApiError } from '../../middleware/errorHandler.js'
+import { mediaReadLimiter } from '../../middleware/rateLimiter.js'
+import { uploadLimiter } from '../../middleware/rateLimiter.js'
 
 export const sessionRoutes = Router()
 
@@ -24,13 +29,21 @@ function sendMedia(res, { buffer, mimeType }) {
   res.type(mimeType).send(buffer)
 }
 
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 25 * 1024 * 1024, files: 20 },
-  fileFilter: (_req, file, cb) => {
-    cb(file.mimetype.startsWith('image/') ? null : new Error('Only image files are accepted'), true)
-  },
-})
+// 20 files x 25 MB in memoryStorage is up to 500 MB resident per request with
+// nothing releasing it until the handler returns — one POST was measured at
+// exactly that. Spooled to disk instead: a temp file per upload is the price of
+// surviving concurrent uploads at 5,000 images/day.
+//
+// The filter rejects with ApiError(415) rather than a bare Error, which
+// errorHandler had no choice but to render as a 500 — as it did for a wrong
+// mimetype, a 26 MB file and a 21-file batch alike.
+const upload = withUploadErrors(
+  multer({
+    storage: diskStorage(uploadTmpDir()),
+    limits: { fileSize: 25 * 1024 * 1024, files: 20 },
+    fileFilter: mimeFilter('image/'),
+  }).array('photos', 20),
+)
 
 const uuid = z.string().uuid()
 
@@ -56,6 +69,7 @@ const tagSchema = z.object({
 })
 
 const clusterIdsSchema = z.object({ clusterIds: z.array(uuid).min(1) })
+const trackIdsSchema = z.object({ trackIds: z.array(uuid).min(1) })
 const faceIdsSchema = z.object({ faceIds: z.array(uuid).min(1) })
 
 sessionRoutes.post('/', async (req, res, next) => {
@@ -109,24 +123,62 @@ sessionRoutes.delete('/:sessionId/participants/:subjectId', async (req, res, nex
 
 // One endpoint for both capture paths — a live iPhone frame and a batch of files
 // picked off the agent's PC differ only by the cameraSource field.
-sessionRoutes.post('/:sessionId/photos', upload.array('photos', 20), async (req, res, next) => {
+sessionRoutes.post('/:sessionId/photos', uploadLimiter, upload, async (req, res, next) => {
   try {
     const sessionId = uuid.parse(req.params.sessionId)
     const meta = photoMetaSchema.parse(req.body)
-    if (!req.files?.length) throw Object.assign(new Error('No files uploaded'), { statusCode: 400 })
+    if (!req.files?.length) throw new ApiError(400, 'No files uploaded')
 
-    const results = []
+    // A per-file result array, not an all-or-nothing throw.
+    //
+    // A 20-file batch that failed on file 12 used to leave 11 photos committed
+    // and return an error naming none of them. The client could not tell what to
+    // retry, and a naive retry re-uploaded all 20 — sha256 dedup absorbed the
+    // duplicates, so the damage was bounded, but the operator had no way to know
+    // that. Now every file reports its own outcome and the request succeeds as a
+    // whole; a partial batch is a normal result, not an exception.
+    const accepted = []
+    const rejected = []
+
     for (const file of req.files) {
-      results.push(await sessionService.addPhoto(sessionId, file, meta, req.admin))
+      try {
+        const result = await sessionService.addPhoto(sessionId, file, meta, req.admin)
+        accepted.push({
+          filename: file.originalname,
+          photoId: result.photo.id,
+          duplicate: Boolean(result.duplicate),
+        })
+      } catch (err) {
+        // A 4xx is about this file and is safe to name. Anything else is an
+        // internal failure whose message must not cross the boundary — the same
+        // rule errorHandler applies, applied per file.
+        const isClientError = err.statusCode >= 400 && err.statusCode < 500
+        rejected.push({
+          filename: file.originalname,
+          reason: isClientError ? err.message : 'Could not be processed',
+          code: isClientError ? (err.code ?? 'REJECTED') : 'INTERNAL_ERROR',
+        })
+        if (!isClientError) {
+          req.log?.error?.({ err, filename: file.originalname }, 'photo upload failed')
+        }
+      }
     }
 
-    res.status(201).json({
-      added: results.filter((r) => !r.duplicate).length,
-      duplicates: results.filter((r) => r.duplicate).length,
-      photos: results.map((r) => r.photo),
+    res.status(rejected.length === 0 ? 201 : 207).json({
+      added: accepted.filter((a) => !a.duplicate).length,
+      duplicates: accepted.filter((a) => a.duplicate).length,
+      failed: rejected.length,
+      accepted,
+      rejected,
+      photos: accepted.map((a) => a.photoId),
     })
   } catch (err) {
     next(err)
+  } finally {
+    // Disk-backed uploads leave a temp file behind whatever happens.
+    for (const file of req.files ?? []) {
+      if (file.path) await fsRm(file.path, { force: true }).catch(() => {})
+    }
   }
 })
 
@@ -153,6 +205,7 @@ sessionRoutes.delete('/:sessionId/photos/:photoId', async (req, res, next) => {
 // no-store is the only setting consistent with logging every read.
 sessionRoutes.get(
   '/:sessionId/photos/:photoId/file',
+  mediaReadLimiter,
   logAccess('PHOTO', (req) => req.params.photoId, { purpose: 'COLLECTION' }),
   async (req, res, next) => {
     try {
@@ -170,8 +223,32 @@ sessionRoutes.get(
   },
 )
 
+// The agent's grid, at grid size. Same guards, same limiter, same access row as
+// /file above — it resolves through readPhotoFile, so there is no second
+// authorisation path to keep in step with the first.
+sessionRoutes.get(
+  '/:sessionId/photos/:photoId/file/thumb',
+  mediaReadLimiter,
+  logAccess('PHOTO', (req) => req.params.photoId, { purpose: 'COLLECTION' }),
+  async (req, res, next) => {
+    try {
+      sendMedia(
+        res,
+        await sessionService.readPhotoFileThumb(
+          uuid.parse(req.params.sessionId),
+          uuid.parse(req.params.photoId),
+          req.admin,
+        ),
+      )
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
 sessionRoutes.get(
   '/:sessionId/faces/:faceId/crop',
+  mediaReadLimiter,
   logAccess('FACE_CROP', (req) => req.params.faceId, { purpose: 'TAGGING' }),
   async (req, res, next) => {
     try {
@@ -245,6 +322,24 @@ sessionRoutes.post('/:sessionId/clusters/:clusterId/split', async (req, res, nex
   }
 })
 
+// The video counterpart of /split. Same shape, same guard, different medium —
+// a person who appears only in a clip has no face ids to split on.
+sessionRoutes.post('/:sessionId/clusters/:clusterId/split-tracks', async (req, res, next) => {
+  try {
+    const body = trackIdsSchema.parse(req.body)
+    res.json(
+      await sessionService.splitTracks(
+        uuid.parse(req.params.sessionId),
+        uuid.parse(req.params.clusterId),
+        body,
+        req.admin,
+      ),
+    )
+  } catch (err) {
+    next(err)
+  }
+})
+
 sessionRoutes.get('/:sessionId/people', async (req, res, next) => {
   try {
     res.json(await sessionService.getPeople(uuid.parse(req.params.sessionId), req.admin))
@@ -255,6 +350,7 @@ sessionRoutes.get('/:sessionId/people', async (req, res, next) => {
 
 sessionRoutes.get(
   '/:sessionId/people/:subjectId/photos/:photoId/redacted',
+  mediaReadLimiter,
   logAccess('REDACTED_PHOTO', (req) => req.params.photoId, { purpose: 'PER_PERSON_VIEW' }),
   async (req, res, next) => {
     try {
@@ -362,12 +458,42 @@ sessionMediaRoutes.get('/:sessionId/photos', ...mediaReaders, async (req, res, n
 sessionMediaRoutes.get(
   '/:sessionId/photos/:photoId/redacted',
   ...mediaReaders,
+  mediaReadLimiter,
   logAccess('REDACTED_PHOTO', (req) => req.params.photoId, { purpose: 'COLLECTION' }),
   async (req, res, next) => {
     try {
       sendMedia(
         res,
         await sessionService.readRedactedPhoto(
+          uuid.parse(req.params.sessionId),
+          uuid.parse(req.params.photoId),
+          req.admin,
+        ),
+      )
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+// The grid-sized version of the same object, behind exactly the same readers,
+// the same limiter and the same access log entry. Identical authorisation is the
+// point: a thumbnail of a face is the same personal data at a smaller size, and
+// a cheaper-to-serve variant must not become a cheaper-to-reach one.
+sessionMediaRoutes.get(
+  '/:sessionId/photos/:photoId/redacted/thumb',
+  ...mediaReaders,
+  mediaReadLimiter,
+  // Logged as REDACTED_PHOTO, not as a new object type. It is the same object
+  // at a smaller size, and inventing a second value would split one person's
+  // views of one frame across two rows in the access ledger for no gain — and
+  // would need a migration to a DB enum besides.
+  logAccess('REDACTED_PHOTO', (req) => req.params.photoId, { purpose: 'COLLECTION' }),
+  async (req, res, next) => {
+    try {
+      sendMedia(
+        res,
+        await sessionService.readRedactedPhotoThumb(
           uuid.parse(req.params.sessionId),
           uuid.parse(req.params.photoId),
           req.admin,

@@ -8,6 +8,7 @@ import { createPurgeJob, executePurgeJob } from './purge.service.js'
 import { buildAccessPackage } from './export.service.js'
 import { issueCertificate, getCertificateForRequest } from './certificate.service.js'
 import { coarseStatus, statusesFor } from './lifecycle.js'
+import { isResolved } from '../../lib/photoState.js'
 
 // Request lifecycle and SLA clock.
 //
@@ -764,7 +765,7 @@ export async function listSubjectMedia(requestId, admin) {
       project: photo.session.project,
       takenAt: photo.takenAt ?? photo.createdAt,
       subjectsOnPhoto: photo._count.subjects,
-      redactedAvailable: Boolean(photo.redactedPath) && !['DEFERRED', 'FAILED'].includes(photo.piiStatus),
+      redactedAvailable: isResolved(photo),
     })),
   }
 }

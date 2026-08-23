@@ -1,4 +1,8 @@
-const isProd = process.env.NODE_ENV === 'production'
+import { IS_HARDENED } from '../config/env.js'
+
+// Secure cookies wherever the app is reachable over a network — see config/env.js
+// for why this is not an inline NODE_ENV comparison any more.
+const isProd = IS_HARDENED
 
 // Distinct cookie names/paths for subject vs admin sessions. Refresh cookies are
 // scoped to their own refresh endpoint only — narrows the blast radius of any

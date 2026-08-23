@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto'
 import path from 'node:path'
 
 import { HEADER_BYTES, MAGIC, isSealed, openBlob, sealBlob } from './blobCrypto.js'
+import { IS_HARDENED } from '../config/env.js'
 import {
   createExportKey,
   derivePathKey,
@@ -27,9 +28,9 @@ const ROOT = process.env.STORAGE_ROOT ?? './storage/media'
 const ENCRYPTION_ENABLED = (() => {
   const explicit = process.env.MEDIA_ENCRYPTION
   const enabled = explicit ? explicit === 'on' : kekAvailable()
-  if (!enabled && process.env.NODE_ENV === 'production') {
+  if (!enabled && IS_HARDENED) {
     throw new Error(
-      'Media encryption at rest is disabled but NODE_ENV=production. Set MEDIA_KEK (32 bytes, base64) before booting.',
+      'Media encryption at rest is disabled but a networked environment. Set MEDIA_KEK (32 bytes, base64) before booting.',
     )
   }
   return enabled

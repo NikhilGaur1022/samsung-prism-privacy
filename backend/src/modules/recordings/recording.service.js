@@ -8,6 +8,7 @@ import { logger } from '../../lib/logger.js'
 import { loadSessionForMedia } from '../sessions/session.service.js'
 import { indexRecording } from '../dsar/itemIndex.service.js'
 import { resolveVoiceEmbedding } from '../enrollment/voiceEnrollment.service.js'
+import { workerFetch, readWorkerError } from '../../lib/workerFetch.js'
 import {
   createVoiceGallery,
   addVoiceEnrollmentPoints,
@@ -96,37 +97,43 @@ async function workerDetail(res) {
 }
 
 async function callAnalyze(buffer, filename) {
-  const form = new FormData()
-  form.append('main_audio', new Blob([buffer]), filename)
+  const buildForm = () => {
+    const f = new FormData()
+    f.append('main_audio', new Blob([buffer]), filename)
+    return f
+  }
 
   let res
   try {
-    res = await fetch(`${AUDIO_SERVICE_URL}/api/v1/analyze`, { method: 'POST', body: form })
+    res = await workerFetch('audio', `${AUDIO_SERVICE_URL}/api/v1/analyze`, { body: buildForm })
   } catch (err) {
     throw new AudioUnavailableError(`Audio worker unreachable while analyzing ${filename}`, err)
   }
   if (!res.ok) {
     throw new AudioUnavailableError(
-      `Audio worker returned ${res.status} while analyzing ${filename}${await workerDetail(res)}`,
+      `Audio worker failed while analyzing ${filename} (${await readWorkerError('audio', res)})`,
     )
   }
   return res.json()
 }
 
 async function callRedact(buffer, filename, intervals) {
-  const form = new FormData()
-  form.append('main_audio', new Blob([buffer]), filename)
-  form.append('intervals', JSON.stringify(intervals))
+  const buildForm = () => {
+    const f = new FormData()
+    f.append('main_audio', new Blob([buffer]), filename)
+    f.append('intervals', JSON.stringify(intervals))
+    return f
+  }
 
   let res
   try {
-    res = await fetch(`${AUDIO_SERVICE_URL}/api/v1/redact`, { method: 'POST', body: form })
+    res = await workerFetch('audio', `${AUDIO_SERVICE_URL}/api/v1/redact`, { body: buildForm })
   } catch (err) {
     throw new AudioUnavailableError(`Audio worker unreachable while redacting ${filename}`, err)
   }
   if (!res.ok) {
     throw new AudioUnavailableError(
-      `Audio worker returned ${res.status} while redacting ${filename}${await workerDetail(res)}`,
+      `Audio worker failed while redacting ${filename} (${await readWorkerError('audio', res)})`,
     )
   }
   return Buffer.from(await res.arrayBuffer())
@@ -516,15 +523,23 @@ export async function analyzeRecording(sessionId, recordingId, admin) {
   }
 }
 
-/** The mute list for a recording, as it stands right now. */
-async function muteIntervalsFor(recordingId) {
-  const segments = await prisma.audioSegment.findMany({
+/**
+ * The segments this recording has decided to mute, as they stand right now.
+ *
+ * Returns the whole rows, not just the times. The interval list handed to the
+ * worker and the manifest written to the audit log are two projections of the
+ * same decision, and deriving both from one query is what stops them
+ * disagreeing about what was muted and why.
+ */
+async function mutedSegmentsFor(recordingId) {
+  return prisma.audioSegment.findMany({
     where: { recordingId, action: { in: ['REDACT_VOICE', 'REDACT_PII'] } },
-    select: { startSec: true, endSec: true },
     orderBy: { startSec: 'asc' },
   })
-  return segments.map((s) => ({ start: s.startSec, end: s.endSec }))
 }
+
+/** The worker's contract: start/end seconds and nothing else. */
+const toIntervals = (segments) => segments.map((s) => ({ start: s.startSec, end: s.endSec }))
 
 // Step 3: execution. Reads the stored AudioSegment decisions (not fresh
 // detection — analyze and redact are deliberately two calls, see
@@ -538,7 +553,8 @@ export async function redactRecording(sessionId, recordingId, admin) {
     throw new ApiError(409, `Recording is ${recording.status} — it has not been analyzed yet`)
   }
 
-  const intervals = await muteIntervalsFor(recordingId)
+  const muted = await mutedSegmentsFor(recordingId)
+  const intervals = toIntervals(muted)
   const original = await readFile(recording.storagePath)
   const ext = extensionFor(recording.mimeType)
 
@@ -574,7 +590,12 @@ export async function redactRecording(sessionId, recordingId, admin) {
       recordingId,
       sessionId,
       intervalsMuted: intervals.length,
-      redactionManifest: segments.map((s) => ({
+      // Built from `muted` — the rows the interval list above was derived from.
+      // This read `segments`, which no scope here ever bound, so every call
+      // threw ReferenceError AFTER the derivative had been written and the
+      // status set to REDACTED: the redaction happened, the caller saw a 500,
+      // and the RECORDING_REDACTED audit entry was never written at all.
+      redactionManifest: muted.map((s) => ({
         speakerId: s.speakerId,
         subjectId: s.subjectId,
         consentId: s.consentId,
@@ -608,7 +629,7 @@ export async function rebuildRedactedForRemainingSpeakers(recordingId) {
   const recording = await prisma.recording.findUnique({ where: { id: recordingId } })
   if (!recording) throw new ApiError(404, 'Recording not found')
 
-  const intervals = await muteIntervalsFor(recordingId)
+  const intervals = toIntervals(await mutedSegmentsFor(recordingId))
   const ext = extensionFor(recording.mimeType)
 
   let rebuilt

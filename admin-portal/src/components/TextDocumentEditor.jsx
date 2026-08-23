@@ -210,6 +210,47 @@ export default function TextDocumentEditor({
     }
   }
 
+  // Turn every detected entity into a REDACT_PII span, in one action.
+  //
+  // Without this, Auto-Detect PII found the Aadhaar number, drew a box round it,
+  // and then Apply Redaction shipped it in the clear — because redaction reads
+  // saved SPANS, and detection produced only highlights. Closing that by hand
+  // meant selecting each entity with the mouse and clicking Apply, once per
+  // entity, and any one missed is a PII leak that looks like a success.
+  //
+  // Detection proposes; the agent still disposes. Existing spans win on overlap,
+  // so a deliberate MANUAL_UNREDACT or a KEEP on a consented subject's name is
+  // never overwritten by the detector, and every span added here is listed below
+  // for review and individually removable before anything is saved.
+  const handleRedactAllDetected = () => {
+    if (piiEntities.length === 0) return
+
+    const additions = piiEntities
+      .filter((p) => spans.every((s) => s.endChar <= p.start || s.startChar >= p.end))
+      .map((p) => ({
+        startChar: p.start,
+        endChar: p.end,
+        action: 'REDACT_PII',
+        reason: `PII_${p.entity_type}_DETECTED`,
+        piiType: p.entity_type,
+        subjectId: null,
+        consentId: null,
+        textSnippet: rawText.slice(p.start, p.end).slice(0, 120),
+      }))
+
+    if (additions.length === 0) {
+      setSuccessMsg('Every detected entity is already covered by a tag')
+      setTimeout(() => setSuccessMsg(null), 3000)
+      return
+    }
+
+    setSpans([...spans, ...additions].sort((a, b) => a.startChar - b.startChar))
+    setSuccessMsg(
+      `${additions.length} detected ${additions.length === 1 ? 'entity' : 'entities'} tagged for redaction — review, then Apply Redaction`,
+    )
+    setTimeout(() => setSuccessMsg(null), 5000)
+  }
+
   // Execute consent-driven redaction
   const handleRedact = async () => {
     setRedacting(true)
@@ -377,6 +418,21 @@ export default function TextDocumentEditor({
                 >
                   <Sparkles size={14} className={analyzing ? 'animate-spin' : ''} />
                   <span>{analyzing ? 'Scanning PII…' : 'Auto-Detect PII'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleRedactAllDetected}
+                  disabled={piiEntities.length === 0}
+                  title={
+                    piiEntities.length === 0
+                      ? 'Run Auto-Detect PII first'
+                      : 'Tag every detected entity for redaction'
+                  }
+                  className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-amber-500 text-white text-xs font-semibold hover:bg-amber-600 disabled:opacity-60 transition shadow-sm"
+                >
+                  <ShieldAlert size={14} />
+                  <span>Tag all {piiEntities.length > 0 ? `${piiEntities.length} ` : ''}detected</span>
                 </button>
 
                 <button

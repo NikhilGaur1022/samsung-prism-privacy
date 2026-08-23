@@ -4,6 +4,7 @@ import { ApiError } from '../../middleware/errorHandler.js'
 import { writeAuditLog } from '../../lib/auditLog.js'
 import { writeFile, readFile, deleteFile } from '../../lib/storage.js'
 import { encryptEmbeddingForSubject, decryptEmbeddingForSubject } from '../../lib/embeddingCrypto.js'
+import { workerFetch, readWorkerError } from '../../lib/workerFetch.js'
 
 const AUDIO_SERVICE_URL = process.env.AUDIO_SERVICE_URL ?? 'http://localhost:8003'
 const MAX_PER_SUBJECT = Number(process.env.VOICE_MAX_ENROLLMENTS_PER_SUBJECT ?? 3)
@@ -29,20 +30,19 @@ export const VOICE_EMBEDDING_DIM = 192
  * dimension check.
  */
 export async function embedVoice(buffer, filename = 'voice.wav') {
-  const form = new FormData()
-  form.append('audio', new Blob([buffer]), filename)
-
-  let res
-  try {
-    res = await fetch(`${AUDIO_SERVICE_URL}/api/v1/embed`, { method: 'POST', body: form })
-  } catch (err) {
-    throw new ApiError(503, 'Audio service unavailable', { cause: err.message })
+  const buildForm = () => {
+    const f = new FormData()
+    f.append('audio', new Blob([buffer]), filename)
+    return f
   }
+
+  const res = await workerFetch('audio', `${AUDIO_SERVICE_URL}/api/v1/embed`, { body: buildForm })
 
   const body = await res.json().catch(() => null)
   if (!res.ok) {
     if (res.status === 400) throw new ApiError(400, body?.detail ?? 'No usable speech in the clip')
-    throw new ApiError(502, `Audio service returned ${res.status}`)
+    await readWorkerError('audio', res)
+    throw new ApiError(502, 'Audio service could not process the clip')
   }
 
   if (!Array.isArray(body?.embedding) || body.embedding.length !== VOICE_EMBEDDING_DIM) {

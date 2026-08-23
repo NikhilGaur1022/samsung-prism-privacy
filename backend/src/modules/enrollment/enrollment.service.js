@@ -6,6 +6,7 @@ import { deleteAllVoiceEnrollments } from './voiceEnrollment.service.js'
 import { writeAuditLog } from '../../lib/auditLog.js'
 import { writeFile, readFile, deleteFile } from '../../lib/storage.js'
 import { encryptEmbeddingForSubject } from '../../lib/embeddingCrypto.js'
+import { workerFetch, readWorkerError } from '../../lib/workerFetch.js'
 
 const FACE_SERVICE_URL = process.env.FACE_SERVICE_URL ?? 'http://localhost:8001'
 const MIN_DET_SCORE = Number(process.env.FACE_ENROLL_MIN_DET_SCORE ?? 0.7)
@@ -20,20 +21,26 @@ const REQUIRED_POSES = 3
 // Shared by enrollment capture and the per-session gallery build — one code path
 // to the face service so both see the same errors and the same quality signal.
 export async function embedImage(buffer, filename = 'selfie.jpg') {
-  const form = new FormData()
-  form.append('file', new Blob([buffer], { type: 'image/jpeg' }), filename)
 
-  let res
-  try {
-    res = await fetch(`${FACE_SERVICE_URL}/embed`, { method: 'POST', body: form })
-  } catch (err) {
-    throw new ApiError(503, 'Face service unavailable', { cause: err.message })
+  // The form is rebuilt per attempt: a FormData carrying a Blob cannot be sent
+  // twice, so a retry with the same object sends an empty body.
+  const buildForm = () => {
+    const f = new FormData()
+    f.append('file', new Blob([buffer], { type: 'image/jpeg' }), filename)
+    return f
   }
+
+  const res = await workerFetch('face', `${FACE_SERVICE_URL}/embed`, { body: buildForm })
 
   const body = await res.json().catch(() => null)
   if (!res.ok) {
+    // A 400 is a real answer about the image and is safe to relay. Anything else
+    // is the worker's internals — including, previously, `connect ECONNREFUSED
+    // 127.0.0.1:8001`, which published the internal service topology to the
+    // client.
     if (res.status === 400) throw new ApiError(400, body?.detail ?? 'No face detected in the image')
-    throw new ApiError(502, `Face service returned ${res.status}`)
+    await readWorkerError('face', res)
+    throw new ApiError(502, 'Face service could not process the image')
   }
   return body
 }

@@ -29,3 +29,27 @@ authAdminRoutes.get(
   requireRole('dataOwner', 'super_admin'),
   authAdminController.listUsers,
 )
+
+// Admin management. super_admin only, and every action here writes an audit row
+// naming the actor — changing who can read biometric data is itself a governance
+// event.
+authAdminRoutes.get(
+  '/admins',
+  requireAdminAuth,
+  requireRole('super_admin'),
+  authAdminController.listAll,
+)
+
+authAdminRoutes.patch(
+  '/admins/:adminId/status',
+  requireAdminAuth,
+  requireRole('super_admin'),
+  authAdminController.updateStatus,
+)
+
+authAdminRoutes.patch(
+  '/admins/:adminId/role',
+  requireAdminAuth,
+  requireRole('super_admin'),
+  authAdminController.updateRole,
+)

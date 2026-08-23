@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { CheckCircle2, EyeOff, Loader2, Merge, ScanFace, Split, Users } from 'lucide-react'
+import { CheckCircle2, EyeOff, Loader2, Merge, ScanFace, Split, Users, Video } from 'lucide-react'
 import Sidebar from '../../components/Sidebar'
 import PageHeader from '../../components/PageHeader'
 import StatusPill from '../../components/StatusPill'
+import { cardImage, seenIn } from '../../lib/clusterCard'
 import EmptyState from '../../components/EmptyState'
 import {
   acceptSuggestions,
@@ -23,6 +24,7 @@ const TAG_LABEL = { UNKNOWN: 'Unknown person', SKIPPED: 'Skipped', NOT_A_FACE: '
 // The select is built from the session roster and nothing else — the full subject
 // DB is never offered here, which is what stops an agent tagging a face with
 // someone who was never in the room (and never consented).
+
 function ClusterCard({
   sessionId,
   cluster,
@@ -66,11 +68,20 @@ function ClusterCard({
     <div className="rounded-card bg-surface p-4 shadow-card">
       <div className="relative overflow-hidden rounded-lg bg-canvas">
         <img
-          src={mediaUrl.faceCrop(sessionId, cluster.repFaceId)}
-          alt="Detected face"
+          src={cardImage(sessionId, cluster)}
+          alt={cluster.faceCount > 0 ? 'Detected face' : 'Detected face, from video'}
           loading="lazy"
           className="aspect-square w-full object-cover"
         />
+        {cluster.videoTrackCount > 0 && (
+          <span
+            className="absolute right-2 top-2 flex items-center gap-1 rounded-md bg-ink/80 px-1.5 py-1 text-[11px] font-semibold text-white"
+            title={`This person also appears in ${cluster.videoTrackCount} video clip${cluster.videoTrackCount === 1 ? '' : 's'}`}
+          >
+            <Video size={12} strokeWidth={2.5} />
+            {cluster.videoTrackCount}
+          </span>
+        )}
         {onToggleSelect && (
           <label className="absolute left-2 top-2 flex h-6 w-6 items-center justify-center rounded-md bg-surface/90 shadow-card">
             <input
@@ -84,9 +95,7 @@ function ClusterCard({
       </div>
 
       <div className="mt-3 flex items-center justify-between gap-2">
-        <p className="text-xs font-semibold text-ink-faint">
-          Seen in {cluster.faceCount} photo{cluster.faceCount === 1 ? '' : 's'}
-        </p>
+        <p className="text-xs font-semibold text-ink-faint">{seenIn(cluster)}</p>
         {cluster.tagStatus !== 'PENDING' && (
           <StatusPill tone={TAG_TONE[cluster.tagStatus]}>
             {cluster.tagStatus === 'TAGGED'

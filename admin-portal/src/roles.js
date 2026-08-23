@@ -240,6 +240,20 @@ export const PAGES = [
     // GET /audit
     roles: ['dpo', 'dataOwner', 'dataAdmin', 'super_admin'],
   },
+  {
+    path: '/queue-health',
+    label: 'Queue Health',
+    icon: Activity,
+    group: 'oversight',
+    // GET /ops/queue-health, POST /ops/requeue (dataAdmin/super_admin only —
+    // the page hides the sweep button for the DPO).
+    //
+    // The DPO is admitted deliberately. "Is redaction actually running" is an
+    // accountability question, and before this page the answer was unobtainable
+    // by anyone: a session sat PROCESSING for two days and the product's own
+    // counters reported zero outstanding work throughout.
+    roles: ['dataAdmin', 'dpo', 'super_admin'],
+  },
 ]
 
 // Role metadata only. Navigation is derived — see navForRole.

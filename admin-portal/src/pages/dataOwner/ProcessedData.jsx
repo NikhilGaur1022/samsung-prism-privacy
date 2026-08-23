@@ -6,6 +6,28 @@ import ListPanel from '../../components/ListPanel'
 import StatusPill from '../../components/StatusPill'
 import { listProjects, listProjectSessions } from '../../lib/api'
 import { AlertTriangle, Loader2 } from 'lucide-react'
+import { blockedFrameCount } from '../../lib/photoState.js'
+import ProjectExportPanel from '../../components/ProjectExportPanel'
+
+// A session row has to describe what that session actually collected: counting
+// photos on an audio session renders "0 photos" against a fully processed
+// recording. Built from the counts rather than the session type because there
+// is no VIDEO member of SessionType — a clip-only session is an IMAGE session
+// holding no photos.
+const SESSION_HOLDINGS = [
+  ['photoCount', 'photo'],
+  ['videoCount', 'clip'],
+  ['recordingCount', 'recording'],
+  ['documentCount', 'document'],
+]
+
+function sessionItemLabel(s) {
+  const parts = SESSION_HOLDINGS.filter(([key]) => (s[key] ?? 0) > 0).map(
+    ([key, noun]) => `${s[key]} ${noun}${s[key] === 1 ? '' : 's'}`,
+  )
+  return parts.length > 0 ? parts.join(' · ') : 'nothing collected yet'
+}
+
 
 const FIELD_CLASS =
   'mt-1.5 w-full rounded-lg border border-border bg-canvas px-3 py-2 text-sm text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand'
@@ -13,12 +35,11 @@ const FIELD_CLASS =
 const SESSION_STATUS_TONE = { ACTIVE: 'brand', PROCESSING: 'warning', TAGGING: 'warning', ARCHIVED: 'success', FAILED: 'danger' }
 const HANDOFF_STATUS_TONE = { PENDING_INGEST: 'warning', INGESTED: 'success', REJECTED: 'danger' }
 
-// A DEFERRED or FAILED frame is one redaction never confirmed on, which blocks
-// that session's handoff — invisible from session status alone, so it is
-// called out on its own row rather than left buried in a count.
-function blockedCount(piiStatusCounts) {
-  return (piiStatusCounts?.DEFERRED ?? 0) + (piiStatusCounts?.FAILED ?? 0)
-}
+// A frame redaction never confirmed on blocks that session's handoff — invisible
+// from session status alone, so it is called out on its own row rather than left
+// buried in a count. See lib/photoState.js for why this is not a list of the
+// states we think are bad.
+const blockedCount = blockedFrameCount
 
 // A data owner sees this session roll-up per project — counts, handoff state, and
 // whether anything is blocked — and can open any row to the session's redacted
@@ -84,6 +105,8 @@ export default function ProcessedData() {
           )}
         </div>
 
+        {projectId && <ProjectExportPanel projectId={projectId} />}
+
         {projectId && (
           <div className="mt-6">
             <ListPanel
@@ -108,7 +131,7 @@ export default function ProcessedData() {
                           {s.location ? ` — ${s.location}` : ''}
                         </p>
                         <p className="mt-0.5 truncate text-xs font-medium text-ink-faint">
-                          {s.photoCount} photo{s.photoCount === 1 ? '' : 's'} · {s.participantCount} participant
+                          {sessionItemLabel(s)} · {s.participantCount} participant
                           {s.participantCount === 1 ? '' : 's'} · created{' '}
                           {new Date(s.createdAt).toLocaleDateString()}
                         </p>
@@ -129,6 +152,7 @@ export default function ProcessedData() {
                       <div className="mt-2 flex items-center gap-2 rounded-lg bg-danger-soft px-3 py-2 text-xs font-semibold text-danger">
                         <AlertTriangle size={14} strokeWidth={2} className="shrink-0" />
                         {blocked} frame{blocked === 1 ? '' : 's'} blocked from handoff — redaction did not confirm
+                        {s.piiStatusCounts.PENDING ? ` (${s.piiStatusCounts.PENDING} never processed)` : ''}
                         {s.piiStatusCounts.DEFERRED ? ` (${s.piiStatusCounts.DEFERRED} deferred)` : ''}
                         {s.piiStatusCounts.FAILED ? ` (${s.piiStatusCounts.FAILED} failed)` : ''}
                       </div>

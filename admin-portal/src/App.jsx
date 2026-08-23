@@ -2,6 +2,8 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { AuthProvider, RequireRole } from './auth'
 import { PAGES } from './roles'
 import ErrorBoundary from './components/ErrorBoundary'
+import UnsupportedViewport from './components/UnsupportedViewport'
+import NotFound from './pages/NotFound'
 import Login from './pages/Login'
 import AcceptInvite from './pages/AcceptInvite'
 import ForgotPassword from './pages/ForgotPassword'
@@ -16,6 +18,7 @@ import DsarQueue from './pages/dataAdmin/DsarQueue'
 import DsarRequestDetail from './pages/dataAdmin/DsarRequestDetail'
 import ImportData from './pages/dataAdmin/ImportData'
 import CollectionSessions from './pages/dataAdmin/CollectionSessions'
+import QueueHealth from './pages/dataAdmin/QueueHealth'
 import DiscoveryWorkspace from './pages/dataAdmin/DiscoveryWorkspace'
 import DataLineage from './pages/dataAdmin/DataLineage'
 import PurgeExport from './pages/dataAdmin/PurgeExport'
@@ -64,6 +67,7 @@ const PAGE_COMPONENTS = {
   '/subject-verification': SubjectVerification,
   '/consent-check': ConsentCheck,
   '/sessions': Sessions,
+  '/queue-health': QueueHealth,
 }
 
 export default function App() {
@@ -72,6 +76,9 @@ export default function App() {
     // blank white page with the real error only in the console — which is what
     // made the /requests/new crash look like a failed fetch for a whole session.
     <ErrorBoundary>
+      {/* Below the 1024px supported floor the console says so rather than
+          rendering at 3.4x the viewport with content clipped mid-word. */}
+      <UnsupportedViewport />
       <AuthProvider>
         <BrowserRouter>
           <Routes>
@@ -101,7 +108,13 @@ export default function App() {
           <Route
             path="/sessions/:sessionId/audio"
             element={
-              <RequireRole allow={['collectionAgent']}>
+              // super_admin, like every other session route in this file. The
+              // API already admits it here — recordingRoutes' captureRoles is
+              // requireRole('collectionAgent', 'super_admin') — so leaving it
+              // out made the portal stricter than the endpoint it calls: the
+              // platform administrator was refused a page the server would have
+              // served, on a role whose whole purpose is break-glass reach.
+              <RequireRole allow={['collectionAgent', 'super_admin']}>
                 <AudioSessionDetail />
               </RequireRole>
             }
@@ -109,7 +122,9 @@ export default function App() {
           <Route
             path="/sessions/:sessionId/text"
             element={
-              <RequireRole allow={['collectionAgent']}>
+              // Same as /audio above: documentRoutes' textRoles already admits
+              // super_admin.
+              <RequireRole allow={['collectionAgent', 'super_admin']}>
                 <TextSessionDetail />
               </RequireRole>
             }
@@ -178,7 +193,10 @@ export default function App() {
             }
           />
           <Route path="/" element={<Navigate to="/login" replace />} />
-          <Route path="*" element={<Navigate to="/login" replace />} />
+          {/* A real 404. This used to redirect to /login, which rendered
+              byte-identically to the sign-in page — so a stale link told a
+              signed-in admin they had been logged out. */}
+          <Route path="*" element={<NotFound />} />
           </Routes>
         </BrowserRouter>
       </AuthProvider>

@@ -47,3 +47,46 @@ export const joinAcceptIpLimiter = makeLimiter({ limit: 20, prefix: 'rl:join-acc
 // Admin login also gets the independent per-account lockout in auth-admin/service.js —
 // this only covers the IP-flood case, not the slow-distributed-attack case.
 export const adminLoginIpLimiter = makeLimiter({ limit: 30, prefix: 'rl:admin-login-ip:' })
+
+
+// ---------------------------------------------------------------------------
+// Data and media routes
+// ---------------------------------------------------------------------------
+// There was no rate limit on any data or upload route at all — only on the four
+// auth endpoints. That left two open primitives:
+//
+//   1. Media reads. logAccess writes an AccessEvent BEFORE the handler runs, so
+//      one HTTP GET per row is an unbounded INSERT primitive against the
+//      append-only table DPDP accountability rests on. Validating the params
+//      first (middleware/uuidParams.js) stops the junk rows; this stops the
+//      volume.
+//   2. Uploads. A 20-file x 25 MB endpoint with no limiter is a 500 MB-per-
+//      request memory amplifier, which is how one POST was measured at exactly
+//      that.
+//
+// Keyed on the authenticated principal rather than the IP where one is
+// available: behind a proxy every request shares an address, and an IP-keyed
+// limit on an authenticated route punishes a whole office for one client.
+function principalKey(req) {
+  return req.admin?.id ?? req.subject?.masterUserId ?? req.ip
+}
+
+export const mediaReadLimiter = makeLimiter({
+  limit: Number(process.env.RATE_LIMIT_MEDIA ?? 600),
+  prefix: 'rl:media:',
+  keyGenerator: principalKey,
+})
+
+export const uploadLimiter = makeLimiter({
+  limit: Number(process.env.RATE_LIMIT_UPLOAD ?? 120),
+  prefix: 'rl:upload:',
+  keyGenerator: principalKey,
+})
+
+// Export builds read and re-encode every image in a project. A handful per
+// window is generous; a loop is not.
+export const exportLimiter = makeLimiter({
+  limit: Number(process.env.RATE_LIMIT_EXPORT ?? 10),
+  prefix: 'rl:export:',
+  keyGenerator: principalKey,
+})

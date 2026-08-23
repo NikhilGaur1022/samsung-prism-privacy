@@ -4,6 +4,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { prisma } from '../src/config/prisma.js'
 import { DEFAULT_AUDIT_SECRET } from '../src/lib/auditLog.js'
+import { IS_PROD, IS_HARDENED, NODE_ENV } from '../src/config/env.js'
 
 // Refuses to let a production deployment start on defaults.
 //
@@ -18,7 +19,10 @@ import { DEFAULT_AUDIT_SECRET } from '../src/lib/auditLog.js'
 //           so long as nobody is pretending otherwise.
 //   WARN  — never blocks; something to fix.
 
-const IS_PROD = process.env.NODE_ENV === 'production'
+// Imported rather than re-derived: an inline NODE_ENV comparison here is what let
+// the gate itself run in the wrong mode. config/env.js also refuses to load on an
+// unrecognised value, so a typo'd NODE_ENV now fails preflight rather than
+// quietly making every FAIL advisory.
 const results = []
 
 function check(name, status, detail) {
@@ -33,17 +37,43 @@ const WEAK_VALUES = new Set([
   DEFAULT_AUDIT_SECRET, 'dev-only-secret-change-in-prod',
 ])
 
-function isWeak(value) {
-  return !value || WEAK_VALUES.has(String(value).trim().toLowerCase())
+// A fixed word list is not a strength check. The shipped default
+// `dev-admin-secret-change-in-prod` passed the old `isWeak`, and so did
+// `hunter2` and `a` — which is how a deploy that reuses the dev `.env`, or
+// copies `.env.example` and edits the other fields, went green while every
+// admin and subject token remained forgeable. A secret is now weak if it is
+// short, if it is in the list, or if it contains any of the words that only
+// ever appear in a placeholder.
+const PLACEHOLDER_MARKERS = /change|dev-|placeholder|example|sample|todo|xxx/i
+const MIN_SECRET_LENGTH = 32
+
+export function isWeak(value) {
+  if (!value) return true
+  const v = String(value).trim()
+  if (WEAK_VALUES.has(v.toLowerCase())) return true
+  if (v.length < MIN_SECRET_LENGTH) return true
+  if (PLACEHOLDER_MARKERS.test(v)) return true
+  // A secret with only a handful of distinct characters ("aaaa…", "abababab…")
+  // is long enough to pass a length check and worth nothing.
+  if (new Set(v).size < 12) return true
+  return false
+}
+
+export function weakReason(value) {
+  if (!value) return 'unset'
+  const v = String(value).trim()
+  if (WEAK_VALUES.has(v.toLowerCase())) return 'a known placeholder value'
+  if (v.length < MIN_SECRET_LENGTH) return `only ${v.length} chars; use at least ${MIN_SECRET_LENGTH}`
+  if (PLACEHOLDER_MARKERS.test(v)) return 'contains a placeholder marker (change/dev-/example/...)'
+  if (new Set(v).size < 12) return 'too few distinct characters to be random'
+  return 'weak'
 }
 
 // --- secrets ---------------------------------------------------------------
 function checkSecrets() {
   const auditSecret = process.env.AUDIT_HMAC_SECRET
   if (isWeak(auditSecret)) {
-    fail('AUDIT_HMAC_SECRET', 'unset or still the development default — the audit chain would be forgeable')
-  } else if (auditSecret.length < 32) {
-    fail('AUDIT_HMAC_SECRET', `only ${auditSecret.length} chars; use at least 32`)
+    fail('AUDIT_HMAC_SECRET', `${weakReason(auditSecret)} — the audit chain would be forgeable`)
   } else {
     pass('AUDIT_HMAC_SECRET', 'set and long enough')
   }
@@ -69,8 +99,52 @@ function checkSecrets() {
   }
 
   for (const name of ['JWT_ADMIN_SECRET', 'JWT_SUBJECT_SECRET']) {
-    if (isWeak(process.env[name])) fail(name, 'unset or a default value')
-    else pass(name, 'set')
+    const value = process.env[name]
+    if (isWeak(value)) {
+      fail(name, `${weakReason(value)} — every token signed with it is forgeable`)
+    } else {
+      pass(name, `${value.length} chars, no placeholder markers`)
+    }
+  }
+
+  // The two secrets must also differ from each other. Identical values would let
+  // a subject token satisfy an admin verify were the audience pin ever removed;
+  // the pin is defence in depth, not a licence to share the key.
+  if (
+    process.env.JWT_ADMIN_SECRET &&
+    process.env.JWT_ADMIN_SECRET === process.env.JWT_SUBJECT_SECRET
+  ) {
+    fail('jwt-secret-separation', 'JWT_ADMIN_SECRET and JWT_SUBJECT_SECRET are the same value')
+  } else {
+    pass('jwt-secret-separation', 'admin and subject secrets differ')
+  }
+
+  pass('NODE_ENV', `${NODE_ENV} (validated against the allowlist at boot)`)
+
+  // EXPOSE_DEV_OTP echoes the one-time code back in the login response so it can
+  // be shown in the UI while testing without a mail server. In a hardened
+  // environment that is an account-takeover primitive: anyone who can reach the
+  // login endpoint requests a code for any address and reads it straight back.
+  //
+  // src/lib/otp.js already refuses to expose it when IS_HARDENED, so this check
+  // is the second line — it makes the misconfiguration VISIBLE rather than
+  // silently ineffective, because a flag that looks on and isn't is how someone
+  // ends up believing the gate works when they have never actually tested it.
+  if (process.env.EXPOSE_DEV_OTP === 'on') {
+    if (IS_HARDENED) {
+      fail(
+        'EXPOSE_DEV_OTP',
+        'set to "on" in a hardened environment — remove it. Every account is ' +
+          'takeable over with nothing but an email address if this ever takes effect.',
+      )
+    } else {
+      warn(
+        'EXPOSE_DEV_OTP',
+        `on — one-time codes are returned in the API response (${NODE_ENV} only, never shipped)`,
+      )
+    }
+  } else {
+    pass('EXPOSE_DEV_OTP', 'off — codes are never echoed to the client')
   }
 
   if (IS_PROD && process.env.AUTH_PROVIDER !== 'real') {
@@ -283,7 +357,13 @@ async function main() {
   return 0
 }
 
-main()
+// Importable as a module so tests exercise the SHIPPED isWeak rather than a
+// copy of it — a gate whose test reimplements the gate proves nothing about the
+// gate. Only a direct invocation runs the checks.
+const invokedDirectly = process.argv[1]?.replaceAll('\\', '/').endsWith('scripts/preflight.js')
+
+if (invokedDirectly) {
+  main()
   .then((code) => {
     process.exitCode = code
   })
@@ -294,3 +374,4 @@ main()
   .finally(async () => {
     await prisma.$disconnect()
   })
+}

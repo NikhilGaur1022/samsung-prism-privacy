@@ -5,6 +5,8 @@ import { requireAdminAuth } from '../../middleware/requireAdminAuth.js'
 import { requireRole } from '../../middleware/requireRole.js'
 import { ApiError } from '../../middleware/errorHandler.js'
 import * as importService from './import.service.js'
+import { mimeFilter, withUploadErrors, requireFileKind } from '../../middleware/uploads.js'
+import { uploadLimiter } from '../../middleware/rateLimiter.js'
 import {
   MAX_FILE_BYTES,
   MAX_FILES_PER_REQUEST,
@@ -29,9 +31,7 @@ importRoutes.use(requireRole('dataAdmin', 'super_admin'))
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: MAX_FILE_BYTES, files: MAX_FILES_PER_REQUEST },
-  fileFilter: (_req, file, cb) => {
-    cb(file.mimetype.startsWith('image/') ? null : new Error('Only image files are accepted'), true)
-  },
+  fileFilter: mimeFilter('image/'),
 })
 
 importRoutes.post('/', async (req, res, next) => {
@@ -55,7 +55,12 @@ importRoutes.get('/', async (req, res, next) => {
 // Mounted before /:batchId so the literal segment is never parsed as an id.
 importRoutes.post(
   '/:batchId/items',
-  upload.array('photos', MAX_FILES_PER_REQUEST),
+  uploadLimiter,
+  withUploadErrors(upload.array('photos', MAX_FILES_PER_REQUEST)),
+  // The header said image/jpeg; these bytes decide whether it was true. Without
+  // it, non-image content reached sharp and came back as a 500 carrying libvips
+  // internals.
+  requireFileKind('image', { field: 'photos' }),
   async (req, res, next) => {
     try {
       const batchId = uuid.parse(req.params.batchId)

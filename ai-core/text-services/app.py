@@ -420,6 +420,26 @@ PHONE_FALSE_POSITIVE_CONTEXT_TERMS = {
 
 NAME_TOKEN_REGEX = r"[A-Za-z][A-Za-z.'-]{1,}"
 NAME_TOKEN_RE = re.compile(rf"^{NAME_TOKEN_REGEX}$")
+
+# The same token, but required to start with a capital.
+#
+# NAME_TOKEN_REGEX accepts a lowercase word, which is right where an explicit
+# label makes the intent clear ("Participant: priya"). It is wrong for the two
+# recognizers below that scan running prose for "<role-noun> <word>": against an
+# ordinary sentence they read "Participant confirmed she is happy" as a person
+# named "confirmed", and "the participant portal" as one named "portal" - both
+# scored 0.68, HIGHER than the 0.58 a real two-word name gets from the full-name
+# pattern, so no score threshold can separate them.
+#
+# A name in that position is capitalised in any text a human wrote. Requiring it
+# costs nothing real and removes the whole class of false positive.
+# (?-i:[A-Z]) - the scoped flag matters. Both patterns that use this compile with
+# re.IGNORECASE, because the ROLE NOUN in front of the name has to match
+# "Participant" and "participant" alike. Under that flag a plain [A-Z] matches
+# lowercase too, so the first version of this changed nothing at all and
+# "confirmed" was still read as a person. Turning ignore-case off for exactly
+# this one character keeps the role noun case-insensitive and the name not.
+CAPITALISED_NAME_TOKEN_REGEX = r"(?-i:[A-Z])[A-Za-z.'-]{1,}"
 VEHICLE_CANONICAL_RE = re.compile(
     r"^(?P<state>[A-Z]{2})(?P<district>[0-9]{1,2})(?P<series>[A-Z]{1,3})(?P<number>[0-9]{1,4})$"
 )
@@ -930,13 +950,17 @@ class MultiWordNameRecognizer(EntityRecognizer):
         rf"\s*[:=-]\s*(?P<name>{NAME_TOKEN_REGEX}(?:\s+{NAME_TOKEN_REGEX}){{0,3}})",
         flags=re.IGNORECASE,
     )
+    # Both of the next two scan running prose, so both require a capitalised
+    # candidate - see CAPITALISED_NAME_TOKEN_REGEX for what accepting a lowercase
+    # one cost. The labelled pattern above is anchored by an explicit "name:"
+    # label and keeps the looser token deliberately.
     CONTEXTUAL_SINGLE_NAME_PATTERN = re.compile(
         rf"\b(?:student|participant|employee|visitor|patient|customer|applicant|candidate|subject|person)"
-        rf"\s+(?:named\s+|called\s+)?(?P<name>{NAME_TOKEN_REGEX})\b",
+        rf"\s+(?:named\s+|called\s+)?(?P<name>{CAPITALISED_NAME_TOKEN_REGEX})\b",
         flags=re.IGNORECASE,
     )
     RELATIONAL_NAME_PATTERN = re.compile(
-        rf"\b(?:called|named|met|spoke to|assigned to|contacted by)\s+(?P<name>{NAME_TOKEN_REGEX})\b",
+        rf"\b(?:called|named|met|spoke to|assigned to|contacted by)\s+(?P<name>{CAPITALISED_NAME_TOKEN_REGEX})\b",
         flags=re.IGNORECASE,
     )
     COMMON_CONTEXTUAL_NAME_PATTERN = re.compile(
@@ -1129,8 +1153,66 @@ class SecretRecognizer(ValidatingPatternRecognizer):
         )
 
 
+class IndianPhoneRecognizer(ValidatingPatternRecognizer):
+    """Indian mobile and landline numbers, in the forms people actually write.
+
+    Presidio's stock PHONE_NUMBER recognizer runs `phonenumbers` against a
+    default region list that does not include IN, so on this corpus it found
+    nothing at all: "+91 98456 12337" and the bare "90080 44112" both went
+    straight through into the "redacted" output. Every other India-specific
+    identifier here (Aadhaar, PAN, GSTIN, voter, passport, UPI, IFSC) already
+    has a recognizer; the phone number is the one people give out most often
+    and it was the one not covered.
+
+    Deliberately conservative about what counts:
+      - a mobile is ten digits starting 6-9, the range TRAI actually allocates,
+        optionally +91/0091/0-prefixed and optionally split by a space or hyphen
+      - a landline is an STD code in brackets or followed by a separator
+    A bare ten-digit run with no country code and no leading 6-9 is NOT matched,
+    because that is also what an account number, an order id and a PIN-plus-
+    padding look like.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            supported_entity="PHONE_NUMBER",
+            patterns=[
+                Pattern(
+                    name="in_mobile",
+                    regex=r"(?<![\d])(?:(?:\+?91|0091)[\s-]?|0)?[6-9]\d{4}[\s-]?\d{5}(?![\d])",
+                    score=0.75,
+                ),
+                Pattern(
+                    name="in_landline",
+                    regex=r"(?<![\d])(?:\+?91[\s-]?)?(?:\(0\d{2,4}\)|0\d{2,4})[\s-]?\d{6,8}(?![\d])",
+                    score=0.7,
+                ),
+            ],
+            context=["phone", "mobile", "contact", "call", "number", "whatsapp", "tel"],
+        )
+
+    def validate_result(self, pattern_text: str) -> bool | None:
+        digits = re.sub(r"\D", "", pattern_text)
+        # Strip a country code before counting, so "+91 98456 12337" is judged on
+        # its ten national digits rather than twelve.
+        if digits.startswith("91") and len(digits) == 12:
+            digits = digits[2:]
+        elif digits.startswith("0") and len(digits) == 11:
+            digits = digits[1:]
+
+        if len(digits) != 10:
+            return None
+        if digits[0] not in "6789":
+            return False
+        # All-same and simple runs are placeholders in forms, not numbers.
+        if len(set(digits)) <= 2:
+            return False
+        return True
+
+
 CUSTOM_RECOGNIZERS = [
     MultiWordNameRecognizer,
+    IndianPhoneRecognizer,
     AadhaarRecognizer,
     PANRecognizer,
     GSTINRecognizer,

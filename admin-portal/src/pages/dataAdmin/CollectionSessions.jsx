@@ -6,6 +6,27 @@ import PageHeader from '../../components/PageHeader'
 import ListPanel from '../../components/ListPanel'
 import StatusPill from '../../components/StatusPill'
 import { listProjects, listProjectSessions } from '../../lib/api'
+import { blockedFrameCount } from '../../lib/photoState.js'
+
+// A session row has to describe what that session actually collected: counting
+// photos on an audio session renders "0 photos" against a fully processed
+// recording. Built from the counts rather than the session type because there
+// is no VIDEO member of SessionType — a clip-only session is an IMAGE session
+// holding no photos.
+const SESSION_HOLDINGS = [
+  ['photoCount', 'photo'],
+  ['videoCount', 'clip'],
+  ['recordingCount', 'recording'],
+  ['documentCount', 'document'],
+]
+
+function sessionItemLabel(s) {
+  const parts = SESSION_HOLDINGS.filter(([key]) => (s[key] ?? 0) > 0).map(
+    ([key, noun]) => `${s[key]} ${noun}${s[key] === 1 ? '' : 's'}`,
+  )
+  return parts.length > 0 ? parts.join(' · ') : 'nothing collected yet'
+}
+
 
 const FIELD_CLASS =
   'mt-1.5 w-full rounded-lg border border-border bg-canvas px-3 py-2 text-sm text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand'
@@ -19,9 +40,7 @@ const SESSION_STATUS_TONE = {
 }
 const HANDOFF_STATUS_TONE = { PENDING_INGEST: 'warning', INGESTED: 'success', REJECTED: 'danger' }
 
-function blockedCount(piiStatusCounts) {
-  return (piiStatusCounts?.DEFERRED ?? 0) + (piiStatusCounts?.FAILED ?? 0)
-}
+const blockedCount = blockedFrameCount
 
 // The ingest operator's way onto what collection actually produced. Before this,
 // every session route was behind the collectionAgent floor, so the moment an agent
@@ -127,7 +146,7 @@ export default function CollectionSessions() {
                           {s.location ? ` — ${s.location}` : ''}
                         </p>
                         <p className="mt-0.5 truncate text-xs font-medium text-ink-faint">
-                          {s.photoCount} photo{s.photoCount === 1 ? '' : 's'} ·{' '}
+                          {sessionItemLabel(s)} ·{' '}
                           {s.participantCount} participant{s.participantCount === 1 ? '' : 's'} ·
                           created {new Date(s.createdAt).toLocaleDateString()}
                         </p>

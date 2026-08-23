@@ -98,7 +98,10 @@ export default function AcceptInvite() {
 
         <p className="mt-6 text-center text-xs font-medium text-ink-faint">
           Already active?{' '}
-          <Link to="/login" className="font-semibold text-brand">
+          <Link
+            to="/login"
+            className="-my-2 inline-flex min-h-11 items-center px-1 font-semibold text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+          >
             Sign in
           </Link>
         </p>

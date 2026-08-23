@@ -23,12 +23,21 @@ export function actorFromRequest(req) {
   return { actorType: ACTOR_TYPE.SERVICE, actorId: null }
 }
 
+// The IP written here is evidence: it appears in the access ledger a DPO reads
+// back when answering "who looked at this". Reading X-Forwarded-For directly, as
+// this did, meant any client could choose what that evidence said by sending the
+// header itself — the ledger recorded the attacker's claim, not the connection.
+//
+// req.ip is the same value only when Express has been told how many proxy hops
+// to trust (see `trust proxy` in app.js). With that set, Express walks the
+// forwarded chain from the right and stops at the first hop it does not trust,
+// which is the only way to read the header safely. Without it req.ip is the
+// socket address, which is wrong behind a proxy but not forgeable — a
+// conservative failure, unlike the previous one.
 function clientMeta(req) {
   if (!req) return { ip: null, userAgent: null }
-  const forwarded = req.headers?.['x-forwarded-for']
-  const ip = (Array.isArray(forwarded) ? forwarded[0] : forwarded)?.split(',')[0]?.trim()
   return {
-    ip: ip || req.ip || req.socket?.remoteAddress || null,
+    ip: req.ip || req.socket?.remoteAddress || null,
     userAgent: req.headers?.['user-agent']?.slice(0, 512) ?? null,
   }
 }
@@ -96,8 +105,20 @@ export async function recordDenied({ objectType, objectId, purpose = null, req =
   }
 }
 
-export async function listAccessEvents({ actorId, objectType, objectId, dsarRequestId, since, limit = 100 }) {
-  return prisma.accessEvent.findMany({
+// Returns { items, nextCursor }. Before the cursor existed this took the most
+// recent `limit` rows and stopped, so 93% of the access ledger was unreachable
+// through the only route that reads it — a compliance record you cannot page
+// through is a compliance record you do not have.
+export async function listAccessEvents({
+  actorId,
+  objectType,
+  objectId,
+  dsarRequestId,
+  since,
+  limit = 100,
+  cursor,
+}) {
+  const rows = await prisma.accessEvent.findMany({
     where: {
       ...(actorId ? { actorId } : {}),
       ...(objectType ? { objectType } : {}),
@@ -105,7 +126,14 @@ export async function listAccessEvents({ actorId, objectType, objectId, dsarRequ
       ...(dsarRequestId ? { dsarRequestId } : {}),
       ...(since ? { createdAt: { gte: since } } : {}),
     },
-    orderBy: { createdAt: 'desc' },
-    take: limit,
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    take: limit + 1,
+    ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
   })
+
+  // take: limit + 1 rather than a second count query — the presence of the extra
+  // row is the whole answer to "is there more", and it costs one row.
+  const hasMore = rows.length > limit
+  const items = hasMore ? rows.slice(0, limit) : rows
+  return { items, nextCursor: hasMore ? items[items.length - 1].id : null }
 }

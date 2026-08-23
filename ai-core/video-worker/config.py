@@ -103,24 +103,44 @@ def onnx_providers() -> list[str]:
 
 
 def video_encoder() -> str:
-    """NVENC when this ffmpeg build has it, libx264 otherwise.
+    """NVENC when this ffmpeg can actually USE it, libx264 otherwise.
 
     Same reasoning as onnx_providers: probed, because the answer differs
     between the CPU and GPU images built from this one Dockerfile.
+
+    The probe has to be a real encode, not a listing. `ffmpeg -encoders` reports
+    what the binary was COMPILED with, and Debian's ffmpeg ships nvenc support
+    whether or not the machine has an NVIDIA card in it. The CPU image therefore
+    passed the listing check, selected h264_nvenc, and then died the moment a
+    frame was written to it:
+
+        BrokenPipeError: [Errno 32] Broken pipe   (redact.py, process.stdin.write)
+
+    /health reported "encoder": "h264_nvenc" throughout, so the service looked
+    correctly configured while every single /redact returned 500 — and on the
+    caller's side that is indistinguishable from the worker being down, so the
+    clip is parked DEFERRED and the session never archives.
+
+    One frame at 32x32 costs a few hundred milliseconds, once, at import.
     """
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         return "libx264"
     try:
-        out = subprocess.run(
-            [ffmpeg, "-hide_banner", "-encoders"],
+        probe = subprocess.run(
+            [
+                ffmpeg, "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "nullsrc=s=32x32:d=0.1",
+                "-c:v", "h264_nvenc", "-f", "null", "-",
+            ],
             capture_output=True,
-            text=True,
-            timeout=10,
-        ).stdout
+            timeout=20,
+        )
+        if probe.returncode == 0:
+            return "h264_nvenc"
     except Exception:
-        return "libx264"
-    return "h264_nvenc" if "h264_nvenc" in out else "libx264"
+        pass
+    return "libx264"
 
 
 GPU_ENABLED = "CUDAExecutionProvider" in onnx_providers()

@@ -22,6 +22,24 @@ from faster_whisper.audio import decode_audio
 FALLBACK_RATE = 16000
 
 
+def to_wav16k(src_path: str, dst_path: str) -> float:
+    """Decodes any container once and writes 16 kHz mono PCM WAV. Returns duration.
+
+    /analyze decodes the same file four-plus times — once in diarize, once in
+    transcribe, once per speaker in extract_voice_vector. For a PCM WAV that is
+    libsndfile and free. For the WebM/Opus a browser MediaRecorder actually
+    produces it is the PyAV fallback, which measured 7.7s to decode 8.2s of
+    audio: the decode dominated the request and scaled with the speaker count.
+
+    Normalising up front pays that cost exactly once and leaves every later read
+    on the libsndfile path. 16 kHz mono is not a compromise here — it is what
+    pyannote, Whisper and ECAPA all resample to internally anyway.
+    """
+    mono = decode_audio(src_path, sampling_rate=FALLBACK_RATE)
+    sf.write(dst_path, mono, FALLBACK_RATE, subtype="PCM_16")
+    return len(mono) / FALLBACK_RATE
+
+
 def load_waveform(audio_path: str) -> tuple[torch.Tensor, int]:
     """Returns (waveform, sample_rate) with waveform shaped (channel, time).
 

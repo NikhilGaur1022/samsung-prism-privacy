@@ -1,6 +1,7 @@
 import { prisma } from '../../config/prisma.js'
 import { ApiError } from '../../middleware/errorHandler.js'
 import { writeAuditLog } from '../../lib/auditLog.js'
+import { UNRESOLVED_PHOTO_WHERE } from '../../lib/photoState.js'
 
 export async function listHandoffs({ status }) {
   const handoffs = await prisma.sessionHandoff.findMany({
@@ -87,10 +88,7 @@ export async function ingestHandoff(handoffId, admin) {
   // indexed and exported, and an unmasked Aadhaar in the vault is a §8(5) breach
   // that no later fix can undo. The redaction retry worker clears these.
   const unmasked = await prisma.photo.count({
-    where: {
-      sessionId: handoff.sessionId,
-      OR: [{ piiStatus: 'DEFERRED' }, { piiStatus: 'FAILED' }, { redactedPath: null }],
-    },
+    where: { sessionId: handoff.sessionId, ...UNRESOLVED_PHOTO_WHERE },
   })
   if (unmasked > 0) {
     throw new ApiError(
@@ -155,22 +153,38 @@ export async function getLineage({ projectId, subjectId, limit = 200 }) {
     },
   })
 
+  // Two of these relations are legitimately null and the previous version of
+  // this function dereferenced both, so the page 500'd the moment the database
+  // held a single imported record:
+  //
+  //   l.consent       null on an import link for which no live ProjectConsent
+  //                   existed at ingest (PhotoSubject.consentId is nullable and
+  //                   says so). Reading `.status` off it threw
+  //                   "Cannot read properties of null".
+  //   l.photo.session null on an imported photo, which has no capture event and
+  //                   therefore no session, agent or project.
+  //
+  // Neither is an error state, and neither should be hidden either. A link with
+  // no consent is a record held with no stated lawful basis — exactly what
+  // integrity-check's `collected-links-have-consent` reports — so it is surfaced
+  // as its own value rather than blanked, because this page IS the evidence of
+  // what a DSAR erasure would walk.
   return {
     items: links.map((l) => ({
       id: l.id,
       photoId: l.photoId,
-      sha256: l.photo.sha256,
-      hasRedacted: Boolean(l.photo.redactedPath),
-      sessionId: l.photo.session.id,
-      sessionCode: l.photo.session.code,
+      sha256: l.photo?.sha256 ?? null,
+      hasRedacted: Boolean(l.photo?.redactedPath),
+      sessionId: l.photo?.session?.id ?? null,
+      sessionCode: l.photo?.session?.code ?? 'Imported',
       subjectId: l.subjectId,
-      subjectName: l.subject.fullName,
-      subjectEmail: l.subject.email,
+      subjectName: l.subject?.fullName ?? null,
+      subjectEmail: l.subject?.email ?? null,
       consentId: l.consentId,
-      consentStatus: l.consent.status,
-      policyVersion: l.consent.policyVersion,
-      projectId: l.consent.project.id,
-      projectName: l.consent.project.name,
+      consentStatus: l.consent?.status ?? 'NO CONSENT RECORD',
+      policyVersion: l.consent?.policyVersion ?? null,
+      projectId: l.consent?.project?.id ?? null,
+      projectName: l.consent?.project?.name ?? '—',
       createdAt: l.createdAt,
     })),
   }

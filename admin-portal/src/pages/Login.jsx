@@ -1,12 +1,12 @@
 import { useState } from 'react'
-import { useNavigate, Link } from 'react-router-dom'
+import { useNavigate, Navigate, Link } from 'react-router-dom'
 import { ShieldCheck, Mail, Lock, Eye, EyeOff } from 'lucide-react'
 import { useAuth } from '../auth'
 import { login } from '../lib/api'
 
 export default function Login() {
   const navigate = useNavigate()
-  const { signIn } = useAuth()
+  const { signIn, admin, loading } = useAuth()
   const [showPassword, setShowPassword] = useState(false)
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -14,6 +14,15 @@ export default function Login() {
   const [error, setError] = useState(null)
 
   const canSubmit = email.trim().length > 3 && password.length > 0 && !submitting
+
+  // An admin whose cookie is still good does not need to sign in again.
+  //
+  // Without this, /login rendered the form for someone already authenticated —
+  // /auth/admin/me answered 200 the whole time — and they sat at a sign-in
+  // screen with no indication they were already in. Any stale bookmark, the
+  // bare '/' redirect, or a back-button press after signing in landed there.
+  if (loading) return null
+  if (admin) return <Navigate to="/dashboard" replace />
 
   const handleSubmit = async (e) => {
     e.preventDefault()
@@ -80,7 +89,10 @@ export default function Login() {
                 <label className="block text-xs font-bold uppercase tracking-wide text-ink-faint">
                   Password
                 </label>
-                <Link to="/forgot-password" className="text-xs font-semibold text-brand">
+                <Link
+                  to="/forgot-password"
+                  className="-my-2 inline-flex min-h-11 items-center px-1 text-xs font-semibold text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+                >
                   Forgot?
                 </Link>
               </div>
@@ -93,10 +105,16 @@ export default function Login() {
                   placeholder="••••••••"
                   className="w-full bg-transparent text-sm font-semibold text-ink outline-none placeholder:font-medium placeholder:text-ink-faint"
                 />
+                {/* WCAG 2.2 SC 2.5.8 sets 24x24 CSS px as the floor for a
+                    pointer target and 44x44 as comfortable. This rendered at
+                    18x18 — it fails with a mouse, not only with a thumb, so it
+                    is an accessibility defect on the supported desktop surface
+                    rather than a mobile one. The icon stays 18px; the hit area
+                    does not. */}
                 <button
                   type="button"
                   onClick={() => setShowPassword((v) => !v)}
-                  className="shrink-0 text-ink-faint"
+                  className="-mr-1.5 flex size-11 shrink-0 items-center justify-center rounded-lg text-ink-faint focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
                   aria-label={showPassword ? 'Hide password' : 'Show password'}
                 >
                   {showPassword ? <EyeOff size={18} strokeWidth={1.75} /> : <Eye size={18} strokeWidth={1.75} />}

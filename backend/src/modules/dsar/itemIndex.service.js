@@ -1,4 +1,5 @@
 import { prisma } from '../../config/prisma.js'
+import { isResolved } from '../../lib/photoState.js'
 
 // The item index (`subject_data_items`) is a PROJECTION, never an authority.
 // `PhotoSubject` / `Photo` / `SubjectFaceEnrollment` remain the source of truth;
@@ -23,6 +24,12 @@ export const SOURCE = {
   // individual utterances are how it gets redacted, not what gets listed.
   RECORDING: 'recordings',
   VOICE_ENROLLMENT: 'subject_voice_enrollments',
+  // One item per (subject, clip), keyed on the consent LINK rather than on the
+  // clip — the same shape as PHOTO_SUBJECT, and for the same reason: the link is
+  // what makes holding this person's face lawful, and it is what erasure
+  // deletes. Keying on the clip would leave the item pointing at a row that
+  // legitimately survives for the other people in it.
+  VIDEO_SUBJECT: 'video_subjects',
 }
 
 // Source tables this walk owns. The tombstone sweep is scoped to them so a
@@ -32,6 +39,7 @@ const WALKED_SOURCES = [
   SOURCE.ENROLLMENT,
   SOURCE.RECORDING,
   SOURCE.VOICE_ENROLLMENT,
+  SOURCE.VIDEO_SUBJECT,
 ]
 
 const WRITE_CHUNK = 20
@@ -91,11 +99,14 @@ function distinctSpeakers(segments) {
 
 /**
  * Same rule `listSubjectMedia()` uses. A derivative whose PII mask was never
- * confirmed is not "available" — serving it is the reportable failure mode, so
- * DEFERRED/FAILED counts as no redacted copy at all.
+ * confirmed is not "available" — serving it is the reportable failure mode.
+ *
+ * Delegates to lib/photoState.js rather than restating the rule: the previous
+ * inline form enumerated DEFERRED and FAILED and so treated a PENDING photo,
+ * whose redaction never ran at all, as available.
  */
 export function isRedactedAvailable(photo) {
-  return Boolean(photo.redactedPath) && !['DEFERRED', 'FAILED'].includes(photo.piiStatus)
+  return isResolved(photo)
 }
 
 function photoItem(link) {
@@ -258,8 +269,69 @@ async function writeAll(entries, at, client = prisma) {
  * the sweep boundary — taking it from the DB clock instead would make the sweep
  * depend on app-vs-DB clock skew and could tombstone rows written seconds ago.
  */
+const VIDEO_LINK_SELECT = {
+  id: true,
+  subjectId: true,
+  consentId: true,
+  consent: { select: { projectId: true } },
+  video: {
+    select: {
+      id: true,
+      sessionId: true,
+      storagePath: true,
+      redactedPath: true,
+      status: true,
+      sha256: true,
+      durationSec: true,
+      createdAt: true,
+      session: { select: { projectId: true } },
+      subjects: { select: { subjectId: true } },
+    },
+  },
+}
+
+/**
+ * Same fail-closed rule as the photo and recording forms.
+ *
+ * A clip is only "redacted available" when a derivative exists AND the status
+ * says the blur confirmed. A DEFERRED clip has no trustworthy derivative — its
+ * analysis may have produced no track boxes at all, in which case a redaction
+ * pass would have blurred nothing while still writing a file. Serving that is
+ * the reportable failure.
+ */
+export function isVideoRedactedAvailable(video) {
+  return Boolean(video.redactedPath) && video.status === 'REDACTED'
+}
+
+/**
+ * One index row per subject per clip.
+ *
+ * `sharedSubjectCount` counts the DISTINCT linked subjects on the whole clip,
+ * the video analogue of `photo.subjects.length`, and it drives the same
+ * server-side downgrade: more than one means a DELETE becomes a blur-this-person
+ * REREDACT, because the others' consent to their own footage survives this
+ * subject's erasure.
+ */
+function videoItem(link) {
+  const video = link.video
+  return {
+    subjectId: link.subjectId,
+    type: 'VIDEO',
+    origin: 'COLLECTION_SESSION',
+    sourceTable: SOURCE.VIDEO_SUBJECT,
+    sourceId: link.id,
+    projectId: video.session?.projectId ?? link.consent?.projectId ?? null,
+    sessionId: video.sessionId,
+    storagePath: video.storagePath,
+    contentHash: video.sha256 || null,
+    capturedAt: video.createdAt,
+    sharedSubjectCount: Math.max(video.subjects.length, 1),
+    redactedAvailable: isVideoRedactedAvailable(video),
+  }
+}
+
 export async function indexSubject(subjectId, { at = new Date() } = {}) {
-  const [links, enrollments, voiceEnrollments, recordings] = await Promise.all([
+  const [links, enrollments, voiceEnrollments, recordings, videoLinks] = await Promise.all([
     prisma.photoSubject.findMany({ where: { subjectId }, select: PHOTO_LINK_SELECT }),
     prisma.subjectFaceEnrollment.findMany({
       where: { subjectId },
@@ -284,6 +356,7 @@ export async function indexSubject(subjectId, { at = new Date() } = {}) {
       where: { segments: { some: { subjectId } } },
       select: RECORDING_SELECT,
     }),
+    prisma.videoSubject.findMany({ where: { subjectId }, select: VIDEO_LINK_SELECT }),
   ])
 
   const entries = [
@@ -304,6 +377,7 @@ export async function indexSubject(subjectId, { at = new Date() } = {}) {
       }),
       deletedAt: null,
     })),
+    ...videoLinks.map((link) => ({ item: videoItem(link), deletedAt: null })),
   ]
 
   await writeAll(entries, at)

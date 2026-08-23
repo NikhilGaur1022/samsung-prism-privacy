@@ -11,6 +11,8 @@ import { logAccess } from '../../middleware/logAccess.js'
 import { ApiError } from '../../middleware/errorHandler.js'
 import { requireVideoEnabled } from '../../lib/videoFeature.js'
 import * as videoService from './video.service.js'
+import { mediaReadLimiter, uploadLimiter } from '../../middleware/rateLimiter.js'
+import { withUploadErrors } from '../../middleware/uploads.js'
 
 export const videoRoutes = Router()
 
@@ -45,12 +47,24 @@ const uuid = z.string().uuid()
 // which is more than a collection session produces. The real ceiling is that
 // lib/storage.js seals whole buffers — a streaming write is the fix for larger
 // files, and it touches every caller, so it is deliberately not in this change.
+// Up to MAX_FILES per request, not one.
+//
+// An agent coming back from a shoot has a folder of clips, and one-at-a-time
+// meant one HTTP request, one rate-limit token and one round of consent checks
+// per file — the stills route has taken batches of twenty since it was written,
+// and there was no reason beyond history for video not to.
+//
+// Five, not twenty: at the 200 MB per-file ceiling twenty files is a 4 GB
+// request body. Five is a realistic session's worth of clips and a bounded
+// amount of disk to spool.
+const MAX_FILES = Number(process.env.VIDEO_UPLOAD_MAX_FILES ?? 5)
+
 const upload = multer({
   storage: multer.diskStorage({
     destination: path.join(os.tmpdir(), 'prism-video-uploads'),
     filename: (_req, file, cb) => cb(null, `${randomUUID()}${path.extname(file.originalname) || ''}`),
   }),
-  limits: { fileSize: 200 * 1024 * 1024, files: 1 },
+  limits: { fileSize: 200 * 1024 * 1024, files: MAX_FILES },
   fileFilter: (_req, file, cb) => {
     cb(file.mimetype.startsWith('video/') ? null : new ApiError(415, 'Only video files are accepted'), true)
   },
@@ -65,21 +79,68 @@ async function cleanup(files) {
   await Promise.all(files.filter(Boolean).map((f) => rmTmp(f.path, { force: true }).catch(() => {})))
 }
 
+// `.array`, not `.single`, on the SAME field name — a client sending exactly one
+// `video` part keeps working unchanged, and one sending five is no longer a 400.
 videoRoutes.post(
   '/:sessionId/videos',
   captureRoles,
-  upload.single('video'),
+  // The stills route has been rate-limited since uploads were bounded; video
+  // was not, which left a 200 MB × 5 endpoint with no per-principal ceiling.
+  uploadLimiter,
+  withUploadErrors(upload.array('video', MAX_FILES)),
   async (req, res, next) => {
     try {
-      if (!req.file) throw new ApiError(400, 'video file is required')
+      const files = req.files ?? []
+      if (files.length === 0) throw new ApiError(400, 'video file is required')
       const sessionId = uuid.parse(req.params.sessionId)
-      const file = await collect(req.file)
-      const { video, duplicate } = await videoService.uploadVideo(sessionId, file, req.admin)
-      res.status(duplicate ? 200 : 201).json({ video, duplicate })
+
+      // Per-file outcomes, exactly as the photo batch route reports them: a
+      // batch that fails on file three must not discard files one and two, and
+      // the caller has to be able to tell which is which in order to retry.
+      const accepted = []
+      const rejected = []
+
+      for (const raw of files) {
+        try {
+          const file = await collect(raw)
+          const { video, duplicate } = await videoService.uploadVideo(sessionId, file, req.admin)
+          accepted.push({ filename: raw.originalname, video, duplicate: Boolean(duplicate) })
+        } catch (err) {
+          const isClientError = err.statusCode >= 400 && err.statusCode < 500
+          rejected.push({
+            filename: raw.originalname,
+            reason: isClientError ? err.message : 'Could not be processed',
+            code: isClientError ? (err.code ?? 'REJECTED') : 'INTERNAL_ERROR',
+          })
+          if (!isClientError) req.log?.error?.({ err, filename: raw.originalname }, 'video upload failed')
+        }
+      }
+
+      // A single-file request keeps its original response shape — `{video,
+      // duplicate}` — so nothing that already calls this route has to change.
+      const single = files.length === 1 && accepted.length === 1
+      if (single) {
+        return res
+          .status(accepted[0].duplicate ? 200 : 201)
+          .json({ video: accepted[0].video, duplicate: accepted[0].duplicate })
+      }
+
+      res.status(rejected.length === 0 ? 201 : 207).json({
+        added: accepted.filter((a) => !a.duplicate).length,
+        duplicates: accepted.filter((a) => a.duplicate).length,
+        failed: rejected.length,
+        videos: accepted.map((a) => a.video),
+        accepted: accepted.map(({ filename, duplicate, video }) => ({
+          filename,
+          duplicate,
+          videoId: video.id,
+        })),
+        rejected,
+      })
     } catch (err) {
       next(err)
     } finally {
-      await cleanup([req.file])
+      await cleanup(req.files ?? [])
     }
   },
 )
@@ -112,6 +173,7 @@ videoRoutes.get('/:sessionId/videos/:videoId', readRoles, async (req, res, next)
 videoRoutes.get(
   '/:sessionId/videos/:videoId/redacted',
   readRoles,
+  mediaReadLimiter,
   logAccess('REDACTED_VIDEO', (req) => req.params.videoId, { purpose: 'COLLECTION' }),
   async (req, res, next) => {
     try {
@@ -131,6 +193,7 @@ videoRoutes.get(
 videoRoutes.get(
   '/:sessionId/video-tracks/:trackId/crop',
   readRoles,
+  mediaReadLimiter,
   logAccess('FACE_CROP', (req) => req.params.trackId, { purpose: 'COLLECTION' }),
   async (req, res, next) => {
     try {

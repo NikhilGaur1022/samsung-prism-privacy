@@ -2,6 +2,7 @@ import { createHash, randomInt } from 'node:crypto'
 import sharp from 'sharp'
 import { prisma } from '../../config/prisma.js'
 import { ApiError } from '../../middleware/errorHandler.js'
+import { readOrCreateThumbnail, invalidateThumbnail, buildThumbnail } from '../../lib/thumbnails.js'
 import { writeAuditLog } from '../../lib/auditLog.js'
 import { consentVerdict, isEligible, CONSENT_VERDICT } from '../../lib/consent.js'
 import { writeFile, readFile, deleteFile } from '../../lib/storage.js'
@@ -16,6 +17,18 @@ import {
 } from '../../lib/embeddingCrypto.js'
 import { assertCollectable } from '../projects/project.service.js'
 import { indexPhotoSubjects } from '../dsar/itemIndex.service.js'
+import { redactVideos, countDeferredVideos } from '../videos/video.service.js'
+import { videoCaptureEnabled } from '../../lib/videoFeature.js'
+import {
+  UNRESOLVED_PHOTO_WHERE,
+  UNRESOLVED_VIDEO_WHERE,
+  isUnresolved,
+  assertAllPhotosResolved,
+} from '../../lib/photoState.js'
+import { workerFetch, readWorkerError } from '../../lib/workerFetch.js'
+import { deleteRowsAndBlobs } from '../../lib/blobLifecycle.js'
+import { withAdvisoryLock, LOCK_NAMESPACE } from '../../lib/advisoryLock.js'
+import { readFile as fsReadFile, rm as fsRm } from 'node:fs/promises'
 
 const TAGGABLE = ['TAGGED', 'UNKNOWN', 'SKIPPED', 'NOT_A_FACE']
 const FACE_SERVICE_URL = process.env.FACE_SERVICE_URL ?? 'http://localhost:8001'
@@ -228,11 +241,33 @@ export async function removeParticipant(sessionId, subjectId, admin) {
   })
 }
 
+/**
+ * Reads an uploaded file's bytes, whether multer spooled it to memory or disk.
+ *
+ * The session photo route is disk-backed now: 20 files x 25 MB in memoryStorage
+ * is up to 500 MB resident per request, and one POST was measured at exactly
+ * that with nothing releasing it. Every other upload path is small enough to
+ * stay in memory, so both shapes have to work.
+ */
+async function uploadBytes(file) {
+  if (file.buffer) return file.buffer
+  if (file.path) return fsReadFile(file.path)
+  throw new ApiError(400, 'Uploaded file had no content')
+}
+
+/** Removes a spooled temp file. Best-effort: a leftover temp file is untidy, a
+ *  failed upload because cleanup threw is a bug. */
+async function discardUpload(file) {
+  if (!file?.path) return
+  await fsRm(file.path, { force: true }).catch(() => {})
+}
+
 export async function addPhoto(sessionId, file, { cameraSource, takenAt }, admin) {
   const session = await loadSession(sessionId, admin)
   assertStatus(session, 'ACTIVE')
 
-  const sha256 = createHash('sha256').update(file.buffer).digest('hex')
+  const bytes = await uploadBytes(file)
+  const sha256 = createHash('sha256').update(bytes).digest('hex')
 
   const duplicate = await prisma.photo.findUnique({
     where: { sessionId_sha256: { sessionId, sha256 } },
@@ -241,12 +276,24 @@ export async function addPhoto(sessionId, file, { cameraSource, takenAt }, admin
   // create a second copy — the same face would then be counted twice in clustering.
   if (duplicate) return { photo: duplicate, duplicate: true }
 
-  const meta = await sharp(file.buffer).metadata().catch(() => ({}))
+  const meta = await sharp(bytes).metadata().catch(() => ({}))
   const storagePath = `sessions/${sessionId}/photos/${sha256}.jpg`
 
   // Normalising to JPEG on the way in (rotating by EXIF first) means the face
   // worker and the browser only ever deal with one format.
-  const normalized = await sharp(file.buffer).rotate().jpeg({ quality: 92 }).toBuffer()
+  //
+  // `.withMetadata()` is not decoration. Without it sharp drops every APPn
+  // segment — proved at byte level: a source JPEG carrying EXIF (APP1, 288
+  // bytes) and ICC (APP2, 496 bytes) came out of this exact chain with neither,
+  // so the camera's own timestamp, device and orientation were destroyed at
+  // ingest and nothing anywhere put them back. That is a chain-of-custody gap
+  // independent of the export stamp: the provenance of a collected frame should
+  // not be something the platform silently erases on the way in.
+  //
+  // The person is deliberately NOT written here — at ingest nobody knows who is
+  // in the frame. See lib/imageMetadata.js for why the identity stamp belongs at
+  // export.
+  const normalized = await sharp(bytes).rotate().withMetadata().jpeg({ quality: 92 }).toBuffer()
   await writeFile(storagePath, normalized)
 
   const photo = await prisma.photo.create({
@@ -455,8 +502,18 @@ export async function endSession(sessionId, admin) {
 
   const droppedSubjectIds = await dropRevokedParticipants(session, admin.id)
 
+  // Photos AND clips. The recognition pass analyses both — analyseSessionVideos
+  // runs off VideoAsset rows and does not read the photo count at all — so a
+  // session holding only video is a perfectly ordinary session to end. Counting
+  // photos alone made it unendable: `end` 409'd, nothing ever called
+  // analyzeVideo, and every clip sat at PENDING_ANALYSIS with no way forward.
+  // That reads as a dead video pipeline, when the only thing missing was this
+  // second count.
   const photosTotal = await prisma.photo.count({ where: { sessionId } })
-  if (photosTotal === 0) throw new ApiError(409, 'Session has no photos to process')
+  const videosTotal = await prisma.videoAsset.count({ where: { sessionId } })
+  if (photosTotal === 0 && videosTotal === 0) {
+    throw new ApiError(409, 'Session has no photos or video to process')
+  }
 
   // A session with photos but nobody on the roster can only ever produce an empty
   // gallery — every detected face matches nothing and the whole pass silently
@@ -493,7 +550,13 @@ export async function endSession(sessionId, admin) {
     entityId: sessionId,
     action: 'SESSION_ENDED',
     actorId: admin.id,
-    payload: { photosTotal, jobId: job.id, droppedSubjectIds, galleryPoints: gallery.points },
+    payload: {
+      photosTotal,
+      videosTotal,
+      jobId: job.id,
+      droppedSubjectIds,
+      galleryPoints: gallery.points,
+    },
   })
 
   return {
@@ -514,6 +577,24 @@ export async function getClusters(sessionId, admin) {
       faces: {
         orderBy: { detScore: 'desc' },
         select: { id: true, photoId: true, cropPath: true, bbox: true, detScore: true },
+      },
+      // The video half of the card. One person tagged once covers every
+      // appearance of them in the session, which is the whole reason tracks
+      // join the existing clusters instead of getting a parallel queue — but
+      // the agent has to be able to SEE that a clip is on this card, or they
+      // are tagging a person for footage they were never shown.
+      videoTracks: {
+        orderBy: { detScore: 'desc' },
+        select: {
+          id: true,
+          videoId: true,
+          trackId: true,
+          cropPath: true,
+          startSec: true,
+          endSec: true,
+          detScore: true,
+          embeddedFrames: true,
+        },
       },
     },
   })
@@ -547,6 +628,12 @@ export async function getClusters(sessionId, admin) {
       autoTagged: c.autoTagged,
       repFaceId: c.repFaceId,
       faces: c.faces,
+      // Counted alongside faceCount, never folded into it: faceCount is
+      // photo-only by deliberate schema decision and the handoff counts already
+      // read it.
+      videoTrackCount: c.videoTrackCount,
+      repTrackId: c.repTrackId,
+      videoTracks: c.videoTracks,
     })),
   }
 }
@@ -578,6 +665,15 @@ export async function tagCluster(sessionId, clusterId, { tagStatus, subjectId },
       data: { tagStatus, taggedSubjectId, autoTagged: false },
     }),
     prisma.faceDetection.updateMany({
+      where: { clusterId },
+      data: { tagStatus, taggedSubjectId },
+    }),
+    // The video half of the same card. A cluster can hold stills, clips or
+    // both, and the agent tags the person once — so the decision has to reach
+    // both media or the clip keeps a stale PENDING that blurs a consenting
+    // participant out of their own footage and holds the session in REDACTING
+    // forever, with the tagging screen showing the person as tagged.
+    prisma.videoFaceTrack.updateMany({
       where: { clusterId },
       data: { tagStatus, taggedSubjectId },
     }),
@@ -634,6 +730,7 @@ export async function mergeClusters(sessionId, { clusterIds }, admin) {
   const [target, ...sources] = clusters
   const sourceIds = sources.map((c) => c.id)
   const faceCount = clusters.reduce((sum, c) => sum + c.faceCount, 0)
+  const videoTrackCount = clusters.reduce((sum, c) => sum + (c.videoTrackCount ?? 0), 0)
 
   await prisma.$transaction(async (tx) => {
     await tx.faceDetection.updateMany({
@@ -644,9 +741,24 @@ export async function mergeClusters(sessionId, { clusterIds }, admin) {
         taggedSubjectId: target.taggedSubjectId,
       },
     })
+    // Tracks must be moved BEFORE the source clusters are deleted.
+    // VideoFaceTrack.clusterId is onDelete: SetNull, so deleting a source
+    // cluster silently detaches its tracks instead of failing: they vanish from
+    // the tagging screen, keep whatever tagStatus they had, and — being no
+    // longer reachable from any card — can never be corrected. A PENDING
+    // orphan then blurs a consenting participant out of their own footage and
+    // holds the session in REDACTING with nothing on screen to explain why.
+    await tx.videoFaceTrack.updateMany({
+      where: { clusterId: { in: sourceIds } },
+      data: {
+        clusterId: target.id,
+        tagStatus: target.tagStatus,
+        taggedSubjectId: target.taggedSubjectId,
+      },
+    })
     await tx.faceCluster.update({
       where: { id: target.id },
-      data: { faceCount },
+      data: { faceCount, videoTrackCount },
     })
     await tx.faceCluster.deleteMany({ where: { id: { in: sourceIds } } })
   })
@@ -660,6 +772,70 @@ export async function mergeClusters(sessionId, { clusterIds }, admin) {
   })
 
   return { clusterId: target.id, faceCount }
+}
+
+/**
+ * splitFaces for the video half of a card.
+ *
+ * Without it a person who appears ONLY in a clip cannot be separated from
+ * whoever the clusterer put them on a card with: splitFaces takes face ids, and
+ * they have none. The agent's only remaining options would be to tag one card
+ * with two people on it, or to leave both untagged and blurred — a correctness
+ * hole disguised as a missing convenience.
+ *
+ * Tracks move to a fresh untagged group with no suggestion carried over, for the
+ * same reason splitFaces drops it: the model has already been shown to be wrong
+ * about this grouping.
+ */
+export async function splitTracks(sessionId, clusterId, { trackIds }, admin) {
+  const session = await loadSession(sessionId, admin)
+  assertStatus(session, 'TAGGING')
+
+  const cluster = await prisma.faceCluster.findFirst({ where: { id: clusterId, sessionId } })
+  if (!cluster) throw new ApiError(404, 'Cluster not found')
+
+  const tracks = await prisma.videoFaceTrack.findMany({
+    where: { id: { in: trackIds }, clusterId },
+    orderBy: { detScore: 'desc' },
+  })
+  if (tracks.length === 0) throw new ApiError(400, 'None of those clips belong to this group')
+
+  // A card with nothing left on it is not a split, it is a rename — and it
+  // would leave an empty cluster that the tagging screen still renders.
+  if (tracks.length >= cluster.videoTrackCount && cluster.faceCount === 0) {
+    throw new ApiError(400, 'Leave at least one appearance in the original group')
+  }
+
+  const created = await prisma.$transaction(async (tx) => {
+    const next = await tx.faceCluster.create({
+      data: {
+        sessionId,
+        repTrackId: tracks[0].id,
+        videoTrackCount: tracks.length,
+        faceCount: 0,
+        tagStatus: 'PENDING',
+      },
+    })
+    await tx.videoFaceTrack.updateMany({
+      where: { id: { in: tracks.map((t) => t.id) } },
+      data: { clusterId: next.id, tagStatus: 'PENDING', taggedSubjectId: null },
+    })
+    await tx.faceCluster.update({
+      where: { id: clusterId },
+      data: { videoTrackCount: cluster.videoTrackCount - tracks.length },
+    })
+    return next
+  })
+
+  await writeAuditLog({
+    entityType: 'Session',
+    entityId: sessionId,
+    action: 'VIDEO_TRACKS_SPLIT',
+    actorId: admin?.id ?? null,
+    payload: { fromClusterId: clusterId, toClusterId: created.id, trackIds: tracks.map((t) => t.id) },
+  })
+
+  return created
 }
 
 // The inverse: the clusterer put two people on one card. The moved faces start
@@ -977,7 +1153,13 @@ export async function finalizeSession(sessionId, admin) {
 
   const tagged = await prisma.faceCluster.findMany({
     where: { sessionId, tagStatus: 'TAGGED' },
-    include: { faces: { select: { photoId: true } } },
+    include: {
+      faces: { select: { photoId: true } },
+      // The video half of the same card. A tagged cluster can cover stills,
+      // clips or both, and the consent link has to be written for every medium
+      // the person actually appears in.
+      videoTracks: { select: { videoId: true } },
+    },
   })
 
   const participants = await prisma.sessionParticipant.findMany({
@@ -998,9 +1180,27 @@ export async function finalizeSession(sessionId, admin) {
 
   const links = []
   const linkKeys = new Set()
+  // The clip counterpart of `links`. VideoSubject is what redactVideos reads to
+  // decide who stays VISIBLE — its `keep` set is built from these rows — and
+  // nothing in the codebase ever created one. With the table empty, every face
+  // in every clip fell through to the blur branch, including the consenting
+  // participants the session was recorded for: a derivative that is technically
+  // redacted and completely useless. Same consent gate as stills, same
+  // deduplication, same revocation rule.
+  const videoLinks = []
+  const videoLinkKeys = new Set()
+
   for (const cluster of tagged) {
     const consentId = consentBySubject.get(cluster.taggedSubjectId)
     if (!consentId) continue
+
+    for (const videoId of new Set(cluster.videoTracks.map((t) => t.videoId))) {
+      const key = `${videoId}:${cluster.taggedSubjectId}`
+      if (videoLinkKeys.has(key)) continue
+      videoLinkKeys.add(key)
+      videoLinks.push({ videoId, subjectId: cluster.taggedSubjectId, consentId })
+    }
+
     for (const photoId of new Set(cluster.faces.map((f) => f.photoId))) {
       // Deduplicated across clusters, not just within one. Clustering routinely
       // splits a single person into several clusters, and tagging can point all
@@ -1019,40 +1219,118 @@ export async function finalizeSession(sessionId, admin) {
   const photoCount = await prisma.photo.count({ where: { sessionId } })
   const subjectCount = new Set(links.map((l) => l.subjectId)).size
 
-  await prisma.$transaction(async (tx) => {
-    if (links.length > 0) {
-      await tx.photoSubject.createMany({ data: links, skipDuplicates: true })
-    }
-    if (revokedSubjectIds.length > 0) {
-      await tx.faceDetection.deleteMany({
-        where: { clusterId: { in: tagged.filter((c) => revokedSubjectIds.includes(c.taggedSubjectId)).map((c) => c.id) } },
+  // The transaction commits the tagging DECISIONS and moves the session to
+  // REDACTING. It no longer writes ARCHIVED and it no longer creates the
+  // handoff.
+  //
+  // Both of those used to happen here, and redactBystanders() ran afterwards,
+  // outside the transaction, in code whose own comment said it "must never be
+  // able to undo it". redactBystanders() is the only thing in the codebase that
+  // ever moves a photo off the schema default piiStatus = PENDING. So if it did
+  // not complete — PII worker down, process killed, network gone — the session
+  // was left archived, handed off, and holding unredacted originals, with the
+  // status column asserting the opposite. That is the observed state of
+  // COL-2225: ARCHIVED, ended 2026-08-18, sixteen photos still PENDING.
+  //
+  // ARCHIVED is now a promotion that only happens once every photo is terminal,
+  // and the handoff is created at the same moment. A crash between the two
+  // leaves a session in REDACTING, which is honest, recoverable, and visible.
+  const revokedClusterIds = tagged
+    .filter((c) => revokedSubjectIds.includes(c.taggedSubjectId))
+    .map((c) => c.id)
+
+  await deleteRowsAndBlobs({
+    reason: 'CONSENT_REVOKED_AT_FINALIZE',
+    // Collected before the delete: after it the paths are unrecoverable. This is
+    // one of the two confirmed routes by which orphaned biometric crops were
+    // manufactured, and it is the worse of the two — deleting the detections of
+    // someone who withdrew consent while leaving their cropped face on disk
+    // indefinitely, unreachable by discovery and by purge.
+    collectPaths: async (tx) => {
+      if (revokedClusterIds.length === 0) return []
+      const faces = await tx.faceDetection.findMany({
+        where: { clusterId: { in: revokedClusterIds } },
+        select: { cropPath: true },
       })
-      await tx.faceCluster.deleteMany({
-        where: { sessionId, taggedSubjectId: { in: revokedSubjectIds } },
+      const tracks = await tx.videoFaceTrack.findMany({
+        where: { clusterId: { in: revokedClusterIds } },
+        select: { cropPath: true },
       })
-    }
-    await tx.session.update({
-      where: { id: sessionId },
-      data: { status: 'ARCHIVED', archivedAt: new Date() },
-    })
-    // The batch downstream consumes. Emitted inside the transaction so a handoff
-    // can never exist for a session that didn't actually archive.
-    await tx.sessionHandoff.upsert({
-      where: { sessionId },
-      create: {
-        sessionId,
-        projectId: session.projectId,
-        photoCount,
-        subjectCount,
-        linkCount: links.length,
-      },
-      update: { photoCount, subjectCount, linkCount: links.length },
-    })
+      return [...faces.map((f) => f.cropPath), ...tracks.map((t) => t.cropPath)]
+    },
+    deleteRows: async (tx) => {
+      if (links.length > 0) {
+        await tx.photoSubject.createMany({ data: links, skipDuplicates: true })
+      }
+      if (videoLinks.length > 0) {
+        await tx.videoSubject.createMany({ data: videoLinks, skipDuplicates: true })
+      }
+      if (revokedClusterIds.length > 0) {
+        // Tracks first, and by cluster: someone who withdrew between tagging and
+        // finalize must not keep a TAGGED attribution, because buildSchedule
+        // reads exactly that to decide whether to blur them.
+        await tx.videoFaceTrack.deleteMany({ where: { clusterId: { in: revokedClusterIds } } })
+        await tx.faceDetection.deleteMany({ where: { clusterId: { in: revokedClusterIds } } })
+        await tx.faceCluster.deleteMany({
+          where: { sessionId, taggedSubjectId: { in: revokedSubjectIds } },
+        })
+      }
+      await tx.session.update({
+        where: { id: sessionId },
+        data: { status: 'REDACTING' },
+      })
+    },
   })
 
   // Everything below runs after the commit and must never be able to undo it.
-  const { written: redacted, deferred } = await redactBystanders(sessionId)
+  //
+  // Redaction is now ENQUEUED rather than awaited inline. Inline meant the work
+  // existed only in this request's stack frame: a crash, a deploy, or a client
+  // disconnect lost it with nothing durable left to retry, which is the other
+  // half of how sixteen photos stayed PENDING for two weeks. A queued job
+  // survives all three.
+  //
+  // The first pass still runs here, best-effort, because the common case is that
+  // it succeeds in a second or two and the agent gets a real answer while still
+  // on site. What changed is that its failure is no longer the end of the story.
+  let redacted = 0
+  let deferred = 0
+  try {
+    const result = await redactBystanders(sessionId)
+    redacted = result.written
+    deferred = result.deferred
+  } catch (err) {
+    logger.error({ err, sessionId }, 'inline redaction pass failed at finalize — queued for retry')
+    deferred = await countDeferredPhotos(sessionId)
+  }
+
+  // Queue every frame that is still not terminal, whether the inline pass
+  // deferred it or never reached it.
+  await enqueueUnresolvedPhotos(sessionId)
+
+  // The same pass for clips. Best-effort and non-fatal for the same reason the
+  // stills pass is: a clip left without a derivative is held by the promotion
+  // gate above, so the failure mode is a session that stays in REDACTING and
+  // says so — not a session that archives with a bystander's face still visible.
+  let videosRedacted = 0
+  let videosDeferred = 0
+  if (videoCaptureEnabled()) {
+    try {
+      const result = await redactVideos(sessionId)
+      videosRedacted = result?.written ?? 0
+      videosDeferred = result?.deferred ?? 0
+    } catch (err) {
+      logger.error({ err, sessionId }, 'inline video redaction failed at finalize — clips held unarchived')
+      videosDeferred = await countDeferredVideos(sessionId)
+    }
+  }
+
   await destroyGallery(sessionId)
+
+  // Promote to ARCHIVED and create the handoff only if redaction actually
+  // finished. promoteIfRedacted() is also what the redaction worker and the
+  // reaper call, so there is exactly one place that decides a session is done.
+  const promotion = await promoteIfRedacted(sessionId)
 
   // Index the links this finalize created, after redaction rather than inside
   // the transaction: redactBystanders() is what sets Photo.redactedPath, and an
@@ -1092,13 +1370,15 @@ export async function finalizeSession(sessionId, admin) {
     payload: {},
   })
 
-  await writeAuditLog({
-    entityType: 'Session',
-    entityId: sessionId,
-    action: 'SESSION_HANDED_OFF',
-    actorId: admin.id,
-    payload: { photoCount, subjectCount, linkCount: links.length },
-  })
+  if (promotion.archived) {
+    await writeAuditLog({
+      entityType: 'Session',
+      entityId: sessionId,
+      action: 'SESSION_HANDED_OFF',
+      actorId: admin.id,
+      payload: { photoCount, subjectCount, linkCount: links.length },
+    })
+  }
 
   await writeAuditLog({
     entityType: 'Session',
@@ -1122,9 +1402,141 @@ export async function finalizeSession(sessionId, admin) {
     photoLinks: links.length,
     revokedSubjectIds,
     redactedPhotos: redacted,
-    deferredPhotos: deferred,
-    ingestBlocked: deferred > 0,
+    deferredPhotos: promotion.unresolved,
+    // The session is only handed off once nothing is outstanding. Reported as
+    // the status rather than as a boolean so the agent's screen can say which
+    // of the two states it is in — REDACTING is "wait", not "broken".
+    status: promotion.archived ? 'ARCHIVED' : 'REDACTING',
+    ingestBlocked: !promotion.archived,
   }
+}
+
+/**
+ * Promotes a REDACTING session to ARCHIVED and creates its handoff, but only
+ * once every photo is terminal.
+ *
+ * Idempotent and safe to call from anywhere: finalize calls it optimistically,
+ * the redaction worker calls it after each photo it clears, and the reaper calls
+ * it for sessions that have been sitting. The advisory lock is what makes those
+ * three concurrent callers safe — without it two of them can both observe zero
+ * unresolved photos and both create the handoff.
+ */
+export async function promoteIfRedacted(sessionId) {
+  const { acquired, result } = await withAdvisoryLock(
+    LOCK_NAMESPACE.FINALIZE_SESSION,
+    sessionId,
+    async () => {
+      const session = await prisma.session.findUnique({
+        where: { id: sessionId },
+        select: { id: true, status: true, projectId: true },
+      })
+      if (!session) return { archived: false, unresolved: 0, reason: 'SESSION_GONE' }
+      if (session.status === 'ARCHIVED') {
+        return { archived: true, unresolved: 0, reason: 'ALREADY_ARCHIVED' }
+      }
+      if (session.status !== 'REDACTING') {
+        return { archived: false, unresolved: 0, reason: `NOT_REDACTING (${session.status})` }
+      }
+
+      const unresolved = await prisma.photo.count({
+        where: { sessionId, ...UNRESOLVED_PHOTO_WHERE },
+      })
+      if (unresolved > 0) return { archived: false, unresolved, reason: 'PHOTOS_UNRESOLVED' }
+
+      // Clips are gated exactly as stills are, and for the identical reason: a
+      // VideoAsset with no redactedPath is a clip whose bystanders were never
+      // blurred, and archiving over it makes the status column assert something
+      // false about a person's face. UNRESOLVED_VIDEO_WHERE was written in the
+      // same pass as the photo predicate and then never wired to anything, so
+      // until now the gate let unredacted video through while carefully holding
+      // back an unredacted still of the same person in the same session.
+      const unresolvedVideos = await prisma.videoAsset.count({
+        where: { sessionId, ...UNRESOLVED_VIDEO_WHERE },
+      })
+      if (unresolvedVideos > 0) {
+        return {
+          archived: false,
+          unresolved: unresolvedVideos,
+          reason: 'VIDEOS_UNRESOLVED',
+        }
+      }
+
+      const [photoCount, linkRows] = await Promise.all([
+        prisma.photo.count({ where: { sessionId } }),
+        prisma.photoSubject.findMany({
+          where: { photo: { sessionId } },
+          select: { subjectId: true },
+        }),
+      ])
+
+      await prisma.$transaction(async (tx) => {
+        await tx.session.update({
+          where: { id: sessionId },
+          data: { status: 'ARCHIVED', archivedAt: new Date() },
+        })
+        await tx.sessionHandoff.upsert({
+          where: { sessionId },
+          create: {
+            sessionId,
+            projectId: session.projectId,
+            photoCount,
+            subjectCount: new Set(linkRows.map((l) => l.subjectId)).size,
+            linkCount: linkRows.length,
+          },
+          update: {
+            photoCount,
+            subjectCount: new Set(linkRows.map((l) => l.subjectId)).size,
+            linkCount: linkRows.length,
+          },
+        })
+      })
+
+      await writeAuditLog({
+        entityType: 'Session',
+        entityId: sessionId,
+        action: 'SESSION_ARCHIVED',
+        payload: { photoCount, linkCount: linkRows.length },
+      })
+
+      logger.info({ sessionId, photoCount }, 'session promoted to ARCHIVED — redaction complete')
+      return { archived: true, unresolved: 0, reason: 'PROMOTED' }
+    },
+  )
+
+  // Another caller holds the lock and is doing exactly this work. Reporting
+  // "not archived" is correct and the caller will see the real state on its
+  // next read.
+  if (!acquired) return { archived: false, unresolved: -1, reason: 'LOCK_HELD' }
+  return result
+}
+
+/**
+ * Queues a redaction retry for every photo in the session that is not terminal.
+ *
+ * This is what makes redaction durable. Before it, the only redaction attempt a
+ * photo ever got was the inline one inside finalizeSession — so a PII worker
+ * that was down for the duration of a finalize left the whole session's frames
+ * PENDING with nothing anywhere holding a record that they needed doing.
+ */
+export async function enqueueUnresolvedPhotos(sessionId) {
+  const unresolved = await prisma.photo.findMany({
+    where: { sessionId, ...UNRESOLVED_PHOTO_WHERE },
+    select: { id: true },
+  })
+  if (unresolved.length === 0) return 0
+
+  for (const photo of unresolved) {
+    try {
+      await enqueueRedaction({ sessionId, photoId: photo.id })
+    } catch (err) {
+      // A dead Redis must not lose the fact that these need doing. The photos
+      // stay non-terminal, so the reaper's sweep finds them again.
+      logger.error({ err, sessionId, photoId: photo.id }, 'could not enqueue redaction retry')
+    }
+  }
+
+  logger.info({ sessionId, queued: unresolved.length }, 'queued redaction retries')
+  return unresolved.length
 }
 
 // Faces and PII text are sent as separate lists because they are destroyed
@@ -1133,13 +1545,16 @@ export async function finalizeSession(sessionId, admin) {
 // padded before being blurred. Merging them into one list — as this used to —
 // silently gave an Aadhaar the face-grade treatment.
 async function redactImage(buffer, faceBoxes, piiBoxes, filename) {
-  const form = new FormData()
-  form.append('file', new Blob([buffer], { type: 'image/jpeg' }), filename)
-  form.append('bboxes', JSON.stringify(faceBoxes ?? []))
-  form.append('pii_bboxes', JSON.stringify(piiBoxes ?? []))
+  const buildForm = () => {
+    const f = new FormData()
+    f.append('file', new Blob([buffer], { type: 'image/jpeg' }), filename)
+    f.append('bboxes', JSON.stringify(faceBoxes ?? []))
+    f.append('pii_bboxes', JSON.stringify(piiBoxes ?? []))
+    return f
+  }
 
-  const res = await fetch(`${FACE_SERVICE_URL}/redact`, { method: 'POST', body: form })
-  if (!res.ok) throw new Error(`Redaction service returned ${res.status}: ${await res.text()}`)
+  const res = await workerFetch('face', `${FACE_SERVICE_URL}/redact`, { body: buildForm })
+  if (!res.ok) throw new Error(`redaction failed: ${await readWorkerError('face', res)}`)
 
   const out = Buffer.from(await res.arrayBuffer())
   // An empty body would be written as the redacted derivative and served as a
@@ -1169,17 +1584,23 @@ export class PiiUnavailableError extends Error {
 // §8(5), so the failure now propagates and the caller parks the photo as
 // DEFERRED. Fail closed (invariant 8).
 async function detectPiiRegions(buffer, filename) {
+  const buildForm = () => {
+    const f = new FormData()
+    f.append('file', new Blob([buffer], { type: 'image/jpeg' }), filename)
+    return f
+  }
+
   let res
   try {
-    const form = new FormData()
-    form.append('file', new Blob([buffer], { type: 'image/jpeg' }), filename)
-    res = await fetch(`${PII_SERVICE_URL}/detect-pii`, { method: 'POST', body: form })
+    res = await workerFetch('pii', `${PII_SERVICE_URL}/detect-pii`, { body: buildForm })
   } catch (err) {
     throw new PiiUnavailableError(`PII worker unreachable while scanning ${filename}`, err)
   }
 
   if (!res.ok) {
-    throw new PiiUnavailableError(`PII worker returned ${res.status} while scanning ${filename}`)
+    throw new PiiUnavailableError(
+      `PII worker failed while scanning ${filename} (${await readWorkerError('pii', res)})`,
+    )
   }
 
   const body = await res.json().catch((err) => {
@@ -1240,6 +1661,9 @@ export async function redactBystanders(sessionId, { photoIds } = {}) {
         ? `sessions/${photo.sessionId}/redacted/${photo.id}.jpg`
         : `subjects/${photo.subjects[0]?.subjectId ?? 'orphan'}/imports/redacted/${photo.id}.jpg`
       await writeFile(redactedPath, blurred)
+      // The cached thumbnail describes the PREVIOUS derivative. Left in place it
+      // would keep showing whatever this pass just masked.
+      await invalidateThumbnail(photo.sessionId, photo.id)
       await prisma.photo.update({
         where: { id: photo.id },
         data: { redactedPath, piiStatus: piiRegions.length > 0 ? 'MASKED' : 'CLEAN' },
@@ -1341,6 +1765,9 @@ export async function rebuildRedactedForRemaining(photoId) {
 
   const redactedPath = photo.redactedPath ?? `sessions/${photo.sessionId}/redacted/${photo.id}.jpg`
   await writeFile(redactedPath, rebuilt)
+  // Erasure path. A thumbnail from before the rebuild still shows the face that
+  // was just erased, which is the worst possible moment to serve a stale cache.
+  await invalidateThumbnail(photo.sessionId, photo.id)
 
   await prisma.photo.update({
     where: { id: photo.id },
@@ -1357,10 +1784,13 @@ export async function rebuildRedactedForRemaining(photoId) {
 
 // Any photo in this session whose masking is unconfirmed. The handoff ingest and
 // the retention sweep both ask this rather than re-deriving the rule.
+//
+// Named "deferred" for history; it counts every non-terminal state, PENDING
+// included. The old spelling of it listed DEFERRED and FAILED only, which is why
+// a session could be archived and handed off while sixteen of its frames had
+// never been through redaction at all.
 export async function countDeferredPhotos(sessionId) {
-  return prisma.photo.count({
-    where: { sessionId, OR: [{ piiStatus: 'DEFERRED' }, { piiStatus: 'FAILED' }] },
-  })
+  return prisma.photo.count({ where: { sessionId, ...UNRESOLVED_PHOTO_WHERE } })
 }
 
 // Returns every photo in the session with its face detections and tagged subject
@@ -1454,23 +1884,34 @@ export async function listSessionPhotosForOversight(sessionId, admin) {
     },
   })
 
+  // An audio or text session has no frames, and a page that only knows how to
+  // count photos reports that as "nothing here" — which is a false statement
+  // about a session that holds a fully processed recording. Hand the caller the
+  // type and the real counts so it can say what this session actually is.
+  const [recordings, videos, documents] = await Promise.all([
+    prisma.recording.count({ where: { sessionId } }),
+    prisma.videoAsset.count({ where: { sessionId } }),
+    prisma.textDocument.count({ where: { sessionId } }),
+  ])
+
   return {
     session: {
       id: session.id,
       code: session.code,
+      type: session.type,
       status: session.status,
       projectId: session.projectId,
       location: session.location,
       createdAt: session.createdAt,
       endedAt: session.endedAt,
       archivedAt: session.archivedAt,
+      counts: { photos: photos.length, recordings, videos, documents },
     },
     items: photos.map(({ redactedPath, ...p }) => ({
       ...p,
       // Deliberately a boolean, not the path. The path is a storage location for
       // sealed bytes and has no business leaving the process.
-      redactionPending:
-        !redactedPath || p.piiStatus === 'DEFERRED' || p.piiStatus === 'FAILED',
+      redactionPending: isUnresolved({ ...p, redactedPath }),
     })),
   }
 }
@@ -1483,10 +1924,51 @@ export async function readRedactedPhoto(sessionId, photoId, admin) {
   // Fail closed (invariant 8). A missing derivative means redaction has not
   // succeeded yet; 409 tells the caller to wait. There is no branch here that
   // reaches for storagePath, and none may be added.
-  if (!photo.redactedPath || photo.piiStatus === 'DEFERRED' || photo.piiStatus === 'FAILED') {
+  if (isUnresolved(photo)) {
     throw new ApiError(409, 'REDACTION_PENDING — no redacted copy is available for this photo yet')
   }
   return { buffer: await readFile(photo.redactedPath), mimeType: 'image/jpeg' }
+}
+
+/**
+ * A grid-sized version of the ORIGINAL capture, for the agent's own grid before
+ * the session is archived.
+ *
+ * Built per request and never written to disk, which is the whole difference
+ * from the redacted thumbnail. A cached miniature of an unredacted frame would
+ * be a second copy of unmasked personal data, living past the moment the
+ * agent's basis for the original expires and outside everything the redaction
+ * pipeline guarantees. Paying ~30ms of CPU per tile to avoid creating that is
+ * the right trade.
+ *
+ * Authorisation is `readPhotoFile`'s, unchanged — the same call, on the same
+ * row, before any resizing happens.
+ */
+export async function readPhotoFileThumb(sessionId, photoId, admin) {
+  const original = await readPhotoFile(sessionId, photoId, admin)
+  return { buffer: await buildThumbnail(original.buffer), mimeType: 'image/jpeg' }
+}
+
+/**
+ * A grid-sized version of the redacted derivative.
+ *
+ * Same authorisation and the same fail-closed rule as the full-size read above:
+ * no redacted copy means no thumbnail, and there is no branch here that reaches
+ * for the original. The reduction is real — a 2816x1584 frame at ~500 KB
+ * becomes roughly 30 KB — and it is the difference between a gallery that
+ * paints immediately and one that appears broken while twelve full frames land.
+ */
+export async function readRedactedPhotoThumb(sessionId, photoId, admin) {
+  await loadSession(sessionId, admin)
+  const photo = await prisma.photo.findFirst({ where: { id: photoId, sessionId } })
+  if (!photo) throw new ApiError(404, 'Photo not found')
+
+  if (isUnresolved(photo)) {
+    throw new ApiError(409, 'REDACTION_PENDING — no redacted copy is available for this photo yet')
+  }
+
+  const { buffer } = await readOrCreateThumbnail(photo)
+  return { buffer, mimeType: 'image/jpeg' }
 }
 
 // Break-glass binding helpers. They answer "whose data is this object?" so the

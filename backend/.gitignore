@@ -4,3 +4,13 @@ storage/media/*
 !storage/media/.gitkeep
 backend/supabase/.temp/
 backend/supabase/.branches/
+
+# Backups written by scripts/backup.js. They contain the sealed media tree and a
+# full row dump -- never in git, and never anywhere public.
+backups/
+
+# The erasure ledger: every subject ever erased. Environment state, not source,
+# so it is not committed -- but it MUST be backed up, and separately from the
+# database, because its whole purpose is to survive a database rollback and catch
+# a restore that resurrected someone. See docs/KEY_CUSTODY.md 5.
+storage/erasure-tombstones.jsonl

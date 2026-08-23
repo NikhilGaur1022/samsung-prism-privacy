@@ -3,6 +3,8 @@ import { prisma } from '../../config/prisma.js'
 import { ApiError } from '../../middleware/errorHandler.js'
 import { writeAuditLog } from '../../lib/auditLog.js'
 import { getSigningKey } from '../../lib/signingKey.js'
+import { findSubjectResidue } from '../../lib/storageSweep.js'
+import { logger } from '../../lib/logger.js'
 
 // The one record in the system that is meant to be shown to an outsider.
 //
@@ -75,6 +77,33 @@ export async function issueCertificate(purgeJobId, admin = null) {
     throw new ApiError(409, 'Cannot certify: the subject key has not been destroyed')
   }
 
+  // The last gate, and the one that makes the signature mean something.
+  //
+  // Every check above reads the purge job's own rows, and the purge job's rows
+  // were themselves built by walking database rows — so the whole chain could be
+  // green while 518 biometric files sat on disk, unreferenced by anything and
+  // therefore invisible to all of it. A certificate that attests to an erasure
+  // it never verified is worse than no certificate: it is a signed false
+  // statement in a compliance record.
+  //
+  // So the disk is read, here, immediately before signing. If anything is left,
+  // this refuses and names the count — the purge runs a sweep of its own, so
+  // residue at this point means either the sweep failed or something wrote after
+  // it ran, and both need a person.
+  const residue = await findSubjectResidue(prisma, job.subjectId)
+  if (residue.length > 0) {
+    logger.error(
+      { purgeJobId, subjectId: job.subjectId, residue: residue.length, sample: residue.slice(0, 5) },
+      'CERTIFICATE REFUSED — files remain on disk for this subject',
+    )
+    throw new ApiError(
+      409,
+      `Cannot certify: ${residue.length} file(s) for this subject are still on disk. ` +
+        'A deletion certificate is issued only when a filesystem sweep of every path prefix for this subject returns nothing.',
+      { unresolvedCount: residue.length },
+    )
+  }
+
   const { privateKey, keyId } = getSigningKey()
   const subjectPseudonym = pseudonymFor(job.subjectId, keyId)
   const completedAt = job.finishedAt ?? new Date()
@@ -90,6 +119,14 @@ export async function issueCertificate(purgeJobId, admin = null) {
     completedAt: completedAt.toISOString(),
     keyDestroyedAt: job.keyDestroyedAt.toISOString(),
     locationsCount: job.locations.length,
+    // Recorded in the SIGNED payload, not merely in a log: the claim being made
+    // is "we looked at the filesystem and it was empty", and a verifier has to
+    // be able to see that the claim was made at all.
+    filesystemSweep: {
+      performed: true,
+      residueFound: 0,
+      sweptAt: new Date().toISOString(),
+    },
     // Per-location hashes captured BEFORE deletion. After the delete there is
     // nothing left to hash, so this is the only evidence that the object existed
     // and that this is the object that was destroyed.

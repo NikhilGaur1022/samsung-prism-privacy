@@ -245,6 +245,8 @@ model AdminUser {
   sessions           Session[]
 
   @@index([role, status])
+  projectExports ProjectExport[]
+
   @@map("admin_users")
 }
 
@@ -380,6 +382,8 @@ model Project {
 
   @@index([status])
   @@index([ownerAdminId])
+  exports      ProjectExport[]
+
   @@map("projects")
 }
 
@@ -483,6 +487,17 @@ enum SessionStatus {
   ACTIVE
   PROCESSING
   TAGGING
+  // Finalize has committed the tagging decisions and dropped the gallery, and
+  // redaction is now running over the frames. Added because ARCHIVED used to be
+  // written in the same transaction that created the handoff, BEFORE
+  // redactBystanders() was called — so a redaction failure left a session
+  // archived, handed off, and holding unredacted originals, which is exactly the
+  // observed state of COL-2225: ARCHIVED, ended 2026-08-18, sixteen photos still
+  // PENDING.
+  //
+  // A session in this state is committed (the tags cannot be undone) but not yet
+  // handed off. It promotes to ARCHIVED only when every photo is terminal.
+  REDACTING
   ARCHIVED
   FAILED
 }
@@ -1635,4 +1650,156 @@ model TextSpan {
   @@index([subjectId])
   @@index([consentId])
   @@map("text_spans")
+}
+
+
+// ---------------------------------------------------------------------------
+// Blob lifecycle
+// ---------------------------------------------------------------------------
+
+enum OrphanBlobState {
+  // Found on disk with no row referencing it, or a delete that failed. Not yet
+  // touched.
+  PENDING_DELETE
+  // Moved out of the media root into the quarantine prefix. Recoverable.
+  QUARANTINED
+  // Shredded. The row survives as the record that it was.
+  DELETED
+  // A human looked and said keep it. Excluded from every future sweep.
+  RETAINED
+}
+
+/// A file under the media root that no database row points at.
+///
+/// This table exists because 83% of the media store was in that state — 1,123
+/// files, 265 MB, including 383 cropped faces and 135 enrolment selfies — and
+/// both DSAR discovery and purge enumerate blobs by walking rows, so every one
+/// of them was invisible to discovery and unreachable by erasure. A signed
+/// deletion certificate could therefore attest to an erasure that left 518
+/// biometric files on disk.
+///
+/// The reaper never hard-deletes on first sight. It quarantines, waits out a
+/// grace period, and only then shreds — because the one thing worse than an
+/// orphan is deleting a file that a row written moments later would have
+/// referenced.
+model OrphanBlob {
+  id          String          @id @default(uuid()) @db.Uuid
+  storagePath String          @unique @map("storage_path")
+  sizeBytes   BigInt?         @map("size_bytes")
+  /// Why it is here: DELETE_FAILED, SWEEP_UNREFERENCED, RECOGNITION_RERUN, ...
+  reason      String
+  state       OrphanBlobState @default(PENDING_DELETE)
+  /// Where it was moved to when quarantined, so it can be put back.
+  quarantinePath String?      @map("quarantine_path")
+  firstSeenAt DateTime        @default(now()) @map("first_seen_at")
+  quarantinedAt DateTime?     @map("quarantined_at")
+  resolvedAt  DateTime?       @map("resolved_at")
+  /// Set when a human chose RETAINED, so the decision has a name against it.
+  decidedByAdminId String?    @db.Uuid @map("decided_by_admin_id")
+
+  @@index([state, firstSeenAt])
+  @@map("orphan_blobs")
+}
+
+enum StalledJobState {
+  DETECTED
+  REQUEUED
+  FAILED_PERMANENTLY
+  RESOLVED
+}
+
+/// One row per job the reaper found stuck.
+///
+/// The pipeline had no reaper, no stalled-job timeout surfaced anywhere, and no
+/// screen that showed it: session COL-7224 sat PROCESSING for two days and the
+/// oldest PENDING photo for sixteen, with nothing reporting either. This table
+/// is what the operator queue-health screen reads, and it is deliberately
+/// persistent rather than a Redis key — "what got stuck and what did we do about
+/// it" is an operational record, not cache.
+model StalledJob {
+  id         String          @id @default(uuid()) @db.Uuid
+  queueName  String          @map("queue_name")
+  jobId      String          @map("job_id")
+  /// The session, photo or subject the job was about, for the operator screen.
+  subjectRef String?         @map("subject_ref")
+  state      StalledJobState @default(DETECTED)
+  stalledForMs BigInt?       @map("stalled_for_ms")
+  attempts   Int             @default(0)
+  lastError  String?         @map("last_error")
+  detectedAt DateTime        @default(now()) @map("detected_at")
+  resolvedAt DateTime?       @map("resolved_at")
+
+  @@unique([queueName, jobId])
+  @@index([state, detectedAt])
+  @@map("stalled_jobs")
+}
+
+// ---------------------------------------------------------------------------
+// Project export
+// ---------------------------------------------------------------------------
+
+enum ProjectExportStatus {
+  QUEUED
+  RUNNING
+  READY
+  FAILED
+  EXPIRED
+}
+
+/// A whole-project download.
+///
+/// This did not exist — not the route, not the button. All 156 route definitions
+/// were enumerated: the complete project surface was GET/POST /projects, GET and
+/// PATCH /:projectId, four lifecycle POSTs, and GET /:projectId/{assignments,
+/// sessions,handoffs,report}, where /report returns 765 bytes of JSON counts. No
+/// route in the application returned project-scoped media or an archive, and
+/// ProcessedData.jsx — the Data Owner's "finished data" screen — had no download
+/// control anywhere on it.
+///
+/// It is a row rather than a synchronous response because of the volumes: at the
+/// measured 241.3 KB average image and the 5,000/day target, a project archive
+/// passes 4 GiB in three and a half days of collection. A request that has to
+/// stay open for that is a request that will not survive a load balancer, and
+/// building it in the API process's heap first is what took the whole API down.
+model ProjectExport {
+  id        String              @id @default(uuid()) @db.Uuid
+  projectId String              @map("project_id") @db.Uuid
+  /// The dataOwner who asked. Never null — an export with no requester is an
+  /// export nobody is accountable for.
+  requestedByAdminId String     @map("requested_by_admin_id") @db.Uuid
+  status    ProjectExportStatus @default(QUEUED)
+
+  /// REDACTED_DERIVATIVES is the only value this ships with. The column exists
+  /// so that an originals path, if ever built, is a new value here rather than a
+  /// flag someone flips on the existing one.
+  scope     String              @default("REDACTED_DERIVATIVES")
+
+  photosTotal    Int    @default(0) @map("photos_total")
+  photosWritten  Int    @default(0) @map("photos_written")
+  /// Excluded because consent was revoked or expired at build time, counted so
+  /// the manifest can state it rather than silently shipping less.
+  photosExcluded Int    @default(0) @map("photos_excluded")
+  subjectCount   Int    @default(0) @map("subject_count")
+
+  sizeBytes   BigInt? @map("size_bytes")
+  storagePath String? @map("storage_path")
+  contentHash String? @map("content_hash")
+
+  error     String?
+  createdAt DateTime  @default(now()) @map("created_at")
+  startedAt DateTime? @map("started_at")
+  finishedAt DateTime? @map("finished_at")
+  /// Packages are personal data with a retention clock of their own. An export
+  /// built before an erasure still contains the erased subject, so it must not
+  /// outlive its purpose.
+  expiresAt DateTime? @map("expires_at")
+  downloadCount Int   @default(0) @map("download_count")
+  lastDownloadedAt DateTime? @map("last_downloaded_at")
+
+  project        Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  requestedBy    AdminUser @relation(fields: [requestedByAdminId], references: [id], onDelete: Restrict)
+
+  @@index([projectId, createdAt])
+  @@index([status])
+  @@map("project_exports")
 }

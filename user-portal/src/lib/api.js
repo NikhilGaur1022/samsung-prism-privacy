@@ -1,11 +1,48 @@
 const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:4000'
 
-async function request(path, options = {}) {
-  const res = await fetch(`${BASE_URL}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
+// ---------------------------------------------------------------------------
+// Silent session refresh
+// ---------------------------------------------------------------------------
+// The subject access token is short-lived and the API issues a refresh token
+// beside it, but `refreshSession()` below was exported and never called from
+// anywhere — so a data principal reading their own record was signed out
+// mid-page and bounced to the OTP screen, which for someone checking what is
+// held about them reads as the portal losing their data.
+//
+// One shared in-flight refresh: a dashboard that fires four requests on mount
+// must not answer four 401s with four competing refreshes against a token that
+// rotates on use.
+let refreshInFlight = null
+
+function refreshTokens() {
+  refreshInFlight ??= fetch(`${BASE_URL}/auth/subject/refresh`, {
+    method: 'POST',
     credentials: 'include',
-    ...options,
   })
+    .then((r) => r.ok)
+    .catch(() => false)
+    .finally(() => {
+      refreshInFlight = null
+    })
+  return refreshInFlight
+}
+
+async function request(path, options = {}) {
+  const send = () =>
+    fetch(`${BASE_URL}${path}`, {
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      ...options,
+    })
+
+  let res = await send()
+
+  // One retry, for an expired access token only. The auth endpoints are
+  // excluded: a 401 from /verify means the code was wrong, and refreshing on
+  // that would turn a clear "that code is not right" into a silent failure.
+  if (res.status === 401 && !path.startsWith('/auth/subject/')) {
+    if (await refreshTokens()) res = await send()
+  }
 
   const body = await res.json().catch(() => null)
 
@@ -20,8 +57,12 @@ async function request(path, options = {}) {
   return body
 }
 
+// NOT /api/v1/subjects — that router is gated to collection agents and platform
+// root because it also lists and mutates other people's identity. This page is
+// used by someone who has no account at all, so it goes to the public auth
+// router's one anonymous-safe operation.
 export function registerSubject(payload) {
-  return request('/api/v1/subjects', { method: 'POST', body: JSON.stringify(payload) })
+  return request('/auth/subject/register', { method: 'POST', body: JSON.stringify(payload) })
 }
 
 export function requestLoginOtp(email) {

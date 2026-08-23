@@ -11,6 +11,15 @@ import * as timelineService from './timeline.service.js'
 import { buildAccessPackage } from './export.service.js'
 import { getPurgeJob } from './purge.service.js'
 
+// z.coerce.boolean() applies JavaScript truthiness to a query string, so the
+// string "false" coerces to TRUE. `?includeDeleted=false` therefore returned
+// deleted items — the exact opposite of what was asked for — and any caller
+// passing the value explicitly got the wrong answer. Only an absent parameter
+// behaved correctly.
+const queryBoolean = z
+  .enum(['true', 'false', '1', '0'])
+  .transform((v) => v === 'true' || v === '1')
+
 export const dsarRoutes = Router()
 
 dsarRoutes.use(requireAdminAuth)
@@ -24,7 +33,7 @@ const queueQuerySchema = z.object({
   // stored — see the note there on why the 7-state enum stays.
   coarse: z.enum(['OPEN', 'IN_PROGRESS', 'CLOSED']).optional(),
   type: z.enum(['ACCESS', 'CORRECT', 'ERASE', 'WITHDRAWAL_ERASURE', 'GRIEVANCE', 'NOMINATION']).optional(),
-  overdue: z.coerce.boolean().optional(),
+  overdue: queryBoolean.optional(),
   assignedAdminId: uuid.optional(),
   cursor: z.string().max(500).optional(),
   limit: z.coerce.number().int().min(1).max(200).default(50),
@@ -55,7 +64,7 @@ const itemQuerySchema = z.object({
   projectId: uuid.optional(),
   from: z.coerce.date().optional(),
   to: z.coerce.date().optional(),
-  includeDeleted: z.coerce.boolean().default(false),
+  includeDeleted: queryBoolean.default(false),
   cursor: z.string().max(500).optional(),
   limit: z.coerce.number().int().min(1).max(200).default(50),
 })
@@ -387,7 +396,11 @@ dsarRoutes.get(
   requireRole('dataAdmin', 'dpo', 'super_admin'),
   async (req, res, next) => {
     try {
-      res.json(await getPurgeJob(uuid.parse(req.params.purgeJobId)))
+      res.json(
+        await getPurgeJob(uuid.parse(req.params.purgeJobId), {
+          dsarRequestId: uuid.parse(req.params.requestId),
+        }),
+      )
     } catch (err) {
       next(err)
     }

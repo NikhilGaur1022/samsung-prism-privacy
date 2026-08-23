@@ -18,6 +18,7 @@ import RaiseRequest from './pages/RaiseRequest'
 import RequestStatus from './pages/RequestStatus'
 import SecureInbox from './pages/SecureInbox'
 import Certificate from './pages/Certificate'
+import NotFound from './pages/NotFound'
 
 export default function App() {
   return (
@@ -26,12 +27,23 @@ export default function App() {
         <Route path="/login" element={<Login />} />
         <Route path="/register" element={<Register />} />
         <Route path="/verify" element={<Verify />} />
-        {/* Outside AppLayout: the user has a subject session but has not finished
-            onboarding, and a phone walk-up should not land on a sidebar. */}
-        <Route path="/enroll" element={<Enroll />} />
         <Route path="/join/:token" element={<Join />} />
         <Route path="/" element={<Navigate to="/login" replace />} />
-        {/* Everything below this line requires a subject session. */}
+        {/* /enroll needs a session but NOT the shell. It was mounted outside
+            RequireAuth entirely, so an unauthenticated visit 401'd, the hook's
+            status stayed null, and `if (!status) return <Loading/>` ran forever
+            — a permanent dead end on the path every newly-registered subject is
+            sent down after /verify. It keeps its own bare layout (a phone
+            walk-up should not land on a sidebar) but sits behind the gate. */}
+        <Route
+          path="/enroll"
+          element={
+            <RequireAuth>
+              <Enroll />
+            </RequireAuth>
+          }
+        />
+        {/* Everything below this line requires a subject session AND the shell. */}
         <Route
           element={
             <RequireAuth>
@@ -53,7 +65,10 @@ export default function App() {
           <Route path="/requests/:requestId/certificate" element={<Certificate />} />
           <Route path="/inbox" element={<SecureInbox />} />
         </Route>
-        <Route path="*" element={<Navigate to="/dashboard" replace />} />
+        {/* A real 404. This used to send every unknown URL to /dashboard,
+            where RequireAuth bounced a signed-out visitor to /login — so a
+            mistyped address ended at a sign-in form with no explanation. */}
+        <Route path="*" element={<NotFound />} />
       </Routes>
     </BrowserRouter>
   )

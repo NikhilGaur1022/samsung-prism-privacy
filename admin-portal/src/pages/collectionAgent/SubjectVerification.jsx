@@ -264,6 +264,11 @@ export default function SubjectVerification() {
   const [formError, setFormError] = useState(null)
   const [verifyingId, setVerifyingId] = useState(null)
   const [otpInputs, setOtpInputs] = useState({})
+  // Dev only, keyed by email. The API attaches `devOtp` to the registration
+  // response ONLY when the environment is non-hardened and EXPOSE_DEV_OTP=on, so
+  // this map stays empty in production and the banner below never renders —
+  // there is no separate frontend flag to forget to turn off.
+  const [devOtps, setDevOtps] = useState({})
   const [verifyError, setVerifyError] = useState(null)
   const [enrolling, setEnrolling] = useState(null)
   const [enrollCounts, setEnrollCounts] = useState({})
@@ -283,13 +288,16 @@ export default function SubjectVerification() {
     setFormError(null)
 
     try {
-      await registerSubject({
+      const created = await registerSubject({
         group,
         fullName: fullName.trim(),
         email: email.trim(),
         employeeRef: employeeRef.trim() || undefined,
         registrationChannel: 'AGENT',
       })
+      if (created?.devOtp) {
+        setDevOtps((prev) => ({ ...prev, [email.trim().toLowerCase()]: created.devOtp }))
+      }
       setFullName('')
       setEmail('')
       setEmployeeRef('')
@@ -445,6 +453,21 @@ export default function SubjectVerification() {
                       <UserCheck size={14} strokeWidth={2} />
                       {verifyingId === s.masterUserId ? 'Verifying…' : 'Verify'}
                     </button>
+                    {devOtps[s.email?.toLowerCase()] && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setOtpInputs((prev) => ({
+                            ...prev,
+                            [s.masterUserId]: devOtps[s.email.toLowerCase()],
+                          }))
+                        }
+                        title="Testing only — this code is shown because EXPOSE_DEV_OTP is on. It is never sent in production."
+                        className="rounded-lg border border-dashed border-warning bg-warning-soft px-2.5 py-1.5 font-mono text-xs font-bold text-warning focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warning"
+                      >
+                        {devOtps[s.email.toLowerCase()]}
+                      </button>
+                    )}
                   </div>
                 )}
               </div>

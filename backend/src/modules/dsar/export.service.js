@@ -7,6 +7,7 @@ import { readFile, writeFile, shredFile, fileExists } from '../../lib/storage.js
 import { createZip } from '../../lib/zip.js'
 import { logger } from '../../lib/logger.js'
 import { extensionFor } from '../recordings/recording.service.js'
+import { isUnresolved } from '../../lib/photoState.js'
 
 // DPDP §11 fulfilment: the summary of personal data being processed, plus the
 // data itself, packaged for one principal.
@@ -233,6 +234,10 @@ export async function buildAccessPackage(dsarRequestId, admin = null, { selectio
 
   const files = []
   const photoManifest = []
+  // Items whose row exists but whose bytes do not. Collected across all three
+  // media loops and raised together, because "which of my items are missing" is
+  // a different question from "is anything missing".
+  const missingBlobs = []
   const recordingManifest = []
   let redactedSubstitutions = 0
   let bytes = 0
@@ -265,7 +270,7 @@ export async function buildAccessPackage(dsarRequestId, admin = null, { selectio
     // Fail closed here too. A photo whose masking was never confirmed is not
     // shipped — an unmasked derivative leaving in a §11 package is the same
     // breach as one leaving through the API, just with a nicer filename.
-    if (!photo.redactedPath || photo.piiStatus === 'DEFERRED' || photo.piiStatus === 'FAILED') {
+    if (isUnresolved(photo)) {
       entry.reason = 'REDACTION_INCOMPLETE — excluded pending masking; re-request once processing completes'
       photoManifest.push(entry)
       continue
@@ -290,6 +295,13 @@ export async function buildAccessPackage(dsarRequestId, admin = null, { selectio
       if (err instanceof ApiError) throw err
       logger.error({ err, photoId: photo.id }, 'access package: could not read redacted derivative')
       entry.reason = 'UNREADABLE — the derivative could not be read at packaging time'
+      // A row that points at a file which is not there. 167 of these existed,
+      // 88 of them in the DSAR index itself, and the previous behaviour was to
+      // note the reason in the manifest and ship the package short — while
+      // `totals.all`, the completeness contract the grid renders, went on
+      // counting the item. Recorded here and raised after the loop so the
+      // failure names every missing item rather than the first one.
+      missingBlobs.push({ type: 'PHOTO', id: photo.id, path: photo.redactedPath })
     }
     photoManifest.push(entry)
   }
@@ -354,6 +366,7 @@ export async function buildAccessPackage(dsarRequestId, admin = null, { selectio
       if (err instanceof ApiError) throw err
       logger.error({ err, recordingId: recording.id }, 'access package: could not read redacted recording')
       entry.reason = 'UNREADABLE — the derivative could not be read at packaging time'
+      missingBlobs.push({ type: 'RECORDING', id: recording.id, path: recording.redactedPath })
     }
     recordingManifest.push(entry)
   }
@@ -419,8 +432,28 @@ export async function buildAccessPackage(dsarRequestId, admin = null, { selectio
       if (err instanceof ApiError) throw err
       logger.error({ err, documentId: doc.id }, 'access package: could not read redacted text derivative')
       entry.reason = 'UNREADABLE — the derivative could not be read at packaging time'
+      missingBlobs.push({ type: 'TEXT_DOCUMENT', id: doc.id, path: doc.redactedPath })
     }
     textManifest.push(entry)
+  }
+
+  // Fail loudly, naming the items.
+  //
+  // A §11 package that silently omits data the index says exists is a false
+  // answer to a statutory request, and the principal has no way to know. The
+  // operator gets a 409 with the list; the fix is to repair the index or restore
+  // the blob, and neither can happen if the package quietly builds.
+  if (missingBlobs.length > 0) {
+    logger.error(
+      { dsarRequestId, missing: missingBlobs.length, sample: missingBlobs.slice(0, 5) },
+      'PACKAGE BUILD REFUSED — referenced blobs are missing from storage',
+    )
+    throw new ApiError(
+      409,
+      `Cannot build this package: ${missingBlobs.length} item(s) are indexed but their files are not in storage. ` +
+        'Shipping the package would answer a §11 request with a silently incomplete record.',
+      { missingItems: missingBlobs.slice(0, 50) },
+    )
   }
 
   const included = [...photoManifest, ...recordingManifest, ...textManifest].filter((e) => e.included)

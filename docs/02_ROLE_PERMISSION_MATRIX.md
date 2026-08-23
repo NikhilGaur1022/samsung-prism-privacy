@@ -53,7 +53,18 @@ Approval is a hard gate: `Session` creation must reject any project whose `statu
 | `GET /sessions/:id/photos/:pid/raw` | ✓ own | ✗ | ✗ | ✓ own, pre-ARCHIVE | ⚑ | ⚑ |
 | `GET /sessions/:id/photos` (frame index) | ✗ | ✗ | ✓ own project | ✓ own | ✓ | ✓ |
 | `GET /sessions/:id/photos/:pid/redacted` | ✓ own | ✗ | ✓ own project | ✓ own | ✓ | ✓ |
+| `GET /sessions/:id/photos/:pid/redacted/thumb` | ✓ own | ✗ | ✓ own project | ✓ own | ✓ | ✓ |
+| `GET /sessions/:id/photos/:pid/file/thumb` | ✗ | ✗ | ✗ | ✓ own, pre-ARCHIVE | ✗ | ⚑ |
 | `GET /sessions/:id/faces` (crops) | ✗ | ✗ | ✗ | ✓ TAGGING only | ✗ | ⚑ |
+
+The `/thumb` rows are grid-sized renditions of the row directly above each of
+them, and they carry the identical floor on purpose: the same object at a
+smaller size is the same personal data, and a variant that were easier to reach
+would be a hole rather than an optimisation. `redacted/thumb` is cached on disk
+and sealed like any other object; `file/thumb` is built per request and never
+persisted, because a stored miniature of an unmasked frame would outlive the
+agent's basis for the original.
+
 | `POST /sessions/:id/recordings` | ✗ | ✗ | ✗ | ✓ own ACTIVE | ✗ | ✗ |
 | `POST /sessions/:id/recordings/:recordingId/analyze` | ✗ | ✗ | ✗ | ✓ own | ✗ | ✗ |
 | `PUT /sessions/:id/recordings/:recordingId/segments` | ✗ | ✗ | ✗ | ✓ own | ✗ | ✗ |

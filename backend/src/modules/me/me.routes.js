@@ -11,6 +11,7 @@ import * as dsarService from '../dsar/dsar.service.js'
 import { downloadPackage, issuePackageToken } from '../dsar/export.service.js'
 import { getCertificateForRequest, verifyCertificate } from '../dsar/certificate.service.js'
 import { getSubjectTimeline } from '../dsar/timeline.service.js'
+import { mediaReadLimiter } from '../../middleware/rateLimiter.js'
 
 // Subject-facing account state that isn't enrollment CRUD. Shares the /api/v1/me
 // mount with selfEnrollmentRoutes; every handler takes the subject id from the
@@ -97,6 +98,7 @@ meRoutes.get('/photos', async (req, res, next) => {
 // looking at their own face is still an access to biometric data.
 meRoutes.get(
   '/photos/:photoId/redacted',
+  mediaReadLimiter,
   logAccess('REDACTED_PHOTO', (req) => req.params.photoId, { purpose: 'SUBJECT_ACCESS' }),
   async (req, res, next) => {
     try {

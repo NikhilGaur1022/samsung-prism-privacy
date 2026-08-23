@@ -20,6 +20,15 @@ export function useEnrollment() {
   const [items, setItems] = useState([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
+  // Three states, not two.
+  //
+  // `status` alone cannot distinguish "still loading" from "the request failed",
+  // and every caller wrote `if (!status) return <Loading/>`. So an unauthorised
+  // /enroll visit 401'd, status stayed null, and the page showed "Loading…"
+  // forever — verified at three viewports with a seven-second settle. That page
+  // is on the path every newly-registered subject is sent down after /verify.
+  const [loading, setLoading] = useState(true)
+  const [unauthorized, setUnauthorized] = useState(false)
 
   const reload = useCallback(async () => {
     const next = await getEnrollmentStatus()
@@ -31,7 +40,23 @@ export function useEnrollment() {
   }, [])
 
   useEffect(() => {
-    reload().catch(setError)
+    let cancelled = false
+    setLoading(true)
+    reload()
+      .then(() => {
+        if (!cancelled) setUnauthorized(false)
+      })
+      .catch((err) => {
+        if (cancelled) return
+        setError(err)
+        if (err?.status === 401) setUnauthorized(true)
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
   }, [reload])
 
   const run = async (fn) => {
@@ -52,6 +77,8 @@ export function useEnrollment() {
     items,
     busy,
     error,
+    loading,
+    unauthorized,
     reload,
     consent: (accepted) => run(() => setBiometricConsent(accepted)),
     capture: (blob, pose) => run(() => addEnrollment(blob, pose)),

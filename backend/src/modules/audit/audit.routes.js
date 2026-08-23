@@ -36,6 +36,7 @@ const accessQuerySchema = z.object({
   objectId: z.string().optional(),
   dsarRequestId: z.string().uuid().optional(),
   limit: z.coerce.number().int().min(1).max(200).default(100),
+  cursor: z.string().uuid().optional(),
 })
 
 function actorOf(req) {
@@ -45,7 +46,13 @@ function actorOf(req) {
 auditRoutes.get('/', async (req, res, next) => {
   try {
     const query = listQuerySchema.parse(req.query)
-    res.json({ items: await auditService.listAudit(actorOf(req), query) })
+    const items = await auditService.listAudit(actorOf(req), query)
+    // Same "one extra row" contract as the access ledger, so both endpoints page
+    // the same way and the portal has one helper rather than two.
+    res.json({
+      items,
+      nextCursor: items.length === query.limit ? items[items.length - 1].id : null,
+    })
   } catch (err) {
     next(err)
   }
@@ -73,7 +80,8 @@ accessEventRoutes.use(requireAnyPrincipal)
 accessEventRoutes.get('/', async (req, res, next) => {
   try {
     const query = accessQuerySchema.parse(req.query)
-    res.json({ items: await auditService.getAccessEvents(actorOf(req), query) })
+    const { items, nextCursor } = await auditService.getAccessEvents(actorOf(req), query)
+    res.json({ items, nextCursor })
   } catch (err) {
     next(err)
   }

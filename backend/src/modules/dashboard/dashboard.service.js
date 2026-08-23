@@ -1,6 +1,7 @@
 import { prisma } from '../../config/prisma.js'
 import { ApiError } from '../../middleware/errorHandler.js'
 import { SLA_DAYS, INTERNAL_SLA_DAYS, pseudonymise } from '../dsar/dsar.service.js'
+import { UNRESOLVED_PHOTO_WHERE, countBlockedFrames } from '../../lib/photoState.js'
 
 // One role-aware summary endpoint behind every portal's stat tiles and work
 // queue. It exists so that "the number on the screen" and "the number in the
@@ -154,7 +155,7 @@ async function collectionAgentSummary(admin) {
     // it — a deferred photo means the PII worker was unreachable during their
     // session and the batch cannot be handed off.
     prisma.photo.count({
-      where: { session: { agentId: admin.id }, piiStatus: { in: ['DEFERRED', 'FAILED'] } },
+      where: { session: { agentId: admin.id }, ...UNRESOLVED_PHOTO_WHERE },
     }),
   ])
 
@@ -198,11 +199,11 @@ async function dataAdminSummary() {
     prisma.sessionHandoff.count({
       where: {
         status: 'PENDING_INGEST',
-        session: { photos: { some: { OR: [{ piiStatus: 'DEFERRED' }, { piiStatus: 'FAILED' }, { redactedPath: null }] } } },
+        session: { photos: { some: UNRESOLVED_PHOTO_WHERE } },
       },
     }),
     prisma.purgeJob.count({ where: { status: { in: ['QUEUED', 'RUNNING', 'PARTIAL'] } } }),
-    prisma.photo.count({ where: { piiStatus: { in: ['DEFERRED', 'FAILED'] } } }),
+    prisma.photo.count({ where: UNRESOLVED_PHOTO_WHERE }),
   ])
 
   return {
@@ -430,7 +431,10 @@ export async function getComplianceReport(admin, { from, to } = {}) {
     },
     minimisation: {
       photosByPiiStatus: piiCounts,
-      framesBlockedByFailedRedaction: (piiCounts.DEFERRED ?? 0) + (piiCounts.FAILED ?? 0),
+      // Everything that is not terminal, not just the two loudest states. The
+      // old sum reported 0 while 27 photos sat PENDING, one of them for 16 days.
+      // Counted by inversion so a sixth PiiStatus cannot go missing here.
+      framesBlockedByFailedRedaction: countBlockedFrames(piiCounts),
       handoffs: tally(handoffsByStatus, 'status'),
     },
     breaches: { detectedInPeriod: breaches },

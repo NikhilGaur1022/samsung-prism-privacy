@@ -1,6 +1,8 @@
 import { randomInt, createHash } from 'node:crypto'
 import { prisma } from '../config/prisma.js'
 import { ApiError } from '../middleware/errorHandler.js'
+import { IS_HARDENED } from '../config/env.js'
+import { logger } from './logger.js'
 
 const OTP_LENGTH = 6
 const EXPIRY_MINUTES = 10
@@ -32,11 +34,40 @@ export async function assertResendCooldown(email, purpose) {
   }
 }
 
-// Dev-only escape hatch: surfaces the plaintext code to the client so the flow
-// stays testable without working email delivery. Hard-gated on NODE_ENV so a
-// production build can never leak a live code over the wire.
-export function devOtp(code) {
-  return process.env.NODE_ENV === 'production' ? undefined : code
+// Dev-only escape hatch, returning the code to the client for hands-on testing.
+//
+// A plaintext OTP in an HTTP response body is an account-takeover primitive:
+// anyone who can reach the login endpoint can request a code for any address and
+// read it straight back. This shipped once already, gated on a bare
+// `NODE_ENV === 'production'` string comparison — one typo, one "Production",
+// one unset variable, and every account in the system is open.
+//
+// So it is back, because testing without a mail server needs it, but behind TWO
+// independent gates that must BOTH be open:
+//
+//   1. IS_HARDENED must be false. config/env.js validates NODE_ENV against an
+//      allowlist and refuses to boot on anything unrecognised, so this can no
+//      longer be defeated by a misspelling.
+//   2. EXPOSE_DEV_OTP must be exactly "on". Not a default, not an absence — a
+//      deliberate act, recorded in the environment, that someone has to have
+//      taken on purpose.
+//
+// scripts/preflight.js fails if the flag is set while the environment is
+// hardened, so the combination cannot reach production quietly. The response
+// field is named `devOtp` rather than `otp` so it is obvious in a network log
+// that this is not a production affordance.
+export function devOtpExposed() {
+  return !IS_HARDENED && process.env.EXPOSE_DEV_OTP === 'on'
+}
+
+export function devOtp(code, email) {
+  if (IS_HARDENED) return undefined
+
+  // The log line stays regardless of the flag: it is how the code was read
+  // before this existed, and the automated UI check still reads it from there.
+  logger.debug({ email, otp: code }, 'dev OTP issued')
+
+  return devOtpExposed() ? code : undefined
 }
 
 export async function createOtp(email, purpose) {

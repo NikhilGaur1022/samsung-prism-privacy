@@ -18,6 +18,7 @@ import {
 } from 'lucide-react'
 import Sidebar from '../../components/Sidebar'
 import PageHeader from '../../components/PageHeader'
+import SessionVideoPanel from '../../components/SessionVideoPanel'
 import StatusPill from '../../components/StatusPill'
 import {
   addParticipant,
@@ -600,11 +601,14 @@ export default function SessionDetail() {
                     <img
                       src={
                         session.status === 'ARCHIVED'
-                          ? mediaUrl.redacted(sessionId, photo.id)
-                          : mediaUrl.photo(sessionId, photo.id)
+                          ? mediaUrl.redactedThumb(sessionId, photo.id)
+                          : mediaUrl.photoThumb(sessionId, photo.id)
                       }
                       alt=""
                       loading="lazy"
+                      decoding="async"
+                      width="480"
+                      height="480"
                       className="aspect-square w-full object-cover"
                     />
                     {capturing && (
@@ -622,6 +626,12 @@ export default function SessionDetail() {
               </div>
             </div>
           </section>
+
+          <SessionVideoPanel
+            sessionId={sessionId}
+            canCapture={capturing}
+            sessionStatus={session.status}
+          />
         </div>
       </main>
     </div>

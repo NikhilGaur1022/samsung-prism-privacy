@@ -6,11 +6,14 @@ import { logger } from '../../lib/logger.js'
 import { readFile, shredFile, fileExists } from '../../lib/storage.js'
 import { destroySubjectKey } from '../../lib/keyring.js'
 import { rebuildRedactedForRemaining } from '../sessions/session.service.js'
+import { thumbPathFor } from '../../lib/thumbnails.js'
+import { rebuildRedactedVideoForRemaining } from '../videos/video.service.js'
 import {
   destroyRecording,
   rebuildRedactedForRemainingSpeakers,
 } from '../recordings/recording.service.js'
 import { runDiscovery } from './discovery.service.js'
+import { findSubjectResidue } from '../../lib/storageSweep.js'
 
 // The erasure executor.
 //
@@ -36,13 +39,20 @@ const PHASE_ORDER = [
                 // L6 reads them to decide rebuild-vs-delete
   'SEGMENT',    // the audio counterpart of LINK, and for the same reason: L15
                 // decides mute-vs-delete from what attributions remain
+  'VLINK',      // the video counterpart of LINK. MUST precede L21: redactVideos
+                // builds its keep-visible set from VideoSubject rows, so a
+                // rebuild that ran before this deletion would faithfully keep
+                // the erased subject visible in the new derivative
+  'TRACK',      // the video counterpart of SEGMENT — the face attributions
   'L6',         // rebuild survivors' derivatives, or delete when nobody is left
   'L15',        // re-mute survivors' recordings — AFTER SEGMENT, which is what
                 // turns the erased speaker's spans into mute intervals
+  'L21',        // re-blur survivors' clips — AFTER VLINK and TRACK, same reason
   'L3',         // face crops
   'L7',         // per-person derivative cache
   'L2',         // originals — AFTER L6, which needs them to rebuild
   'L14',        // recording originals — AFTER L15, same reason as L2/L6
+  'L20',        // clip originals — AFTER L21, same reason again
   'L4',         // enrollment selfies
   'L5_ROW',     // embedding rows
   'L16',        // voice enrollment clips
@@ -167,6 +177,17 @@ async function locationsForItems(subjectId, items) {
       objectType: 'Photo.personCache',
       objectId: photo.id,
       storagePath: `sessions/${photo.sessionId}/redacted/${photo.id}.person-${subjectId}.jpg`,
+    })
+    // The grid thumbnail is a picture of this person too. It is derived from the
+    // redacted copy and rebuilt on demand, so removing it costs nothing — but
+    // leaving it would mean a face survived an erasure in a cache nobody
+    // enumerated. Listed by derived path for the same reason L7 is: a cache has
+    // no row of its own.
+    locations.push({
+      locationCode: 'L7',
+      objectType: 'Photo.thumbnail',
+      objectId: photo.id,
+      storagePath: thumbPathFor(photo.sessionId, photo.id),
     })
     locations.push({
       locationCode: 'L2',
@@ -455,6 +476,66 @@ const handlers = {
     return destroyed ? 'DONE' : 'SKIPPED'
   },
 
+  async VLINK(loc) {
+    // The clip's consent link. Deleting it is what makes the clip no longer
+    // lawfully hold this person — and, because redactVideos derives its
+    // keep-visible set from these rows, it is also what makes the L21 rebuild
+    // below actually blur them rather than faithfully preserving them.
+    const { count } = await prisma.videoSubject.deleteMany({ where: { id: loc.objectId } })
+    return count > 0 ? 'DONE' : 'SKIPPED'
+  },
+
+  async TRACK(loc, job) {
+    // Stripped of the person, not deleted — the same decision SEGMENT makes and
+    // for the same reason. The keyframed boxes are the only thing that can blur
+    // this face out of a clip other subjects are still entitled to; destroying
+    // them would make the erased person permanently un-blurrable and force the
+    // whole clip to be destroyed along with everyone else in it.
+    //
+    // What made the row personal data was the attribution. Without it the row
+    // is redaction metadata: "a face was here, and it is blurred".
+    const { count } = await prisma.videoFaceTrack.updateMany({
+      where: { videoId: loc.objectId, taggedSubjectId: job.subjectId },
+      data: { taggedSubjectId: null, tagStatus: 'UNKNOWN', clusterId: null },
+    })
+    return count > 0 ? 'DONE' : 'SKIPPED'
+  },
+
+  async L21(loc, job) {
+    // Mirrors L15. Anyone still linked to this clip keeps their footage, with
+    // the erased subject blurred out of the rebuilt derivative.
+    const remaining = await prisma.videoSubject.count({ where: { videoId: loc.objectId } })
+
+    if (remaining > 0) {
+      await rebuildRedactedVideoForRemaining(loc.objectId)
+      return 'DONE'
+    }
+
+    if (loc.storagePath && (await fileExists(loc.storagePath))) await shredFile(loc.storagePath)
+    await prisma.videoAsset.updateMany({ where: { id: loc.objectId }, data: { redactedPath: null } })
+    return 'DONE'
+  },
+
+  async L20(loc, job) {
+    // Mirrors L2 and L14. The original is the source every future re-blur is
+    // built from, so it is retained while anyone else is still linked — a row
+    // pointing at shredded bytes would make the clip permanently
+    // un-re-redactable and a second subject's erasure impossible to honour.
+    const remaining = await prisma.videoSubject.count({ where: { videoId: loc.objectId } })
+
+    if (remaining > 0) {
+      logger.info(
+        { videoId: loc.objectId, remaining, purgeJobId: job.id },
+        'clip original retained — other subjects still hold consent to this clip',
+      )
+      return 'SKIPPED'
+    }
+
+    if (loc.storagePath && (await fileExists(loc.storagePath))) await shredFile(loc.storagePath)
+    const { count } = await prisma.videoAsset.deleteMany({ where: { id: loc.objectId } })
+    return count > 0 || loc.storagePath ? 'DONE' : 'SKIPPED'
+  },
+
   async L4(loc) {
     if (loc.storagePath && (await fileExists(loc.storagePath))) await shredFile(loc.storagePath)
     return 'DONE'
@@ -614,6 +695,75 @@ export async function executePurgeJob(purgeJobId, { admin = null } = {}) {
     }
   }
 
+  // ---- Filesystem sweep -----------------------------------------------------
+  // Every location above was enumerated by walking database rows, which is the
+  // reason a signed certificate could attest to an erasure that did not happen:
+  // 1,123 files were referenced by no row at all, so discovery never saw them
+  // and purge could not reach them — 383 cropped faces and 135 enrolment
+  // selfies among them. A row-based purge cannot find a row-based bug.
+  //
+  // This walks the disk for anything under the subject's prefixes, or carrying
+  // the subject id in its name (the per-person redacted cache is written as
+  // `<photoId>.person-<subjectId>.jpg`), that no row references. Whatever it
+  // finds is deleted here and recorded as its own location, so the certificate
+  // covers it and an auditor can see it was looked for.
+  let residueLocations = 0
+  if (job.scope !== 'PARTIAL') {
+    try {
+      const residue = await findSubjectResidue(prisma, job.subjectId)
+
+      for (const relPath of residue) {
+        const hashBefore = await hashOf(relPath).catch(() => null)
+        let status = 'DONE'
+        try {
+          await shredFile(relPath)
+        } catch (err) {
+          status = 'FAILED'
+          failures += 1
+          logger.error({ err, path: relPath, purgeJobId }, 'could not shred subject residue')
+        }
+
+        await prisma.purgeJobLocation.create({
+          data: {
+            purgeJobId,
+            locationCode: 'L-FS',
+            objectType: 'OrphanedBlob',
+            objectId: null,
+            storagePath: relPath,
+            status,
+            hashBefore,
+            completedAt: status === 'DONE' ? new Date() : null,
+            attempts: 1,
+            error: status === 'FAILED' ? 'shred failed' : null,
+          },
+        })
+        residueLocations += 1
+      }
+
+      if (residueLocations > 0) {
+        logger.warn(
+          { purgeJobId, subjectId: job.subjectId, residueLocations },
+          'purge found unreferenced blobs the row walk had missed',
+        )
+      }
+    } catch (err) {
+      // A sweep that could not run must not be reported as a sweep that found
+      // nothing. It counts as a failure, which blocks the certificate.
+      failures += 1
+      logger.error({ err, purgeJobId }, 'filesystem residue sweep failed')
+      await prisma.purgeJobLocation.create({
+        data: {
+          purgeJobId,
+          locationCode: 'L-FS',
+          objectType: 'FilesystemSweep',
+          status: 'FAILED',
+          attempts: 1,
+          error: `sweep failed: ${String(err?.message ?? err).slice(0, 400)}`,
+        },
+      })
+    }
+  }
+
   const done = await prisma.purgeJobLocation.count({
     where: { purgeJobId, status: { in: ['DONE', 'SKIPPED'] } },
   })
@@ -630,22 +780,66 @@ export async function executePurgeJob(purgeJobId, { admin = null } = {}) {
     },
   })
 
+  // Project archives that contain this subject.
+  //
+  // A ZIP cannot be edited in place and a copy already downloaded cannot be
+  // recalled — but an archive still sitting in OUR storage that contains a
+  // person who asked to be erased is data we still hold, and that part is
+  // reachable. Reconciling package retention with the erasure path means
+  // destroying it here rather than leaving it to its own expiry clock.
+  let exportsRevoked = 0
+  if (job.scope !== 'PARTIAL') {
+    try {
+      const { revokeExportsContaining } = await import('../projects/projectExport.service.js')
+      const revoked = await revokeExportsContaining(job.subjectId)
+      exportsRevoked = revoked.revoked
+    } catch (err) {
+      // Not fatal to the purge, which has already destroyed the source media —
+      // but loud, because an archive left behind is exactly the gap this whole
+      // phase exists to close.
+      logger.error({ err, purgeJobId }, 'could not invalidate project exports for this subject')
+    }
+  }
+
   await writeAuditLog({
     entityType: 'DsarRequest',
     entityId: job.dsarRequestId,
     action: complete ? 'PURGE_COMPLETED' : 'PURGE_PARTIAL',
     actorId: admin?.id ?? null,
-    payload: { purgeJobId, done, total, failures },
+    payload: { purgeJobId, done, total, failures, residueLocations, exportsRevoked },
   })
 
   return updated
 }
 
-export async function getPurgeJob(purgeJobId) {
+/**
+ * @param {string} purgeJobId
+ * @param {{ dsarRequestId?: string }} [scope]
+ *   The parent the caller reached this job THROUGH. Required by every route that
+ *   has one.
+ *
+ * The route is GET /dsar/:requestId/purge-jobs/:purgeJobId, and :requestId was
+ * never validated and never used — so any purge job was readable under any
+ * request id, including a garbage one. The URL implied a scoping that nothing
+ * enforced.
+ *
+ * A nested resource that ignores its parent is worth grepping for across every
+ * nested route: the shape is invisible in review because the path reads as if
+ * the constraint is there.
+ */
+export async function getPurgeJob(purgeJobId, { dsarRequestId = null } = {}) {
   const job = await prisma.purgeJob.findUnique({
     where: { id: purgeJobId },
     include: { locations: { orderBy: { locationCode: 'asc' } } },
   })
   if (!job) throw new ApiError(404, 'Purge job not found')
+
+  // 404, not 403: a job that does not belong to this request does not exist as
+  // far as this URL is concerned, and saying "wrong parent" would confirm the
+  // id is real.
+  if (dsarRequestId && job.dsarRequestId !== dsarRequestId) {
+    throw new ApiError(404, 'Purge job not found')
+  }
+
   return job
 }

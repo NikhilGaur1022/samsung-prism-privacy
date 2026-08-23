@@ -1,4 +1,40 @@
 services:
+  # Opt-in local Postgres: `docker compose --profile localdb up -d`.
+  #
+  # DATABASE_URL normally points at Supabase, which is remote. That is the right
+  # default for a deployed environment and the wrong one for a laptop on a slow
+  # link: measured from this machine, the round-trip to the pooler is ~550ms
+  # (and ~560ms to google.com — the link, not the provider), which made a bare
+  # `SELECT 1` cost 2.4 SECONDS. Every page in the portal issues several
+  # queries, so the whole application read as broken when nothing was.
+  #
+  # Against this container the same query is ~1ms. Nothing else changes: it is
+  # the same schema, applied by the same `prisma migrate deploy`, so switching
+  # is a DATABASE_URL edit and switching back is the same edit reversed.
+  #
+  # 5434 because 5432 (host Postgres), 5433 (jre-pg) and 54322 (a Supabase local
+  # stack) are all already taken on this machine.
+  postgres:
+    profiles: [localdb]
+    # postgres:16, not :16-alpine — this image is already on the machine, and on
+    # a link this slow "already on disk" beats "150MB smaller".
+    image: postgres:16
+    container_name: prism-postgres
+    environment:
+      POSTGRES_USER: prism
+      POSTGRES_PASSWORD: prism_local_dev
+      POSTGRES_DB: prism
+    ports:
+      - "5434:5432"
+    volumes:
+      - prism_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U prism -d prism"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
   qdrant:
     image: qdrant/qdrant:v1.12.4
     container_name: prism-qdrant
@@ -56,13 +92,19 @@ services:
     # Without a volume that cache lives in the container's writable layer and is
     # thrown away by every `up --force-recreate`, so each rebuild pays for it
     # again. Same reasoning as face_models below.
+    #
+    # These three were two separate `volumes:` blocks until 2026-08-21. YAML
+    # keeps the last mapping key and discards the first, so the model cache
+    # above was never mounted and every rebuild re-downloaded the weights the
+    # comment exists to avoid. Worse, a duplicate key makes the whole file
+    # unparseable to current Docker Compose, which fails `docker compose` for
+    # every service in it, not just this one.
     volumes:
       - audio_models:/root/.cache/huggingface
-    ports:
-      - "8003:8003"
-    volumes:
       - ../ai-core/audio-worker:/app
       - /app/.venv
+    ports:
+      - "8003:8003"
     restart: unless-stopped
 
   text-worker:
@@ -88,7 +130,11 @@ services:
       # fail-closed dependency of /analyze, and pointing this at the host would
       # make every analyze 503 with a connection error that looks like the
       # detector is broken rather than misaddressed.
-      PII_SERVICE_URL: http://image-pii-worker:8002
+      # Overridable so the worker can be run on its own against a PII detector
+      # already running on the host (PII_SERVICE_URL=http://host.docker.internal:8002
+      # docker compose --profile video up -d --no-deps video-worker). The default
+      # is unchanged and is still the compose-network address.
+      PII_SERVICE_URL: ${PII_SERVICE_URL:-http://image-pii-worker:8002}
     depends_on:
       - image-pii-worker
     # Shares face-worker's model volume. Both load the identical buffalo_l pack
@@ -110,3 +156,4 @@ volumes:
   redis_data:
   face_models:
   audio_models:
+  prism_pgdata:

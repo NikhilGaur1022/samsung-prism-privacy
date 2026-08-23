@@ -11,6 +11,8 @@ import { logAccess } from '../../middleware/logAccess.js'
 import { ApiError } from '../../middleware/errorHandler.js'
 import { requireAudioEnabled } from '../../lib/audioFeature.js'
 import * as recordingService from './recording.service.js'
+import { mediaReadLimiter, uploadLimiter } from '../../middleware/rateLimiter.js'
+import { withUploadErrors } from '../../middleware/uploads.js'
 
 export const recordingRoutes = Router()
 
@@ -47,6 +49,8 @@ const readRoles = requireRole('collectionAgent', 'dataOwner', 'dataAdmin', 'supe
 
 const uuid = z.string().uuid()
 
+const MAX_FILES = Number(process.env.AUDIO_UPLOAD_MAX_FILES ?? 10)
+
 // Disk-backed, not memoryStorage. A 200 MB file buffered in the Node heap and
 // then copied again into a FormData blob for the worker is ~400 MB of heap per
 // upload; two concurrent uploads was enough to take the API down.
@@ -55,10 +59,15 @@ const upload = multer({
     destination: path.join(os.tmpdir(), 'prism-audio-uploads'),
     filename: (_req, file, cb) => cb(null, `${randomUUID()}${path.extname(file.originalname) || ''}`),
   }),
-  // One file: the session recording. Was 11 to allow ten reference snippets
-  // alongside it; those are gone, and leaving the allowance would let a caller
-  // push ten extra 200 MB bodies through a route that reads exactly one.
-  limits: { fileSize: 200 * 1024 * 1024, files: 1 },
+  // Up to MAX_FILES session recordings per request.
+  //
+  // This was 1. Before that it was 11, to carry ten reference snippets that no
+  // longer exist — so the cap came down to exactly one and stayed there, which
+  // meant an agent with a morning's worth of interviews made one request per
+  // file. The stills route has taken batches since it was written. These are
+  // genuine session recordings, each of which becomes its own Recording row and
+  // its own analyse/redact cycle, not snippets riding along with one.
+  limits: { fileSize: 200 * 1024 * 1024, files: MAX_FILES },
   fileFilter: (_req, file, cb) => {
     cb(file.mimetype.startsWith('audio/') ? null : new ApiError(415, 'Only audio files are accepted'), true)
   },
@@ -83,21 +92,69 @@ async function cleanup(files) {
   )
 }
 
+// `.array` on the SAME field name, so a client sending one `main_audio` part is
+// unaffected and one sending ten now works.
 recordingRoutes.post(
   '/:sessionId/recordings',
   captureRoles,
-  upload.single('main_audio'),
+  uploadLimiter,
+  withUploadErrors(upload.array('main_audio', MAX_FILES)),
   async (req, res, next) => {
     try {
-      if (!req.file) throw new ApiError(400, 'main_audio file is required')
+      const files = req.files ?? []
+      if (files.length === 0) throw new ApiError(400, 'main_audio file is required')
       const sessionId = uuid.parse(req.params.sessionId)
-      const file = await collect(req.file)
-      const { recording, duplicate } = await recordingService.uploadRecording(sessionId, file, req.admin)
-      res.status(duplicate ? 200 : 201).json({ recording, duplicate })
+
+      // Per-file outcomes, as the photo batch route reports them. One bad file
+      // in a batch of eight must not discard the seven that were fine.
+      const accepted = []
+      const rejected = []
+
+      for (const raw of files) {
+        try {
+          const file = await collect(raw)
+          const { recording, duplicate } = await recordingService.uploadRecording(
+            sessionId,
+            file,
+            req.admin,
+          )
+          accepted.push({ filename: raw.originalname, recording, duplicate: Boolean(duplicate) })
+        } catch (err) {
+          const isClientError = err.statusCode >= 400 && err.statusCode < 500
+          rejected.push({
+            filename: raw.originalname,
+            reason: isClientError ? err.message : 'Could not be processed',
+            code: isClientError ? (err.code ?? 'REJECTED') : 'INTERNAL_ERROR',
+          })
+          if (!isClientError) {
+            req.log?.error?.({ err, filename: raw.originalname }, 'recording upload failed')
+          }
+        }
+      }
+
+      // A single-file request keeps its original `{recording, duplicate}` shape.
+      if (files.length === 1 && accepted.length === 1) {
+        return res
+          .status(accepted[0].duplicate ? 200 : 201)
+          .json({ recording: accepted[0].recording, duplicate: accepted[0].duplicate })
+      }
+
+      res.status(rejected.length === 0 ? 201 : 207).json({
+        added: accepted.filter((a) => !a.duplicate).length,
+        duplicates: accepted.filter((a) => a.duplicate).length,
+        failed: rejected.length,
+        recordings: accepted.map((a) => a.recording),
+        accepted: accepted.map(({ filename, duplicate, recording }) => ({
+          filename,
+          duplicate,
+          recordingId: recording.id,
+        })),
+        rejected,
+      })
     } catch (err) {
       next(err)
     } finally {
-      await cleanup([req.file])
+      await cleanup(req.files ?? [])
     }
   },
 )
@@ -251,6 +308,7 @@ function sendAudioWithRange(req, res, buffer, mimeType = 'audio/wav') {
 recordingRoutes.get(
   '/:sessionId/recordings/:recordingId/raw',
   captureRoles,
+  mediaReadLimiter,
   logAccess('RECORDING', (req) => req.params.recordingId, { purpose: 'COLLECTION' }),
   async (req, res, next) => {
     try {
@@ -274,6 +332,7 @@ recordingRoutes.get(
 recordingRoutes.get(
   '/:sessionId/recordings/:recordingId/redacted',
   readRoles,
+  mediaReadLimiter,
   logAccess('REDACTED_RECORDING', (req) => req.params.recordingId, { purpose: 'COLLECTION' }),
   async (req, res, next) => {
     try {

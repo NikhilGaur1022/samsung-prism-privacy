@@ -45,6 +45,11 @@ const MATRIX = {
   // --- auth (public by necessity; the credential is the control) ---
   'POST /auth/subject/login': A(...ALL),
   'POST /auth/subject/verify': A(...ALL),
+  // Self-registration is anonymous by necessity — the whole point is that the
+  // person has no account yet. The controls are the rate limiters, the 409 on a
+  // duplicate email, and the fact that the record lands PENDING and unverified
+  // until an OTP proves the address. It does NOT create a session.
+  'POST /auth/subject/register': A(...ALL),
   'GET /auth/subject/me': A('subject'),
   'POST /auth/admin/login': A(...ALL),
   'POST /auth/admin/accept-invite': A(...ALL),
@@ -63,6 +68,12 @@ const MATRIX = {
   'GET /auth/admin/me': A(...ROLES),
   'POST /auth/admin/invite': A('super_admin'),
   'GET /auth/admin/users': A('dataOwner', 'super_admin'),
+  // Admin management. Deprovisioning is the control that was entirely missing —
+  // no route existed to change a role or disable an account, so an offboarded
+  // administrator kept working access to a platform holding biometric data.
+  'GET /auth/admin/admins': A('super_admin'),
+  'PATCH /auth/admin/admins/:adminId/status': A('super_admin'),
+  'PATCH /auth/admin/admins/:adminId/role': A('super_admin'),
 
   // --- join (data principal only) ---
   'GET /api/v1/join/:token': A(...ALL),
@@ -89,6 +100,17 @@ const MATRIX = {
   'GET /api/v1/projects/:projectId/handoffs': A('dpo', 'dataOwner', 'dataAdmin', 'super_admin'),
   'GET /api/v1/projects/:projectId/report': A('dpo', 'dataOwner', 'dataAdmin', 'super_admin'),
 
+  // Project export. The READ side follows the oversight floor — a dpo may see
+  // that an export was taken and when. The BUILD and DOWNLOAD are narrower: they
+  // take a copy of the media out of the platform, which is the data owner's own
+  // act on their own project. There is no approval step by decision; the
+  // mandatory AccessEvent on every download is what stands in its place, so the
+  // audience for the act itself has to be the account accountable for it.
+  'POST /api/v1/projects/:projectId/exports': A('dataOwner', 'super_admin'),
+  'GET /api/v1/projects/:projectId/exports': A('dpo', 'dataOwner', 'dataAdmin', 'super_admin'),
+  'GET /api/v1/projects/:projectId/exports/:id': A('dpo', 'dataOwner', 'dataAdmin', 'super_admin'),
+  'GET /api/v1/projects/:projectId/exports/:id/download': A('dataOwner', 'super_admin'),
+
   // --- consent templates ---
   'GET /api/v1/consent-templates': A('dpo', 'dataOwner', 'collectionAgent', 'super_admin'),
   'GET /api/v1/consent-templates/:templateId': A('dpo', 'dataOwner', 'collectionAgent', 'super_admin'),
@@ -100,6 +122,15 @@ const MATRIX = {
 
   // --- dashboard ---
   'GET /api/v1/dashboard/summary': A(...ROLES),
+
+  // --- operations ---
+  // Queue depths, job ages and worker reachability. No subject identity, no
+  // media, no consent state — so the DPO is admitted deliberately: "is redaction
+  // actually running" is an accountability question, and before this endpoint
+  // the answer was unobtainable by anyone.
+  'GET /api/v1/ops/queue-health': A('dataAdmin', 'dpo', 'super_admin'),
+  // Triggering a sweep is operating the platform, which the DPO does not do.
+  'POST /api/v1/ops/requeue': A('dataAdmin', 'super_admin'),
   'GET /api/v1/dashboard/compliance-report': A('dpo', 'dataOwner', 'dataAdmin', 'super_admin'),
 
   // --- collection ---
@@ -111,6 +142,11 @@ const MATRIX = {
   'POST /api/v1/sessions/:sessionId/photos': A('collectionAgent', 'super_admin'),
   'DELETE /api/v1/sessions/:sessionId/photos/:photoId': A('collectionAgent', 'super_admin'),
   'GET /api/v1/sessions/:sessionId/photos/:photoId/file': A('collectionAgent', 'super_admin'),
+  // The grid-sized variants carry EXACTLY the role floor of the full-size route
+  // they shrink. A cheaper-to-serve rendition must never be a cheaper-to-reach
+  // one, and the way that stays true is this pair of lines matching the pair
+  // above and below them.
+  'GET /api/v1/sessions/:sessionId/photos/:photoId/file/thumb': A('collectionAgent', 'super_admin'),
   // Matrix §B: "dataOwner ✓ own project", "dataAdmin ✓". The per-project scope for
   // dataOwner is asserted in loadSession, not here — this list is the role floor.
   'GET /api/v1/sessions/:sessionId/photos': A(
@@ -125,12 +161,20 @@ const MATRIX = {
     'dataAdmin',
     'super_admin',
   ),
+  'GET /api/v1/sessions/:sessionId/photos/:photoId/redacted/thumb': A(
+    'collectionAgent',
+    'dataOwner',
+    'dataAdmin',
+    'super_admin',
+  ),
   'GET /api/v1/sessions/:sessionId/faces/:faceId/crop': A('collectionAgent', 'super_admin'),
   'POST /api/v1/sessions/:sessionId/end': A('collectionAgent', 'super_admin'),
   'GET /api/v1/sessions/:sessionId/clusters': A('collectionAgent', 'super_admin'),
   'POST /api/v1/sessions/:sessionId/clusters/merge': A('collectionAgent', 'super_admin'),
   'POST /api/v1/sessions/:sessionId/clusters/accept-suggestions': A('collectionAgent', 'super_admin'),
   'POST /api/v1/sessions/:sessionId/clusters/:clusterId/split': A('collectionAgent', 'super_admin'),
+  // The video counterpart of /split — same actors, same session-scoped guard.
+  'POST /api/v1/sessions/:sessionId/clusters/:clusterId/split-tracks': A('collectionAgent', 'super_admin'),
   'PATCH /api/v1/sessions/:sessionId/clusters/:clusterId': A('collectionAgent', 'super_admin'),
   'GET /api/v1/sessions/:sessionId/people': A('collectionAgent', 'super_admin'),
   'GET /api/v1/sessions/:sessionId/people/:subjectId/photos': A('collectionAgent', 'super_admin'),

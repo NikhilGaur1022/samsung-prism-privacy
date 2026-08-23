@@ -1,9 +1,10 @@
 import pino from 'pino'
+import { IS_PROD } from '../config/env.js'
 
 export const logger = pino({
-  level: process.env.NODE_ENV === 'production' ? 'info' : 'debug',
+  level: IS_PROD ? 'info' : 'debug',
   transport:
-    process.env.NODE_ENV === 'production'
+    IS_PROD
       ? undefined
       : { target: 'pino-pretty', options: { colorize: true } },
 })

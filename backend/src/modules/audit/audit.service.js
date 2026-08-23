@@ -183,12 +183,16 @@ export async function getAccessEvents(actor, query) {
       actor.subject.masterUserId,
     ]
 
-    const events = await prisma.accessEvent.findMany({
+    const limit = query?.limit ?? 100
+    const rows = await prisma.accessEvent.findMany({
       where: { objectId: { in: ownedIds } },
-      orderBy: { createdAt: 'desc' },
-      take: query?.limit ?? 100,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: limit + 1,
+      ...(query?.cursor ? { cursor: { id: query.cursor }, skip: 1 } : {}),
     })
-    return events
+    const hasMore = rows.length > limit
+    const items = hasMore ? rows.slice(0, limit) : rows
+    return { items, nextCursor: hasMore ? items[items.length - 1].id : null }
   }
 
   const role = actor.admin?.role

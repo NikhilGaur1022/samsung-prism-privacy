@@ -41,6 +41,13 @@ export const LOCATIONS = {
   // handler, match nothing, and report SKIPPED while the document survived.
   L18_TEXT_DOCUMENT: 'L18',
   L19_TEXT_DOCUMENT_REDACTED: 'L19',
+  // The video counterpart of L14/L15, split off for exactly the reason those
+  // were: a purge handler dispatches on the code and deletes from ONE table, so
+  // a VideoAsset reported under L2 would be handed to the photo handler, match
+  // nothing, and report SKIPPED while the clip survived — and the certificate
+  // would say the erasure was complete.
+  L20_VIDEO: 'L20',
+  L21_VIDEO_REDACTED: 'L21',
 }
 
 function location(locationCode, objectType, objectId, storagePath = null, meta = {}) {
@@ -140,6 +147,30 @@ export async function runDiscovery(subjectId) {
     },
   })
 
+  // Every clip this subject was tagged in, with the whole track set so the
+  // sole-appearance test is made against the clip and not against this
+  // subject's slice of it — the same shape as `recordings` above.
+  const videos = await prisma.videoAsset.findMany({
+    where: {
+      OR: [
+        { subjects: { some: { subjectId } } },
+        { tracks: { some: { taggedSubjectId: subjectId } } },
+      ],
+    },
+    select: {
+      id: true,
+      sessionId: true,
+      storagePath: true,
+      redactedPath: true,
+      status: true,
+      sha256: true,
+      tracks: {
+        select: { id: true, taggedSubjectId: true, tagStatus: true, startSec: true, endSec: true, cropPath: true },
+      },
+      subjects: { select: { id: true, subjectId: true, consentId: true } },
+    },
+  })
+
   const faces = await prisma.faceDetection.findMany({
     where: {
       OR: [
@@ -156,6 +187,16 @@ export async function runDiscovery(subjectId) {
   const locations = []
   const multiSubjectPhotos = []
   const multiSpeakerRecordings = []
+  // Voice attributions are the erasure key for audio exactly as PhotoSubject is
+  // for stills, so the summary has to state how many of them exist. It listed
+  // recordings only, which counts the files and not the claims about who is on
+  // them — and the claims are what a deletion certificate has to account for.
+  let audioSegments = 0
+  // Same reasoning as audioSegments: the summary has to state how many
+  // attributions exist, not just how many files, because the attributions are
+  // what the certificate has to account for.
+  let videoTracks = 0
+  const multiSubjectVideos = []
 
   // ---- L2 originals, L6 redacted, L7 per-person cache -----------------------
   for (const link of photoLinks) {
@@ -230,6 +271,7 @@ export async function runDiscovery(subjectId) {
 
     // The attribution rows are the erasure key, exactly as PhotoSubject is. They
     // always go: after this, nothing in the system says this voice was theirs.
+    audioSegments += mine.length
     locations.push(
       location('SEGMENT', 'AudioSegment', recording.id, null, {
         recordingId: recording.id,
@@ -358,6 +400,97 @@ export async function runDiscovery(subjectId) {
 
   if (subject) {
     locations.push(location('PII', 'Subject', subject.masterUserId, null, { action: 'ANONYMISE' }))
+  }
+
+  // ---- L20 clips, L21 blurred derivatives, TRACK attributions ---------------
+  // Shaped exactly like the recording block, and for the same reason: a clip
+  // holding A and B, where A erases, must survive for B with A blurred out.
+  // Video CAN be selectively re-blurred — rebuildRedactedVideoForRemaining
+  // exists for precisely this — so a multi-subject L20 is re-redacted rather
+  // than destroyed, exactly as a multi-speaker L14 is.
+  //
+  // None of this was reachable before 2026-08-21: discovery had no video query
+  // at all, so a subject tagged in a clip could be purged, certified and told
+  // their data was destroyed while their face was still in the footage.
+  for (const video of videos) {
+    const mine = video.tracks.filter((t) => t.taggedSubjectId === subjectId)
+    // Judged from the consent LINKS, not from the tracks: the link is what makes
+    // another person's presence lawful, and it is what redactVideos reads to
+    // decide who stays visible. A clip can hold a track for someone whose link
+    // was never written, and treating that as "another subject is here" would
+    // spare an original that nobody is entitled to.
+    const otherSubjects = [
+      ...new Set(
+        [
+          ...video.subjects.map((l) => l.subjectId),
+          ...video.tracks.map((t) => t.taggedSubjectId),
+        ].filter((id) => id && id !== subjectId),
+      ),
+    ]
+    const soleSubject = otherSubjects.length === 0
+
+    if (!soleSubject) {
+      multiSubjectVideos.push({ videoId: video.id, otherSubjects })
+    }
+
+    // The attribution rows are the erasure key, exactly as PhotoSubject and
+    // AudioSegment are. They always go: after this, nothing in the system says
+    // this face was theirs.
+    videoTracks += mine.length
+
+    // The consent link, and the video counterpart of LINK. Deleting it is what
+    // makes the clip no longer lawfully hold this person, and — because
+    // redactVideos derives its keep-visible set from exactly these rows — it is
+    // also what makes a rebuilt derivative blur them.
+    for (const link of video.subjects.filter((l) => l.subjectId === subjectId)) {
+      locations.push(
+        location('VLINK', 'VideoSubject', link.id, null, {
+          videoId: video.id,
+          consentId: link.consentId,
+          note: 'video consent link — the erasure key for this clip',
+        }),
+      )
+    }
+
+    locations.push(
+      location('TRACK', 'VideoFaceTrack', video.id, null, {
+        videoId: video.id,
+        trackIds: mine.map((t) => t.id),
+        tracks: mine.length,
+        note: 'face attributions in video — deleted per subject, never per clip',
+      }),
+    )
+
+    // The track crops are separate files, cut per track, and are the video
+    // equivalent of L3. Missing them would leave a recognisable face on disk
+    // after a signed certificate said otherwise.
+    for (const track of mine) {
+      if (!track.cropPath) continue
+      locations.push(
+        location(LOCATIONS.L3_FACE_CROP, 'VideoFaceTrack.cropPath', track.id, track.cropPath, {
+          videoId: video.id,
+          note: 'video track representative crop',
+        }),
+      )
+    }
+
+    if (video.redactedPath) {
+      locations.push(
+        location(LOCATIONS.L21_VIDEO_REDACTED, 'VideoAsset.redactedPath', video.id, video.redactedPath, {
+          soleSubject,
+          action: soleSubject ? 'DELETE' : 'REREDACT',
+        }),
+      )
+    }
+
+    locations.push(
+      location(LOCATIONS.L20_VIDEO, 'VideoAsset.storagePath', video.id, video.storagePath, {
+        sha256: video.sha256 || null,
+        sessionId: video.sessionId,
+        soleSubject,
+        action: soleSubject ? 'DELETE' : 'RETAIN',
+      }),
+    )
   }
 
   // ---- L18 text documents, L19 redacted derivatives, SPAN attributions -----
@@ -490,12 +623,17 @@ export async function runDiscovery(subjectId) {
       voiceEnrollments: voiceEnrollments.length,
       consents: consents.length,
       recordings: recordings.length,
+      audioSegments,
+      videos: videos.length,
+      videoTracks,
+      multiSubjectVideos: multiSubjectVideos.length,
       multiSpeakerRecordings: multiSpeakerRecordings.length,
       textSpans: textSpans.length,
       textDocuments: seenDocuments.size,
     },
     multiSubjectPhotos,
     multiSpeakerRecordings,
+    multiSubjectVideos,
     locations,
   }
 }

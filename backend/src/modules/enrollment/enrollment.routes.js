@@ -8,13 +8,16 @@ import { requireAudioEnabled } from '../../lib/audioFeature.js'
 import * as enrollmentService from './enrollment.service.js'
 import * as voiceService from './voiceEnrollment.service.js'
 import { uuid, parsePose } from './enrollment.validation.js'
+import { mimeFilter, withUploadErrors, requireFileKind } from '../../middleware/uploads.js'
+import { uploadLimiter } from '../../middleware/rateLimiter.js'
 
+// A bare Error from a fileFilter carries no statusCode, so errorHandler
+// defaulted it to 500 — "Only image files are accepted" arrived at the subject's
+// phone as a server error. mimeFilter raises 415.
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024, files: 1 },
-  fileFilter: (_req, file, cb) => {
-    cb(file.mimetype.startsWith('image/') ? null : new Error('Only image files are accepted'), true)
-  },
+  fileFilter: mimeFilter('image/'),
 })
 
 // Separate from `upload`: an enrollment clip is a few seconds of speech, not a
@@ -25,9 +28,7 @@ const upload = multer({
 const uploadAudio = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 25 * 1024 * 1024, files: 1 },
-  fileFilter: (_req, file, cb) => {
-    cb(file.mimetype.startsWith('audio/') ? null : new ApiError(415, 'Only audio files are accepted'), true)
-  },
+  fileFilter: mimeFilter('audio/'),
 })
 
 // Serving helper. The bytes arrive here already decrypted by the service and are
@@ -53,7 +54,9 @@ const agentOnly = [requireAdminAuth, requireRole('collectionAgent', 'super_admin
 agentEnrollmentRoutes.post(
   '/:subjectId/enrollments',
   ...agentOnly,
-  upload.single('selfie'),
+  uploadLimiter,
+  withUploadErrors(upload.single('selfie')),
+  requireFileKind('image', { field: 'selfie' }),
   async (req, res, next) => {
     try {
       if (!req.file) throw new ApiError(400, 'No selfie uploaded')
@@ -114,7 +117,9 @@ const agentVoiceOnly = [...agentOnly, requireAudioEnabled]
 agentEnrollmentRoutes.post(
   '/:subjectId/voice-enrollments',
   ...agentVoiceOnly,
-  uploadAudio.single('audio'),
+  uploadLimiter,
+  withUploadErrors(uploadAudio.single('audio')),
+  requireFileKind('audio', { field: 'audio' }),
   async (req, res, next) => {
     try {
       if (!req.file) throw new ApiError(400, 'No audio uploaded')
@@ -171,7 +176,12 @@ export const selfEnrollmentRoutes = Router()
 
 selfEnrollmentRoutes.use(requireSubjectAuth)
 
-selfEnrollmentRoutes.post('/enrollments', upload.single('selfie'), async (req, res, next) => {
+selfEnrollmentRoutes.post(
+  '/enrollments',
+  uploadLimiter,
+  withUploadErrors(upload.single('selfie')),
+  requireFileKind('image', { field: 'selfie' }),
+  async (req, res, next) => {
   try {
     if (!req.file) throw new ApiError(400, 'No selfie uploaded')
     const result = await enrollmentService.createEnrollment({
@@ -227,7 +237,9 @@ selfEnrollmentRoutes.delete('/enrollments/:id', async (req, res, next) => {
 selfEnrollmentRoutes.post(
   '/voice-enrollments',
   requireAudioEnabled,
-  uploadAudio.single('audio'),
+  uploadLimiter,
+  withUploadErrors(uploadAudio.single('audio')),
+  requireFileKind('audio', { field: 'audio' }),
   async (req, res, next) => {
     try {
       if (!req.file) throw new ApiError(400, 'No audio uploaded')

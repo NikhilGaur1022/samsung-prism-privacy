@@ -2,6 +2,7 @@ import { Resend } from 'resend'
 import nodemailer from 'nodemailer'
 import { ApiError } from '../middleware/errorHandler.js'
 import { logger } from './logger.js'
+import { IS_HARDENED } from '../config/env.js'
 
 const resend = new Resend(process.env.RESEND_API_KEY)
 const FROM = process.env.MAIL_FROM ?? process.env.RESEND_FROM_EMAIL ?? 'Prism <onboarding@resend.dev>'
@@ -24,7 +25,7 @@ const smtp =
 // the code is also written to the server log — the email is still attempted, this
 // is purely an escape hatch for local testing. Guarded so it can never leak a live
 // code into production logs.
-const LOG_OTP = process.env.NODE_ENV !== 'production'
+const LOG_OTP = !IS_HARDENED
 
 // Single attempt, no automatic retry — a silent server-side retry risks a
 // duplicate send if Resend's response is slow/ambiguous. On failure this throws

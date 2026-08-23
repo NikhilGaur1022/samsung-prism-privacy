@@ -4,7 +4,8 @@ import { prisma } from '../config/prisma.js'
 import { logger } from '../lib/logger.js'
 import { writeAuditLog } from '../lib/auditLog.js'
 import { REDACTION_QUEUE_NAME, redactionQueueConnection } from '../lib/redactionQueue.js'
-import { redactBystanders } from '../modules/sessions/session.service.js'
+import { redactBystanders, promoteIfRedacted } from '../modules/sessions/session.service.js'
+import { isResolved } from '../lib/photoState.js'
 
 // Drains the photos that finalize could not mask, usually because the
 // image-pii-worker was down. Until this clears them the photos have no
@@ -27,7 +28,10 @@ async function handle(job) {
     logger.info({ photoId }, 'redaction retry: photo no longer exists — dropping job')
     return { skipped: 'PHOTO_GONE' }
   }
-  if (photo.redactedPath && photo.piiStatus !== 'DEFERRED') {
+  if (isResolved(photo)) {
+    // Already finished. Still try the promotion — this may have been the last
+    // outstanding frame in the session and nothing else would notice.
+    await promoteIfRedacted(photo.sessionId)
     return { skipped: 'ALREADY_REDACTED' }
   }
 
@@ -41,12 +45,39 @@ async function handle(job) {
     throw new Error(`redaction still failing for photo ${photoId}`)
   }
 
-  return { written }
+  // This may have been the last frame the session was waiting on. Promotion is
+  // idempotent and advisory-locked, so calling it after every photo is cheap and
+  // means a session archives the moment it becomes eligible rather than waiting
+  // for someone to look at it.
+  const promotion = await promoteIfRedacted(sessionId ?? photo.sessionId)
+
+  return { written, sessionArchived: promotion.archived }
 }
 
 const worker = new Worker(REDACTION_QUEUE_NAME, handle, {
   connection: redactionQueueConnection,
   concurrency: CONCURRENCY,
+  // One photo through the PII worker and the redactor. The PII call has a
+  // 30-second deadline and the redact call 20, both with one retry, so the
+  // worst legitimate case is comfortably inside two minutes. Set explicitly
+  // rather than left at BullMQ's 30-second default, which was shorter than a
+  // single un-timed worker call.
+  lockDuration: Number(process.env.REDACTION_LOCK_DURATION_MS ?? 120_000),
+  stalledInterval: 30_000,
+  maxStalledCount: 2,
+})
+
+worker.on('stalled', async (jobId) => {
+  logger.error({ jobId }, 'redaction job stalled')
+  try {
+    await prisma.stalledJob.upsert({
+      where: { queueName_jobId: { queueName: REDACTION_QUEUE_NAME, jobId: String(jobId) } },
+      create: { queueName: REDACTION_QUEUE_NAME, jobId: String(jobId), state: 'DETECTED' },
+      update: { state: 'DETECTED', detectedAt: new Date(), resolvedAt: null },
+    })
+  } catch (err) {
+    logger.error({ err, jobId }, 'could not record stalled job')
+  }
 })
 
 worker.on('completed', (job, result) => {

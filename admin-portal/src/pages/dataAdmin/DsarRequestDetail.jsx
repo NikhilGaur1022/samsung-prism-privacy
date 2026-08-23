@@ -572,20 +572,40 @@ export default function DsarRequestDetail() {
               </div>
 
               {canWriteItems ? (
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  {/* An expensive, legally significant action must not be
+                      clickable before the data it operates on exists. Both of
+                      these rendered enabled while the item count was still
+                      loading and the banner beside them read "Nothing has been
+                      searched yet. Run discovery…". */}
                   <button
                     type="button"
-                    disabled={busy}
+                    disabled={busy || !page || selectedCount === 0}
                     onClick={() => buildPackage('SELECTED')}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs font-bold text-ink disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+                    title={
+                      !page
+                        ? 'Waiting for the item list'
+                        : selectedCount === 0
+                          ? 'Mark at least one item first'
+                          : undefined
+                    }
+                    className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs font-bold text-ink disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
                   >
                     <PackageCheck size={13} /> Package marked items
+                    {selectedCount > 0 ? ` (${selectedCount})` : ''}
                   </button>
                   <button
                     type="button"
-                    disabled={busy}
+                    disabled={busy || !page || (totals.all ?? 0) === 0}
                     onClick={() => buildPackage('ALL')}
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-brand px-3 py-1.5 text-xs font-bold text-white disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+                    title={
+                      !page
+                        ? 'Waiting for the item list'
+                        : (totals.all ?? 0) === 0
+                          ? 'Run discovery first — there is nothing to package'
+                          : undefined
+                    }
+                    className="inline-flex min-h-9 items-center gap-1.5 rounded-lg bg-brand px-3 py-1.5 text-xs font-bold text-white disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
                   >
                     <PackageCheck size={13} /> Package everything
                   </button>

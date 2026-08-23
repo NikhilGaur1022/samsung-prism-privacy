@@ -9,6 +9,7 @@ import {
 } from './auth-admin.validation.js'
 import { setAdminAuthCookies, clearAdminAuthCookies, ADMIN_REFRESH_COOKIE } from '../../lib/cookies.js'
 import { ApiError } from '../../middleware/errorHandler.js'
+import { z } from 'zod'
 
 export async function login(req, res, next) {
   try {
@@ -98,6 +99,44 @@ export async function logout(req, res, next) {
     if (raw) await authAdminService.logout(raw)
     clearAdminAuthCookies(res)
     res.status(204).end()
+  } catch (err) {
+    next(err)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Admin management (super_admin)
+// ---------------------------------------------------------------------------
+// The deprovisioning surface. There was none — no route to change a role, none
+// to disable an account — so an offboarded administrator kept working access to
+// a platform holding biometric data until someone edited the database by hand.
+
+const statusSchema = z.object({ status: z.enum(['ACTIVE', 'DISABLED']) })
+const roleSchema = z.object({
+  role: z.enum(['dpo', 'dataOwner', 'collectionAgent', 'dataAdmin']),
+})
+
+export async function listAll(req, res, next) {
+  try {
+    res.json({ items: await authAdminService.listAllAdmins() })
+  } catch (err) {
+    next(err)
+  }
+}
+
+export async function updateStatus(req, res, next) {
+  try {
+    const { status } = statusSchema.parse(req.body)
+    res.json(await authAdminService.setAdminStatus(req.params.adminId, status, req.admin))
+  } catch (err) {
+    next(err)
+  }
+}
+
+export async function updateRole(req, res, next) {
+  try {
+    const { role } = roleSchema.parse(req.body)
+    res.json(await authAdminService.setAdminRole(req.params.adminId, role, req.admin))
   } catch (err) {
     next(err)
   }

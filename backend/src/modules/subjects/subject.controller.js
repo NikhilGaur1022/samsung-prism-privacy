@@ -10,7 +10,7 @@ import {
 export async function register(req, res, next) {
   try {
     const input = registerSubjectSchema.parse(req.body)
-    const subject = await subjectService.registerSubject(input, req.user.id)
+    const subject = await subjectService.registerSubject(input, req.admin.id)
     res.status(201).json(subject)
   } catch (err) {
     next(err)
@@ -39,7 +39,7 @@ export async function list(req, res, next) {
 export async function updateConsent(req, res, next) {
   try {
     const body = updateConsentSchema.parse(req.body)
-    const subject = await subjectService.updateConsent(req.params.id, body, req.user.id)
+    const subject = await subjectService.updateConsent(req.params.id, body, req.admin.id)
     res.json(subject)
   } catch (err) {
     next(err)
@@ -49,7 +49,7 @@ export async function updateConsent(req, res, next) {
 export async function updateStatus(req, res, next) {
   try {
     const { status } = updateStatusSchema.parse(req.body)
-    const subject = await subjectService.updateStatus(req.params.id, status, req.user.id)
+    const subject = await subjectService.updateStatus(req.params.id, status, req.admin.id)
     res.json(subject)
   } catch (err) {
     next(err)
@@ -59,7 +59,7 @@ export async function updateStatus(req, res, next) {
 export async function updateGroup(req, res, next) {
   try {
     const { group } = updateGroupSchema.parse(req.body)
-    const subject = await subjectService.updateGroup(req.params.id, group, req.user.id)
+    const subject = await subjectService.updateGroup(req.params.id, group, req.admin.id)
     res.json(subject)
   } catch (err) {
     next(err)

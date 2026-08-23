@@ -6,6 +6,38 @@ import { ApiError } from '../middleware/errorHandler.js'
 const ACCESS_TOKEN_TTL = '15m'
 const REFRESH_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000
 
+// Every token this system mints is HS256. Pinning the algorithm on VERIFY is the
+// half that matters: without it, `jwt.verify` accepts whatever the token's own
+// header asks for, which is the class of bug that lets an attacker pick a weaker
+// algorithm than the one we chose. (`alg:none` is already refused by the library;
+// the algorithm confusion that is not refused is HS/RS substitution.)
+const ALGORITHMS = ['HS256']
+
+// Distinct audience and issuer per token family, so a token minted for one
+// principal type is structurally invalid for the other even if the two secrets
+// were ever misconfigured to the same value — which is exactly the deployment
+// mistake that a shared `.env` full of `change-me` placeholders produces.
+const ISSUER = 'prism'
+const ADMIN_AUDIENCE = 'prism:admin'
+const SUBJECT_AUDIENCE = 'prism:subject'
+
+// Refuses to sign or verify against a secret weak enough to be guessed or, worse,
+// one of the shipped placeholders. This runs at every call rather than only at
+// boot because the boot guard (scripts/preflight.js) is advisory outside
+// production, and the forged-token finding was reproduced on a running dev
+// server with the shipped default still in place.
+function requireStrongSecret(name) {
+  const secret = process.env[name]
+  if (!secret || secret.length < 32 || /change|dev-|placeholder|example/i.test(secret)) {
+    throw new ApiError(
+      500,
+      'Server misconfiguration',
+      undefined,
+    )
+  }
+  return secret
+}
+
 function hashToken(token) {
   return createHash('sha256').update(token).digest('hex')
 }
@@ -14,25 +46,39 @@ function hashToken(token) {
 // principalType claim — every middleware checks both, so a subject token can never
 // satisfy an admin route even if secrets were ever misconfigured to match.
 export function signSubjectAccessToken({ masterUserId }) {
-  return jwt.sign({ principalType: 'SUBJECT', sub: masterUserId }, process.env.JWT_SUBJECT_SECRET, {
+  return jwt.sign({ principalType: 'SUBJECT', sub: masterUserId }, requireStrongSecret('JWT_SUBJECT_SECRET'), {
     expiresIn: ACCESS_TOKEN_TTL,
+    algorithm: 'HS256',
+    issuer: ISSUER,
+    audience: SUBJECT_AUDIENCE,
   })
 }
 
 export function verifySubjectAccessToken(token) {
-  const payload = jwt.verify(token, process.env.JWT_SUBJECT_SECRET)
+  const payload = jwt.verify(token, requireStrongSecret('JWT_SUBJECT_SECRET'), {
+    algorithms: ALGORITHMS,
+    issuer: ISSUER,
+    audience: SUBJECT_AUDIENCE,
+  })
   if (payload.principalType !== 'SUBJECT') throw new ApiError(401, 'Invalid token')
   return payload
 }
 
 export function signAdminAccessToken({ id, role }) {
-  return jwt.sign({ principalType: 'ADMIN', sub: id, role }, process.env.JWT_ADMIN_SECRET, {
+  return jwt.sign({ principalType: 'ADMIN', sub: id, role }, requireStrongSecret('JWT_ADMIN_SECRET'), {
     expiresIn: ACCESS_TOKEN_TTL,
+    algorithm: 'HS256',
+    issuer: ISSUER,
+    audience: ADMIN_AUDIENCE,
   })
 }
 
 export function verifyAdminAccessToken(token) {
-  const payload = jwt.verify(token, process.env.JWT_ADMIN_SECRET)
+  const payload = jwt.verify(token, requireStrongSecret('JWT_ADMIN_SECRET'), {
+    algorithms: ALGORITHMS,
+    issuer: ISSUER,
+    audience: ADMIN_AUDIENCE,
+  })
   if (payload.principalType !== 'ADMIN') throw new ApiError(401, 'Invalid token')
   return payload
 }

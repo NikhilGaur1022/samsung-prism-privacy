@@ -8,6 +8,7 @@ import {
   redactRecording,
   uploadRecording,
 } from '../lib/api'
+import { toWavFile } from '../lib/audioWav'
 
 const STATUS_TONE = {
   PENDING_ANALYSIS: 'neutral',
@@ -204,12 +205,26 @@ export default function RecordingsPanel({ sessionId, capturing }) {
     load()
   }, [sessionId]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  /** One file or a batch — the picker is `multiple`. */
   const handleUpload = async (file) => {
-    if (!file) return
+    const picked = (Array.isArray(file) ? file : [file]).filter(Boolean)
+    if (picked.length === 0) return
     setBusy(true)
     setError(null)
     try {
-      await uploadRecording(sessionId, file)
+      // Converted before upload for the same reason the session recorder
+      // converts: a container the worker has to fall back to PyAV for costs it
+      // seconds per read. A real WAV passes through untouched.
+      const prepared = await Promise.all(picked.map((f) => toWavFile(f, f.name)))
+      const res = await uploadRecording(sessionId, prepared)
+      if (res?.failed > 0) {
+        setError(
+          new Error(
+            `${res.failed} of ${picked.length} file(s) were rejected: ` +
+              (res.rejected ?? []).map((r) => `${r.filename} — ${r.reason}`).join('; '),
+          ),
+        )
+      }
       await load()
     } catch (err) {
       setError(err)
@@ -263,9 +278,10 @@ export default function RecordingsPanel({ sessionId, capturing }) {
             ref={fileInputRef}
             type="file"
             accept="audio/*"
+            multiple
             className="hidden"
             onChange={(e) => {
-              handleUpload(e.target.files?.[0] ?? null)
+              handleUpload(Array.from(e.target.files ?? []))
               e.target.value = ''
             }}
           />

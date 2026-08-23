@@ -14,12 +14,14 @@ import logging
 import os
 import shutil
 import tempfile
+import threading
 
 from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
 
+from audio_io import to_wav16k
 from config import settings
-from diarization import diarize
-from pii_text import find_pii_spans
+from diarization import diarize, get_diarization_pipeline
+from pii_text import find_pii_spans, get_pii_analyzer
 from redact import apply_mute_intervals
 from schemas import (
     AnalyzeResponse,
@@ -28,8 +30,8 @@ from schemas import (
     PiiSpan,
     SpeakerEmbedding,
 )
-from speaker_id import audio_duration_sec, extract_voice_vector
-from transcription import transcribe
+from speaker_id import audio_duration_sec, extract_voice_vector, get_speaker_embedding_model
+from transcription import transcribe, get_whisper_model
 
 logger = logging.getLogger("audio-worker")
 
@@ -40,10 +42,70 @@ app = FastAPI(
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
 )
 
+# Every endpoint below that touches a model is `def`, never `async def`.
+#
+# FastAPI runs a sync handler in its threadpool and an async one directly on the
+# event loop. Diarization, transcription and embedding are seconds-to-minutes of
+# blocking CPU work, and on the loop they froze the whole process: /health
+# stopped answering mid-analysis, so the container read as dead, every queued
+# request sat unread on the socket, and the backend's 180s timeout fired against
+# a worker that was making progress the entire time. The keyword is the fix.
+
+# --- warm-up ----------------------------------------------------------------
+# Each of the four loaders below is lazy, which was right when the alternative
+# was blocking import. It was wrong as the only strategy: the first real request
+# paid for ~1.2 GB of downloads (pyannote, whisper-small, ECAPA) plus, on an
+# image built before the spaCy layer, a 382 MB en_core_web_lg fetch shelled out
+# from inside the handler. That is minutes of work charged to whoever clicks
+# Analyze first, and it looked like a hang rather than a cold start.
+#
+# So they are warmed on a background thread at boot instead. /health answers
+# immediately either way — it is a liveness probe and must never depend on a
+# model. /ready reports the warm state, which is what an operator (and the
+# portal) needs to distinguish "still loading" from "broken".
+_WARMUP = {"state": "cold", "error": None}
+
+
+def _warm_models() -> None:
+    _WARMUP["state"] = "warming"
+    for name, loader in (
+        ("pii", get_pii_analyzer),
+        ("whisper", get_whisper_model),
+        ("speaker", get_speaker_embedding_model),
+        ("diarization", get_diarization_pipeline),
+    ):
+        try:
+            loader()
+            logger.info("warm-up: %s ready", name)
+        except Exception as exc:
+            # A missing HF_TOKEN must not take the service down — /embed and
+            # /redact do not need pyannote, and reporting which model failed is
+            # more useful than refusing to start.
+            logger.warning("warm-up: %s unavailable: %s", name, exc)
+            _WARMUP["error"] = f"{name}: {exc}"
+    _WARMUP["state"] = "ready"
+
+
+@app.on_event("startup")
+def _start_warmup() -> None:
+    threading.Thread(target=_warm_models, name="model-warmup", daemon=True).start()
+
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/ready")
+def ready():
+    """Liveness is /health; this is readiness. Separate on purpose — a warming
+    worker is alive and must not be restarted by an orchestrator, but it is also
+    not yet able to answer /analyze quickly."""
+    return {
+        "status": "ok" if _WARMUP["state"] == "ready" else "warming",
+        "models": _WARMUP["state"],
+        "error": _WARMUP["error"],
+    }
 
 
 def _speaker_for_segment(turns: list[dict], seg_start: float, seg_end: float) -> str | None:
@@ -126,7 +188,7 @@ def _map_pii_span_to_time(seg, span: dict) -> tuple[float, float]:
 
 
 @app.post(f"{settings.API_V1_STR}/embed", response_model=EmbedResponse)
-async def embed(audio: UploadFile = File(...)):
+def embed(audio: UploadFile = File(...)):
     """One clip in, one 192-d speaker vector out. The enrollment path.
 
     Deliberately says nothing about identity: it does not know whose voice
@@ -168,7 +230,7 @@ async def embed(audio: UploadFile = File(...)):
 
 
 @app.post(f"{settings.API_V1_STR}/analyze", response_model=AnalyzeResponse)
-async def analyze(
+def analyze(
     main_audio: UploadFile = File(...),
     min_speakers: int | None = Form(default=None),
     max_speakers: int | None = Form(default=None),
@@ -185,9 +247,22 @@ async def analyze(
     """
     with tempfile.TemporaryDirectory() as tmp:
         audio_ext = os.path.splitext(main_audio.filename or "")[1] or ".wav"
-        audio_path = os.path.join(tmp, f"main{audio_ext}")
-        with open(audio_path, "wb") as f:
+        upload_path = os.path.join(tmp, f"upload{audio_ext}")
+        with open(upload_path, "wb") as f:
             shutil.copyfileobj(main_audio.file, f)
+
+        # Decode once, here, rather than four-plus times downstream. The
+        # extension is not evidence of anything: a Chrome MediaRecorder emits
+        # WebM/Opus whatever the caller names the file, so this normalises by
+        # content and everything below reads plain 16 kHz PCM. See
+        # audio_io.to_wav16k.
+        audio_path = os.path.join(tmp, "main16k.wav")
+        try:
+            to_wav16k(upload_path, audio_path)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400, detail=f"Unreadable audio: {exc}"
+            ) from exc
 
         try:
             turns = diarize(
@@ -272,7 +347,7 @@ async def analyze(
 
 
 @app.post(f"{settings.API_V1_STR}/redact")
-async def redact(
+def redact(
     main_audio: UploadFile = File(...),
     intervals: str = Form(...),
 ):

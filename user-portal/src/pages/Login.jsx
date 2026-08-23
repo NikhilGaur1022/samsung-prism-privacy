@@ -1,16 +1,26 @@
 import { useState } from 'react'
-import { useNavigate, Link } from 'react-router-dom'
+import { useNavigate, Navigate, Link } from 'react-router-dom'
 import { ShieldCheck, Mail } from 'lucide-react'
 import IconChip from '../components/IconChip'
 import { requestLoginOtp } from '../lib/api'
+import { useMe } from '../lib/useMe'
 
 export default function Login() {
   const navigate = useNavigate()
+  const { me, loading } = useMe()
   const [email, setEmail] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState(null)
 
   const canSubmit = email.trim().length > 3 && !submitting
+
+  // Already signed in? Then this page is a dead end, not a door.
+  //
+  // The admin portal had the same hole: a live session and a form asking you to
+  // start a new one. Worse here, because signing in again means waiting for an
+  // OTP email to prove something the cookie in the browser already proves.
+  if (loading) return null
+  if (me) return <Navigate to="/dashboard" replace />
 
   const handleSubmit = async (e) => {
     e.preventDefault()

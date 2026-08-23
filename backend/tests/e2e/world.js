@@ -16,6 +16,44 @@ import * as enrollmentService from '../../src/modules/enrollment/enrollment.serv
 import * as sessionService from '../../src/modules/sessions/session.service.js'
 import { processSession } from '../../src/modules/sessions/recognition.service.js'
 
+/**
+ * Runs recognition, or waits for whoever else is running it.
+ *
+ * `endSession` ENQUEUES a recognition job and this suite then runs the same pass
+ * in-process. On a developer machine with the stack up, the recognition worker
+ * picks the queued job up at the same moment — both take the same advisory lock
+ * on the session, one wins, and the loser returns `{skipped: 'ALREADY_RUNNING'}`.
+ *
+ * The suite used to treat that skip as success and walk straight into finalize,
+ * which then failed with "Session is PROCESSING" because the pass it thought it
+ * had run had not finished. That is a harness bug, not a product bug — the lock
+ * is doing exactly what it exists to do — but it made the whole e2e file fail
+ * whenever the workers happened to be running, and pass whenever they were not.
+ *
+ * So: if the lock was held, wait for the other holder to take the session out of
+ * PROCESSING rather than pretending the work was done.
+ */
+async function runRecognitionExclusively(sessionId, jobId, { timeoutMs = 120_000 } = {}) {
+  const result = await processSession(sessionId, jobId)
+  if (result?.skipped !== 'ALREADY_RUNNING') return result
+
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const session = await prisma.session.findUnique({
+      where: { id: sessionId },
+      select: { status: true },
+    })
+    if (session && session.status !== 'PROCESSING') return { waitedFor: 'ANOTHER_RUNNER' }
+    await new Promise((resolve) => setTimeout(resolve, 500))
+  }
+
+  throw new Error(
+    `recognition for ${sessionId} was already running elsewhere and did not finish within ` +
+      `${timeoutMs}ms. Stop the recognition worker before running the e2e suite, or run it ` +
+      'against an isolated queue.',
+  )
+}
+
 // Shared setup for the end-to-end suites. Both of them need the same thing: a
 // governed project, two consented and enrolled people, a session that has been
 // captured, matched, tagged and archived. Building that twice, slightly
@@ -227,7 +265,7 @@ export async function runSession(world, { photos = ['solo-a.jpg', 'group.jpg'] }
   }
 
   const ended = await sessionService.endSession(session.id, agent)
-  const recognition = await processSession(session.id, ended.job.id)
+  const recognition = await runRecognitionExclusively(session.id, ended.job.id)
 
   // Whatever the matcher did or did not resolve, every group has to carry a
   // decision before finalize will run. Auto-tagged groups are already TAGGED; the

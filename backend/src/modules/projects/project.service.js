@@ -3,6 +3,7 @@ import { ApiError } from '../../middleware/errorHandler.js'
 import { consentVerdict } from '../../lib/consent.js'
 import { writeAuditLog } from '../../lib/auditLog.js'
 import { getTemplate } from '../consentTemplates/consentTemplate.service.js'
+import { countBlockedFrames } from '../../lib/photoState.js'
 
 // A project is the unit of purpose limitation (DPDP §6(1)): nothing may be
 // collected until a DPO has read the purpose, the data types and the retention
@@ -40,6 +41,20 @@ export async function assertAssigned(projectId, admin) {
       where: { projectId_adminId: { projectId, adminId: admin.id } },
     })
     if (!assignment) throw new ApiError(403, 'You are not assigned to this project')
+  }
+
+  // A data owner is scoped to the projects they own here too, not only in
+  // assertOwned/assertOversight. Without this line the two routes that reach the
+  // project through this helper — GET /projects/:projectId and
+  // GET /projects/:projectId/assignments — answered 200 for any owner's project,
+  // leaking its purpose, policy version, retention and risk level, and the email,
+  // role and status of every collection agent assigned to it. Every OTHER project
+  // route already enforced ownership, so this was a horizontal hole in an
+  // otherwise consistent surface, and the RBAC matrix could not see it: it tests
+  // the role floor with synthetic UUIDs and never asks whether one owner can read
+  // another owner's row.
+  if (admin.role === 'dataOwner' && project.ownerAdminId !== admin.id) {
+    throw new ApiError(403, 'You do not own this project')
   }
 
   return project
@@ -401,7 +416,7 @@ export async function assertCollectable(projectId, admin) {
 // These three reads close that without widening either of those surfaces —
 // they are project-scoped, aggregate, and return no subject identity at all.
 
-async function assertOversight(projectId, admin) {
+export async function assertOversight(projectId, admin) {
   const project = await prisma.project.findUnique({ where: { id: projectId } })
   if (!project) throw new ApiError(404, 'Project not found')
   if (admin.role === 'dataOwner' && project.ownerAdminId !== admin.id) {
@@ -422,6 +437,9 @@ export async function listProjectSessions(projectId, admin) {
     select: {
       id: true,
       code: true,
+      // Without the type these screens describe every session as a pile of
+      // photos, so an audio, video or text session reads as an empty one.
+      type: true,
       status: true,
       location: true,
       createdAt: true,
@@ -431,7 +449,15 @@ export async function listProjectSessions(projectId, admin) {
       // Counts only. Naming a participant here would hand subject identity to
       // dpo and dataOwner through the back door matrix §D closes at
       // /projects/:id/subjects.
-      _count: { select: { photos: true, participants: true } },
+      _count: {
+        select: {
+          photos: true,
+          recordings: true,
+          videos: true,
+          documents: true,
+          participants: true,
+        },
+      },
     },
   })
 
@@ -455,10 +481,38 @@ export async function listProjectSessions(projectId, admin) {
     items: sessions.map(({ _count, handoff, ...s }) => ({
       ...s,
       photoCount: _count.photos,
+      recordingCount: _count.recordings,
+      videoCount: _count.videos,
+      documentCount: _count.documents,
+      // What this session actually collected, so a caller can say "1 recording"
+      // without re-deriving it from the type. A video session holds its clips
+      // in videos, not photos, which is why IMAGE and VIDEO differ here.
+      itemCount: itemCountFor(s.type, _count),
       participantCount: _count.participants,
       handoff,
       piiStatusCounts: piiBySession.get(s.id) ?? {},
     })),
+  }
+}
+
+// The count that means something for a given session type. Falls back to the
+// sum rather than to zero: an unknown future type showing every item it holds
+// is a better failure than one reporting itself empty.
+function itemCountFor(type, counts) {
+  switch (type) {
+    case 'IMAGE':
+      // An IMAGE session is the visual-capture session: there is no VIDEO
+      // member of SessionType, so clips hang off this type too and a
+      // video-only session would otherwise report itself as holding nothing.
+      return counts.photos + counts.videos
+    case 'VIDEO':
+      return counts.videos
+    case 'AUDIO':
+      return counts.recordings
+    case 'TEXT':
+      return counts.documents
+    default:
+      return counts.photos + counts.videos + counts.recordings + counts.documents
   }
 }
 
@@ -549,7 +603,11 @@ export async function getProjectReport(projectId, admin) {
       piiStatus: piiCounts,
       // The single number that decides whether this project can hand anything
       // off. Non-zero means redaction did not confirm on that many frames.
-      blockedFrames: (piiCounts.DEFERRED ?? 0) + (piiCounts.FAILED ?? 0),
+      // Every non-terminal state, not just the two loudest. PENDING is the
+      // schema default and the state an un-run redaction leaves behind, so
+      // omitting it reported zero blocked frames on a project that could not
+      // hand off a single one of them. Counted by inversion for that reason.
+      blockedFrames: countBlockedFrames(piiCounts),
     },
     handoffs: tally(handoffsByStatus, 'status'),
     dsar: { byStatus: tally(dsarByStatus, 'status'), certificatesIssued: erasedLinks },

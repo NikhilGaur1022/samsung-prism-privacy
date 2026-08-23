@@ -30,7 +30,12 @@ export async function requestLogin(email) {
     actorId: subject.masterUserId,
   })
 
-  return { devOtp: devOtp(code) }
+  // Called once and held: devOtp also emits the server-side log line, so calling
+  // it twice would log the same code twice and make the log read as two separate
+  // issuances. Returns the code only when the environment is non-hardened AND
+  // EXPOSE_DEV_OTP=on; everywhere else it is undefined and nothing is spread.
+  const exposed = devOtp(code, email)
+  return { requested: true, ...(exposed ? { devOtp: exposed } : {}) }
 }
 
 // Used for both registration-verify and returning-subject login — a subject's
@@ -64,6 +69,16 @@ export async function verifyLoginAndIssueSession(email, otp) {
 
 export async function refreshSession(rawRefreshToken) {
   const { raw, subjectId } = await rotateRefreshToken(rawRefreshToken, 'subjectId')
+
+  // The admin side re-checks status here; the subject side did not, so a
+  // deactivated subject went on minting fresh 15-minute access tokens for the
+  // full week of their refresh-token life. Deactivation has to mean the same
+  // thing for both principal types.
+  const subject = await prisma.subject.findUnique({ where: { masterUserId: subjectId } })
+  if (!subject || subject.status !== 'ACTIVE') {
+    throw new ApiError(401, 'Not authenticated')
+  }
+
   const accessToken = signSubjectAccessToken({ masterUserId: subjectId })
   return { accessToken, refreshToken: raw }
 }

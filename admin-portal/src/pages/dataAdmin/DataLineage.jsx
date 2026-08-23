@@ -100,10 +100,18 @@ export default function DataLineage() {
               <tbody className="divide-y divide-border">
                 {data.items.map((row) => (
                   <tr key={row.id}>
-                    <td className="py-2 pr-4 font-mono text-ink-muted">{row.sha256.slice(0, 12)}</td>
+                    {/* Both of these are nullable on an imported record and both were
+                        dereferenced directly, so the first import in the database
+                        crashed the whole table into the ErrorBoundary. A dash is the
+                        honest rendering: the value is genuinely absent, not zero. */}
+                    <td className="py-2 pr-4 font-mono text-ink-muted">
+                      {row.sha256 ? row.sha256.slice(0, 12) : '—'}
+                    </td>
                     <td className="py-2 pr-4 text-ink-muted">{row.sessionCode}</td>
                     <td className="py-2 pr-4 font-semibold text-ink">{row.subjectName}</td>
-                    <td className="py-2 pr-4 font-mono text-ink-muted">{row.consentId.slice(0, 8)}</td>
+                    <td className="py-2 pr-4 font-mono text-ink-muted">
+                      {row.consentId ? row.consentId.slice(0, 8) : '—'}
+                    </td>
                     <td className="py-2 pr-4 text-ink-muted">{row.projectName}</td>
                     <td className="py-2">
                       <StatusPill tone={row.consentStatus === 'ACTIVE' ? 'success' : 'danger'}>

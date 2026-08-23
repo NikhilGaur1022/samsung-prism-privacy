@@ -1,4 +1,5 @@
 import { prisma } from '../../config/prisma.js'
+import { isResolved } from '../../lib/photoState.js'
 
 // DPDP §11 — "a summary of personal data being processed and the processing
 // activities undertaken". For an image platform that means the principal must be
@@ -68,10 +69,10 @@ export async function listMyPhotos(subjectId) {
       location: photo.session.location,
       takenAt: photo.takenAt ?? photo.createdAt,
       linkedAt: link.createdAt,
-      // Whether the principal can currently view their own copy. A DEFERRED or
-      // FAILED mask means the redaction did not confirm, and invariant 8 says a
-      // frame in that state is served to nobody — including its own subject.
-      viewable: Boolean(photo.redactedPath) && !['DEFERRED', 'FAILED'].includes(photo.piiStatus),
+      // Whether the principal can currently view their own copy. Any mask that
+      // did not confirm — including one that never ran — means invariant 8
+      // serves the frame to nobody, including its own subject.
+      viewable: isResolved(photo),
     })
   }
 

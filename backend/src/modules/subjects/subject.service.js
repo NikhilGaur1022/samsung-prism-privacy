@@ -42,7 +42,11 @@ export async function registerSubject(input, actorId) {
   const { code } = await createOtp(subject.email, 'SUBJECT_LOGIN')
   await sendOtpEmail(subject.email, code)
 
-  return { ...subject, devOtp: devOtp(code) }
+  // Same two gates as the login path. Attached to the returned object so an
+  // agent registering someone in person can read it off their own screen
+  // instead of hunting through a server log.
+  const exposed = devOtp(code, subject.email)
+  return exposed ? { ...subject, devOtp: exposed } : subject
 }
 
 export async function getSubject(masterUserId) {

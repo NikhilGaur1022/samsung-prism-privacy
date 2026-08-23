@@ -5,13 +5,21 @@ import { requireAdminAuth } from '../../middleware/requireAdminAuth.js'
 import { requireRole } from '../../middleware/requireRole.js'
 import { logAccess } from '../../middleware/logAccess.js'
 import * as documentService from './document.service.js'
+import { mimeFilter, withUploadErrors } from '../../middleware/uploads.js'
+import { mediaReadLimiter } from '../../middleware/rateLimiter.js'
+import { uploadLimiter } from '../../middleware/rateLimiter.js'
 
 export const documentRoutes = Router({ mergeParams: true })
 
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB text
-})
+// This route had NO fileFilter and NO file-count limit — the only upload in the
+// system that would accept any content type in any quantity under the size cap.
+const upload = withUploadErrors(
+  multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 10 * 1024 * 1024, files: 1 }, // 10MB text, one at a time
+    fileFilter: mimeFilter(['text/', 'application/pdf', 'application/json']),
+  }).single('file'),
+)
 
 const uuid = z.string().uuid()
 
@@ -51,7 +59,7 @@ documentRoutes.use(requireAdminAuth)
 const textRoles = requireRole('collectionAgent', 'super_admin')
 
 // 1. Upload or paste document
-documentRoutes.post('/:sessionId/documents', textRoles, upload.single('file'), async (req, res, next) => {
+documentRoutes.post('/:sessionId/documents', textRoles, uploadLimiter, upload, async (req, res, next) => {
   try {
     const sessionId = uuid.parse(req.params.sessionId)
     let name = req.body.name || 'Untitled Document'
@@ -141,6 +149,7 @@ documentRoutes.post('/:sessionId/documents/:documentId/redact', textRoles, async
 documentRoutes.get(
   '/:sessionId/documents/:documentId/raw',
   textRoles,
+  mediaReadLimiter,
   logAccess('TEXT_DOCUMENT', (req) => req.params.documentId, { purpose: 'COLLECTION' }),
   async (req, res, next) => {
     try {
@@ -159,6 +168,7 @@ documentRoutes.get(
 documentRoutes.get(
   '/:sessionId/documents/:documentId/redacted',
   textRoles,
+  mediaReadLimiter,
   logAccess('REDACTED_TEXT_DOCUMENT', (req) => req.params.documentId, { purpose: 'COLLECTION' }),
   async (req, res, next) => {
     try {

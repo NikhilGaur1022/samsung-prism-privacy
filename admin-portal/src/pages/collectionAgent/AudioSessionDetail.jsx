@@ -53,6 +53,7 @@ import {
   searchProjectSubjects,
   uploadRecording,
 } from '../../lib/api'
+import { toWavFile } from '../../lib/audioWav'
 
 const VERDICT_LABEL = {
   ELIGIBLE: 'Consent active',
@@ -185,15 +186,32 @@ export default function AudioSessionDetail() {
       }
 
       recorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/wav' })
-        const file = new File([audioBlob], `recording-${Date.now()}.wav`, { type: 'audio/wav' })
+        // recorder.mimeType, not a wishful 'audio/wav'. Chrome hands back
+        // WebM/Opus here whatever we label the Blob, and toWavFile does the
+        // actual conversion rather than renaming the container — see
+        // lib/audioWav.js for what the mislabelled version cost the worker.
+        const raw = new Blob(audioChunksRef.current, {
+          type: recorder.mimeType || 'audio/webm',
+        })
         stream.getTracks().forEach((track) => track.stop())
         setIsRecordingLive(false)
         clearInterval(timerRef.current)
         setLiveDuration(0)
 
-        // Upload recorded file
-        await handleAudioUpload(file)
+        if (raw.size === 0) {
+          setError(new Error('The recording came back empty — nothing was captured.'))
+          return
+        }
+
+        // handleAudioUpload does the WAV conversion for every path, so the raw
+        // WebM goes in as-is rather than being converted twice.
+        try {
+          await handleAudioUpload(
+            new File([raw], `recording-${Date.now()}.webm`, { type: raw.type }),
+          )
+        } catch (err) {
+          setError(new Error(`Could not encode the recording: ${err.message}`))
+        }
       }
 
       recorder.start(250)
@@ -212,12 +230,37 @@ export default function AudioSessionDetail() {
     }
   }
 
+  /**
+   * Takes a File or an array of them — the picker is `multiple` now.
+   *
+   * Anything that is not already a real WAV is converted before it is sent, for
+   * the same reason the live recorder converts: the worker decodes what it is
+   * given, and a mislabelled container costs it seconds per read. toWavFile
+   * checks the actual header rather than the name, so a genuine .wav passes
+   * through untouched.
+   */
   const handleAudioUpload = async (file) => {
-    if (!file) return
+    const picked = (Array.isArray(file) ? file : [file]).filter(Boolean)
+    if (picked.length === 0) return
     setBusy(true)
     setError(null)
     try {
-      const newRec = await uploadRecording(sessionId, file)
+      const prepared = await Promise.all(
+        picked.map((f) => toWavFile(f, f.name ?? `recording-${Date.now()}.wav`)),
+      )
+      const res = await uploadRecording(sessionId, prepared)
+      // Two response shapes: `{recording}` for one file, `{recordings: []}` for a
+      // batch. This read `res.id`, which is on neither — so nothing was ever
+      // selected after an upload and the agent had to click the row themselves.
+      const newRec = res?.recording ?? res?.recordings?.[0] ?? null
+      if (res?.failed > 0) {
+        setError(
+          new Error(
+            `${res.failed} of ${picked.length} file(s) were rejected: ` +
+              (res.rejected ?? []).map((r) => `${r.filename} — ${r.reason}`).join('; '),
+          ),
+        )
+      }
       await loadData()
       if (newRec?.id) setSelectedRecordingId(newRec.id)
     } catch (err) {
@@ -390,9 +433,10 @@ export default function AudioSessionDetail() {
                       ref={uploadInputRef}
                       type="file"
                       accept="audio/*"
+                      multiple
                       className="hidden"
                       onChange={(e) => {
-                        handleAudioUpload(e.target.files?.[0] || null)
+                        handleAudioUpload(Array.from(e.target.files ?? []))
                         e.target.value = ''
                       }}
                     />

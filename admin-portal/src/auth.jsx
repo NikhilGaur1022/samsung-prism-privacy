@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useState, useCallback } from 'react'
 import { Navigate, useLocation, Link } from 'react-router-dom'
 import { ShieldOff } from 'lucide-react'
-import { getMe, logout as apiLogout } from './lib/api'
+import { getMe, logout as apiLogout, refreshAdminSession } from './lib/api'
 import { ROLES } from './roles'
 
 const AuthContext = createContext(null)
@@ -24,6 +24,29 @@ export function AuthProvider({ children }) {
   useEffect(() => {
     refreshMe()
   }, [refreshMe])
+
+  // Renew the access token before it expires, not after.
+  //
+  // lib/api.js already retries a 401 through the refresh endpoint, which covers
+  // every fetch this app makes. It cannot cover an <img>: the browser issues
+  // that request itself, and a 401 there is a broken image with no retry, which
+  // is exactly the gallery of redacted frames going blank a quarter of an hour
+  // into a session.
+  //
+  // Ten minutes against a fifteen-minute token leaves a five-minute margin for a
+  // laptop that was asleep or a request that was slow.
+  useEffect(() => {
+    if (!admin) return undefined
+    const timer = setInterval(() => {
+      refreshAdminSession().then((ok) => {
+        // A refresh token that no longer works means the session is genuinely
+        // over. Reflecting that here sends the operator to /login deliberately,
+        // rather than leaving them on a screen whose next click fails.
+        if (!ok) setAdmin(null)
+      })
+    }, 10 * 60 * 1000)
+    return () => clearInterval(timer)
+  }, [admin])
 
   const signIn = (me) => setAdmin(me)
 

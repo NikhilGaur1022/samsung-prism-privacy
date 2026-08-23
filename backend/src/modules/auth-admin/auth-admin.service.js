@@ -3,6 +3,7 @@ import { prisma } from '../../config/prisma.js'
 import { ApiError } from '../../middleware/errorHandler.js'
 import { writeAuditLog } from '../../lib/auditLog.js'
 import { sendAdminInviteEmail, sendPasswordResetEmail } from '../../lib/resend.js'
+import { markAdminTokensInvalidBefore } from '../../lib/revocation.js'
 import {
   signAdminAccessToken,
   issueAdminRefreshToken,
@@ -171,6 +172,16 @@ export async function resetPassword(token, newPassword) {
   await prisma.authToken.update({ where: { id: authToken.id }, data: { consumedAt: new Date() } })
   await revokeAllRefreshTokensForAdmin(authToken.adminUserId)
 
+  // The revocation hotlist has a reader on every admin request and, until this
+  // line, no writer anywhere — `markAdminTokensInvalidBefore`, whose own comment
+  // says "call this on role change, disable, or password reset", had zero
+  // callers. So a password reset revoked the REFRESH tokens and left any access
+  // token the attacker was holding valid for its full fifteen minutes: the one
+  // action a person takes precisely because they believe their account is
+  // compromised did not end the compromise. The per-request Redis GET was pure
+  // overhead that always returned null.
+  await markAdminTokensInvalidBefore(authToken.adminUserId)
+
   await writeAuditLog({
     entityType: 'AdminUser',
     entityId: authToken.adminUserId,
@@ -208,4 +219,119 @@ export async function refreshSession(rawRefreshToken) {
 
 export function logout(rawRefreshToken) {
   return revokeRefreshToken(rawRefreshToken)
+}
+
+
+// ---------------------------------------------------------------------------
+// Deprovisioning
+// ---------------------------------------------------------------------------
+// There was no admin-management surface at all: no way to change a role, no way
+// to disable an account. For an operator platform that holds biometric data,
+// "we cannot revoke an administrator" is not a missing feature, it is a missing
+// control — offboarding had no mechanism behind it.
+
+const MANAGEABLE_ROLES = ['dpo', 'dataOwner', 'collectionAgent', 'dataAdmin']
+
+/** Every admin, with enough state to manage them. super_admin only. */
+export async function listAllAdmins() {
+  return prisma.adminUser.findMany({
+    orderBy: [{ status: 'asc' }, { email: 'asc' }],
+    select: {
+      id: true,
+      email: true,
+      role: true,
+      status: true,
+      createdAt: true,
+      lastLoginAt: true,
+    },
+  })
+}
+
+/**
+ * Disables an account and ends every live session it holds.
+ *
+ * Both halves matter and neither is sufficient alone: setting status to DISABLED
+ * stops the next refresh, and the hotlist write stops the access token the
+ * person is holding right now. Without the second, a dismissed administrator
+ * keeps full access for up to fifteen minutes after being disabled.
+ */
+export async function setAdminStatus(targetAdminId, status, actor) {
+  if (!['ACTIVE', 'DISABLED'].includes(status)) {
+    throw new ApiError(400, 'Status must be ACTIVE or DISABLED')
+  }
+  if (targetAdminId === actor.id) {
+    // Not paternalism: an operator who disables their own only super_admin
+    // account locks everyone out of the platform permanently, because there is
+    // no route that can re-enable it.
+    throw new ApiError(409, 'You cannot change your own account status')
+  }
+
+  const target = await prisma.adminUser.findUnique({ where: { id: targetAdminId } })
+  if (!target) throw new ApiError(404, 'Admin not found')
+
+  const updated = await prisma.adminUser.update({
+    where: { id: targetAdminId },
+    data: { status },
+    select: { id: true, email: true, role: true, status: true },
+  })
+
+  if (status === 'DISABLED') {
+    await revokeAllRefreshTokensForAdmin(targetAdminId)
+    await markAdminTokensInvalidBefore(targetAdminId)
+  }
+
+  await writeAuditLog({
+    entityType: 'AdminUser',
+    entityId: targetAdminId,
+    action: status === 'DISABLED' ? 'ADMIN_DISABLED' : 'ADMIN_REACTIVATED',
+    actorId: actor.id,
+    payload: { email: target.email, role: target.role, previousStatus: target.status },
+  })
+
+  return updated
+}
+
+/**
+ * Changes an admin's role, and ends their sessions so the new role takes effect
+ * at once.
+ *
+ * A role change without revocation is worse than no role change: the token in
+ * the browser still carries the OLD role claim, so a demotion does not take
+ * effect until the token expires — which is exactly the window in which a
+ * demotion matters.
+ */
+export async function setAdminRole(targetAdminId, role, actor) {
+  if (!MANAGEABLE_ROLES.includes(role)) {
+    throw new ApiError(400, `Role must be one of ${MANAGEABLE_ROLES.join(', ')}`, {
+      allowedRoles: MANAGEABLE_ROLES,
+    })
+  }
+  if (targetAdminId === actor.id) {
+    throw new ApiError(409, 'You cannot change your own role')
+  }
+
+  const target = await prisma.adminUser.findUnique({ where: { id: targetAdminId } })
+  if (!target) throw new ApiError(404, 'Admin not found')
+  if (target.role === 'super_admin') {
+    throw new ApiError(409, 'A platform administrator cannot be demoted through this route')
+  }
+
+  const updated = await prisma.adminUser.update({
+    where: { id: targetAdminId },
+    data: { role },
+    select: { id: true, email: true, role: true, status: true },
+  })
+
+  await revokeAllRefreshTokensForAdmin(targetAdminId)
+  await markAdminTokensInvalidBefore(targetAdminId)
+
+  await writeAuditLog({
+    entityType: 'AdminUser',
+    entityId: targetAdminId,
+    action: 'ADMIN_ROLE_CHANGED',
+    actorId: actor.id,
+    payload: { email: target.email, from: target.role, to: role },
+  })
+
+  return updated
 }

@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate, useParams, Link } from 'react-router-dom'
-import { ArrowLeft, CheckCircle2, Eye, EyeOff, Loader2 } from 'lucide-react'
+import { ArrowLeft, CheckCircle2, Eye, EyeOff, Loader2, Video } from 'lucide-react'
 import Sidebar from '../../components/Sidebar'
 import PageHeader from '../../components/PageHeader'
 import EmptyState from '../../components/EmptyState'
-import { finalizeSession, getPhotosForReview, mediaUrl } from '../../lib/api'
+import { finalizeSession, getPhotosForReview, listVideos, mediaUrl } from '../../lib/api'
 
 const TAG_STYLES = {
   TAGGED: { border: '#22c55e', bg: 'rgba(34,197,94,0.85)', label: (n) => n },
@@ -100,7 +100,8 @@ function PhotoCard({ sessionId, photo, index, faces }) {
       className="rounded-lg overflow-hidden bg-canvas"
     >
       <img
-        src={mediaUrl.photo(sessionId, photo.id)}
+        src={mediaUrl.photoThumb(sessionId, photo.id)}
+        decoding="async" 
         alt=""
         onLoad={handleLoad}
         loading={index < 2 ? 'eager' : 'lazy'}
@@ -143,6 +144,10 @@ export default function ReviewPhotos() {
   const [error, setError] = useState(null)
   const [busy, setBusy] = useState(false)
   const [filter, setFilter] = useState('ALL')
+  // null until the clip list has been read. Distinguished from [] so "no clips"
+  // and "not yet known" do not render the same, which is how a notice about
+  // unfinished work ends up silently absent.
+  const [videos, setVideos] = useState(null)
 
   const reload = useCallback(
     () => getPhotosForReview(sessionId).then(setData).catch(setError),
@@ -152,6 +157,15 @@ export default function ReviewPhotos() {
   useEffect(() => {
     reload()
   }, [reload])
+
+  useEffect(() => {
+    // A 503 means video capture is off in this environment. That is not an
+    // error the agent can act on, so it resolves to "no clips" rather than
+    // failing the whole review screen over a feature that is switched off.
+    listVideos(sessionId)
+      .then((d) => setVideos(d.videos ?? []))
+      .catch(() => setVideos([]))
+  }, [sessionId])
 
   // Preload all photo images in the background after initial data arrives
   useImagePreloader(sessionId, data?.photos)
@@ -169,14 +183,55 @@ export default function ReviewPhotos() {
   }
 
   if (!data) {
+    // An ARCHIVED session is not an error, it is a finished one. This screen is
+    // the pre-finalize review, so the server correctly refuses it — but the page
+    // rendered that refusal as one line of red text on an otherwise empty page,
+    // with no way onward. And the Tagging screen links here unconditionally, so
+    // that dead end is exactly where an agent lands after finalising: the last
+    // step of the happy path ends at what looks like a crash.
+    const archived = /ARCHIVED/i.test(error?.message ?? '')
+
     return (
       <div className="flex min-h-svh bg-canvas">
         <Sidebar />
         <main className="flex-1 px-10 py-8">
-          {error ? (
-            <p className="text-sm font-semibold text-danger">{error.message}</p>
-          ) : (
+          {!error ? (
             <Loader2 size={20} className="animate-spin text-ink-faint" />
+          ) : archived ? (
+            <div className="max-w-lg rounded-card bg-surface p-6 shadow-card">
+              <h1 className="flex items-center gap-2 text-lg font-extrabold text-ink">
+                <CheckCircle2 size={18} className="text-success" />
+                This session is finished
+              </h1>
+              <p className="mt-2 text-sm font-medium leading-relaxed text-ink-muted">
+                It has been finalised and archived, so there is nothing left to review here —
+                redaction has already run and the redacted set has been handed on for oversight.
+              </p>
+              <div className="mt-5 flex flex-wrap gap-2">
+                <Link
+                  to="/sessions"
+                  className="rounded-lg bg-brand px-4 py-2 text-sm font-bold text-white hover:bg-brand-dark"
+                >
+                  Back to sessions
+                </Link>
+                <Link
+                  to={`/sessions/${sessionId}/people`}
+                  className="rounded-lg border border-border bg-canvas px-4 py-2 text-sm font-semibold text-ink hover:bg-surface"
+                >
+                  Who was in it
+                </Link>
+              </div>
+            </div>
+          ) : (
+            <div className="max-w-lg rounded-card bg-surface p-6 shadow-card">
+              <p className="text-sm font-semibold text-danger">{error.message}</p>
+              <Link
+                to="/sessions"
+                className="mt-4 inline-block rounded-lg border border-border bg-canvas px-4 py-2 text-sm font-semibold text-ink hover:bg-surface"
+              >
+                Back to sessions
+              </Link>
+            </div>
           )}
         </main>
       </div>
@@ -204,6 +259,21 @@ export default function ReviewPhotos() {
   const blurredPhotos = data.photos.filter((p) =>
     p.faces.some((f) => f.tagStatus === 'UNKNOWN' || f.tagStatus === 'PENDING'),
   ).length
+
+  // Clips are part of what finalize commits, and they are the thing most likely
+  // to hold the session open afterwards: blurring a clip is slower than
+  // blurring a still, and a clip whose analysis failed will not be blurred at
+  // all. Saying so here means the agent knows before they press the button,
+  // rather than discovering it as a session that never leaves REDACTING.
+  const videoNotice = (() => {
+    if (videos === null) return null
+    if (videos.length === 0) return null
+    const failed = videos.filter((v) => v.status === 'DEFERRED').length
+    if (failed > 0) {
+      return `${failed} clip${failed === 1 ? '' : 's'} could not be analysed. ${failed === 1 ? 'It' : 'They'} will not be blurred and the session will stay open until the video worker succeeds.`
+    }
+    return `${videos.length} clip${videos.length === 1 ? '' : 's'} will be blurred after finalizing — everyone not tagged to a person on the roster. The session archives once that finishes.`
+  })()
 
   return (
     <div className="flex min-h-svh bg-canvas">
@@ -248,6 +318,13 @@ export default function ReviewPhotos() {
               {blurredPhotos} photo{blurredPhotos === 1 ? '' : 's'} — everyone not tagged to a
               person on the roster. This cannot be undone.
             </span>
+          </div>
+        )}
+
+        {videoNotice && (
+          <div className="mt-5 flex items-start gap-2.5 rounded-lg bg-warning-soft px-3 py-2.5 text-sm font-semibold text-warning">
+            <Video size={16} strokeWidth={2} className="mt-0.5 shrink-0" />
+            <span>{videoNotice}</span>
           </div>
         )}
 

@@ -46,6 +46,13 @@ ENV/
 *.mp3
 *.png
 *.jpg
+# Video, for the same reason as the lines above it. The capture fixtures are
+# real footage of real people; their photographs and their voices are already
+# kept out of the repository and their video belongs on the same side of that
+# line. Git history does not forget, so this is not something to fix later.
+*.mp4
+*.mov
+*.webm
 .huggingface/
 .gitnexus
 

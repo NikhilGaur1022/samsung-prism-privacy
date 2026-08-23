@@ -1,11 +1,14 @@
 import express from 'express'
 import cors from 'cors'
+import helmet from 'helmet'
+import compression from 'compression'
 import cookieParser from 'cookie-parser'
 import { prisma } from './config/prisma.js'
 import { qdrant } from './config/qdrant.js'
 import { logger } from './lib/logger.js'
 import { requestLogger } from './middleware/requestLogger.js'
 import { errorHandler } from './middleware/errorHandler.js'
+import { installUuidParams } from './middleware/uuidParams.js'
 import { subjectRoutes } from './modules/subjects/subject.routes.js'
 import { authSubjectRoutes } from './modules/auth-subject/auth-subject.routes.js'
 import { authAdminRoutes } from './modules/auth-admin/auth-admin.routes.js'
@@ -31,17 +34,95 @@ import { dashboardRoutes } from './modules/dashboard/dashboard.routes.js'
 import { recordingRoutes } from './modules/recordings/recording.routes.js'
 import { videoRoutes } from './modules/videos/video.routes.js'
 import { documentRoutes } from './modules/documents/document.routes.js'
+import { opsRoutes } from './modules/ops/ops.routes.js'
 
 // The app is built here and listened to in server.js. The split exists so the
 // RBAC matrix test can mount the real application — the same routers, in the same
 // order, with the same guards — instead of a reconstruction of it. A test against
 // a rebuilt app proves nothing about what ships.
 
+// Every router mounted below, in one place, so installUuidParams cannot miss one.
+const ALL_ROUTERS = [
+  accessEventRoutes,
+  agentEnrollmentRoutes,
+  auditRoutes,
+  authAdminRoutes,
+  authSubjectRoutes,
+  consentRoutes,
+  consentTemplateRoutes,
+  dashboardRoutes,
+  documentRoutes,
+  dsarRoutes,
+  opsRoutes,
+  handoffRoutes,
+  importRoutes,
+  joinRoutes,
+  meRoutes,
+  projectRoutes,
+  recordingRoutes,
+  selfEnrollmentRoutes,
+  sessionBreakGlassRoutes,
+  sessionInviteRoutes,
+  sessionMediaRoutes,
+  sessionRoutes,
+  subjectRoutes,
+  videoRoutes,
+]
+
 export function createApp() {
   const app = express()
+
+  // Every router gets uuid validation on its id params before any of its own
+  // middleware runs — in particular before logAccess, which used to write an
+  // AccessEvent row for a request that the handler was about to 400. Applied
+  // here, from one list, so mounting a new router is enough to inherit it.
+  for (const router of ALL_ROUTERS) installUuidParams(router)
   const corsOrigins = (process.env.CORS_ORIGINS ?? '').split(',').map((s) => s.trim()).filter(Boolean)
 
+  // How many reverse-proxy hops sit in front of this process. It must be an
+  // exact hop count, never `true`: `trust proxy: true` tells Express to believe
+  // the whole X-Forwarded-For chain, which lets a client prepend any address it
+  // likes and both forge the IP written into the access ledger and give itself a
+  // fresh rate-limit bucket per request. Default 0 — direct exposure — because
+  // guessing high is the unsafe direction.
+  const trustProxyHops = Number.parseInt(process.env.TRUST_PROXY_HOPS ?? '0', 10)
+  app.set('trust proxy', Number.isFinite(trustProxyHops) ? trustProxyHops : 0)
+
+  // Security headers. The API serves JSON and media bytes, never HTML, so the
+  // most useful members here are nosniff, frameguard and referrer policy; CSP is
+  // set to a frame-and-script-free default rather than disabled, so a response
+  // that ever did render as a document cannot execute anything.
+  app.use(
+    helmet({
+      contentSecurityPolicy: {
+        directives: {
+          defaultSrc: ["'none'"],
+          frameAncestors: ["'none'"],
+          baseUri: ["'none'"],
+          formAction: ["'none'"],
+        },
+      },
+      crossOriginResourcePolicy: { policy: 'same-site' },
+      referrerPolicy: { policy: 'no-referrer' },
+    }),
+  )
+
   app.use(cors({ origin: corsOrigins, credentials: true }))
+
+  // JSON list responses are the only thing worth compressing here. Media is
+  // already-compressed JPEG and export archives are already deflated, so both
+  // are filtered out — running them through gzip burns CPU to make them
+  // marginally larger.
+  app.use(
+    compression({
+      filter: (req, res) => {
+        const type = res.getHeader('Content-Type')
+        if (typeof type === 'string' && /^(image|video|audio)\/|application\/zip/.test(type)) return false
+        return compression.filter(req, res)
+      },
+    }),
+  )
+
   app.use(express.json())
   app.use(cookieParser())
   app.use(requestLogger)
@@ -100,6 +181,9 @@ export function createApp() {
   app.use('/api/v1/projects', projectRoutes)
   app.use('/api/v1/consent-templates', consentTemplateRoutes)
   app.use('/api/v1/dashboard', dashboardRoutes)
+  // Queue and pipeline health for operators. Read-only apart from a manual
+  // reaper trigger; see modules/ops for why the DPO is admitted.
+  app.use('/api/v1/ops', opsRoutes)
   app.use('/api/v1/dsar', dsarRoutes)
   // The admin-initiated inbound edge. Its own router with its own dataAdmin
   // floor — mounting it under /dsar would have inherited that router's wider

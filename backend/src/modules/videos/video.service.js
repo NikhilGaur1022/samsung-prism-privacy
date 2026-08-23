@@ -5,6 +5,8 @@ import { readFile, writeFile } from '../../lib/storage.js'
 import { writeAuditLog } from '../../lib/auditLog.js'
 import { logger } from '../../lib/logger.js'
 import { loadSessionForMedia } from '../sessions/session.service.js'
+import { UNRESOLVED_VIDEO_WHERE, isVideoUnresolved } from '../../lib/photoState.js'
+import { workerFetch, readWorkerError } from '../../lib/workerFetch.js'
 
 const VIDEO_SERVICE_URL = process.env.VIDEO_SERVICE_URL ?? 'http://localhost:8005'
 
@@ -57,16 +59,20 @@ async function workerDetail(res) {
   }
 }
 
+// `form` may be a factory so a retry can rebuild it — a FormData carrying a Blob
+// is single-use, and re-sending the same object sends an empty body.
 async function callWorker(path, form, { expect = 'json' } = {}) {
   let res
   try {
-    res = await fetch(`${VIDEO_SERVICE_URL}${path}`, { method: 'POST', body: form })
+    res = await workerFetch('video', `${VIDEO_SERVICE_URL}${path}`, {
+      body: typeof form === 'function' ? form : () => form,
+    })
   } catch (err) {
     throw new VideoUnavailableError(`Video worker unreachable at ${path}`, err)
   }
   if (!res.ok) {
     throw new VideoUnavailableError(
-      `Video worker returned ${res.status} at ${path}${await workerDetail(res)}`,
+      `Video worker failed at ${path} (${await readWorkerError('video', res)})`,
     )
   }
   if (expect === 'buffer') {
@@ -529,13 +535,12 @@ export async function rebuildRedactedVideoForRemaining(videoId) {
 
 // Any clip in this session whose masking is unconfirmed. The handoff ingest and
 // the retention sweep both ask this rather than re-deriving the rule.
+// Counts everything that is not confirmably masked, rather than the three
+// failure states it used to list — that list omitted a clip whose status said
+// REDACTED but whose derivative was never written, and it omitted PiiStatus
+// PENDING entirely.
 export async function countDeferredVideos(sessionId) {
-  return prisma.videoAsset.count({
-    where: {
-      sessionId,
-      OR: [{ status: 'DEFERRED' }, { status: 'PENDING_ANALYSIS' }, { piiStatus: 'FAILED' }],
-    },
-  })
+  return prisma.videoAsset.count({ where: { sessionId, ...UNRESOLVED_VIDEO_WHERE } })
 }
 
 // ---------------------------------------------------------------------------
@@ -609,7 +614,7 @@ export async function readRedactedVideo(sessionId, videoId, admin) {
   // Fail closed (invariant 8), identical to readRedactedPhoto. A missing
   // derivative means redaction has not succeeded; 409 tells the caller to wait.
   // There is no branch here that reaches for storagePath, and none may be added.
-  if (!video.redactedPath || video.status !== 'REDACTED' || video.piiStatus === 'DEFERRED' || video.piiStatus === 'FAILED') {
+  if (isVideoUnresolved(video)) {
     throw new ApiError(409, 'REDACTION_PENDING — no redacted copy is available for this video yet')
   }
   return { buffer: await readFile(video.redactedPath), mimeType: 'video/mp4' }

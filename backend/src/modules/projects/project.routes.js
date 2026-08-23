@@ -3,6 +3,8 @@ import { z } from 'zod'
 import { requireAdminAuth } from '../../middleware/requireAdminAuth.js'
 import { requireRole } from '../../middleware/requireRole.js'
 import * as projectService from './project.service.js'
+import * as projectExportService from './projectExport.service.js'
+import { exportLimiter, mediaReadLimiter } from '../../middleware/rateLimiter.js'
 
 export const projectRoutes = Router()
 
@@ -191,6 +193,102 @@ projectRoutes.get('/:projectId/report', oversight, async (req, res, next) => {
   try {
     const projectId = projectIdSchema.parse(req.params.projectId)
     res.json(await projectService.getProjectReport(projectId, req.admin))
+  } catch (err) {
+    next(err)
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Project export
+// ---------------------------------------------------------------------------
+// The requirement that did not exist. Before these four routes, no endpoint in
+// the application returned project-scoped media or an archive — the project
+// surface ended at /report, which is 765 bytes of JSON counts.
+//
+// The role floor here is narrower than `oversight`: dpo and dataAdmin may READ a
+// project for oversight, but taking a copy of its media out is the data owner's
+// own act on their own project. The service re-asserts both, so this is the
+// outer of two checks rather than the only one.
+const exportRole = requireRole('dataOwner', 'super_admin')
+
+projectRoutes.post('/:projectId/exports', exportRole, exportLimiter, async (req, res, next) => {
+  try {
+    const projectId = projectIdSchema.parse(req.params.projectId)
+    const job = await projectExportService.requestProjectExport(projectId, req.admin)
+    res.status(202).json({
+      id: job.id,
+      status: job.status,
+      // 202 with a poll target, not 200 with an archive. A project export takes
+      // minutes and can run to gigabytes; a synchronous response cannot survive
+      // either.
+      poll: `/api/v1/projects/${projectId}/exports/${job.id}`,
+    })
+  } catch (err) {
+    next(err)
+  }
+})
+
+projectRoutes.get('/:projectId/exports', oversight, async (req, res, next) => {
+  try {
+    const projectId = projectIdSchema.parse(req.params.projectId)
+    res.json({ items: await projectExportService.listProjectExports(projectId, req.admin) })
+  } catch (err) {
+    next(err)
+  }
+})
+
+projectRoutes.get('/:projectId/exports/:id', oversight, async (req, res, next) => {
+  try {
+    const projectId = projectIdSchema.parse(req.params.projectId)
+    res.json(await projectExportService.getProjectExport(projectId, req.params.id, req.admin))
+  } catch (err) {
+    next(err)
+  }
+})
+
+// The download. Range-capable, because these archives are large enough that a
+// dropped connection on a non-resumable download means starting over.
+//
+// The AccessEvent is written inside openProjectExport() BEFORE a byte is read,
+// and on every request including a resumed one. That record is what replaces the
+// approval gate the scope decision removed, which is why it is not optional.
+projectRoutes.get('/:projectId/exports/:id/download', exportRole, mediaReadLimiter, async (req, res, next) => {
+  try {
+    const projectId = projectIdSchema.parse(req.params.projectId)
+    const opened = await projectExportService.openProjectExport(
+      projectId,
+      req.params.id,
+      req.admin,
+      { range: req.headers.range, req },
+    )
+
+    res.setHeader('Content-Type', 'application/zip')
+    res.setHeader('Content-Disposition', `attachment; filename="${opened.filename}"`)
+    res.setHeader('Accept-Ranges', 'bytes')
+    // The whole-archive hash, so a client can verify what it received. Quoted
+    // and weak-prefixed is wrong for a strong hash, so it is sent as its own
+    // header alongside a strong ETag.
+    if (opened.contentHash) {
+      res.setHeader('ETag', `"${opened.contentHash}"`)
+      res.setHeader('X-Content-SHA256', opened.contentHash)
+    }
+
+    if (opened.partial) {
+      res.status(206)
+      res.setHeader('Content-Range', `bytes ${opened.start}-${opened.end}/${opened.total}`)
+      res.setHeader('Content-Length', String(opened.end - opened.start + 1))
+    } else {
+      res.setHeader('Content-Length', String(opened.total))
+    }
+
+    opened.stream.on('error', (err) => {
+      // Past the headers there is no way to turn this into a clean error
+      // response, so the connection is destroyed rather than left to look like a
+      // successful truncated download.
+      req.log?.error?.({ err }, 'export stream failed mid-response')
+      res.destroy(err)
+    })
+    opened.stream.pipe(res)
   } catch (err) {
     next(err)
   }

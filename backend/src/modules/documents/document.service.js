@@ -2,6 +2,7 @@ import { prisma } from '../../config/prisma.js'
 import { readFile, writeFile } from '../../lib/storage.js'
 import { writeAuditLog } from '../../lib/auditLog.js'
 import { consentVerdict, isEligible } from '../../lib/consent.js'
+import { workerFetch, readWorkerError } from '../../lib/workerFetch.js'
 
 const TEXT_SERVICE_URL = process.env.TEXT_SERVICE_URL ?? 'http://localhost:8004'
 
@@ -16,16 +17,17 @@ export class TextUnavailableError extends Error {
 async function callAnalyze(text) {
   let res
   try {
-    res = await fetch(`${TEXT_SERVICE_URL}/api/v1/analyze`, {
-      method: 'POST',
+    res = await workerFetch('text', `${TEXT_SERVICE_URL}/api/v1/analyze`, {
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, score_threshold: 0.35 }),
+      body: () => JSON.stringify({ text, score_threshold: 0.35 }),
     })
   } catch (err) {
     throw new TextUnavailableError('Text worker unreachable while analyzing document', err)
   }
   if (!res.ok) {
-    throw new TextUnavailableError(`Text worker returned ${res.status} while analyzing document`)
+    throw new TextUnavailableError(
+      `Text worker failed while analyzing document (${await readWorkerError('text', res)})`,
+    )
   }
   return res.json()
 }
@@ -33,16 +35,17 @@ async function callAnalyze(text) {
 async function callRedact(text, spans) {
   let res
   try {
-    res = await fetch(`${TEXT_SERVICE_URL}/api/v1/redact`, {
-      method: 'POST',
+    res = await workerFetch('text', `${TEXT_SERVICE_URL}/api/v1/redact`, {
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, spans, default_action: 'REDACT_ALL' }),
+      body: () => JSON.stringify({ text, spans, default_action: 'REDACT_ALL' }),
     })
   } catch (err) {
     throw new TextUnavailableError('Text worker unreachable while redacting document', err)
   }
   if (!res.ok) {
-    throw new TextUnavailableError(`Text worker returned ${res.status} while redacting document`)
+    throw new TextUnavailableError(
+      `Text worker failed while redacting document (${await readWorkerError('text', res)})`,
+    )
   }
   return res.json()
 }
@@ -150,6 +153,18 @@ export async function saveSpans(sessionId, documentId, rawSpans, admin) {
     } else if (span.action === 'MANUAL_UNREDACT') {
       action = 'MANUAL_UNREDACT'
       reason = 'AGENT_MANUAL_UNREDACT'
+    } else if (span.action === 'REDACT_PII') {
+      // Kept as REDACT_PII, not folded into REDACT_ALL.
+      //
+      // The `else` below used to swallow this: a span the detector raised over
+      // an Aadhaar number was stored as REDACT_ALL / UNTAGGED_TEXT — "redacted
+      // because nobody claimed it" — and the enum has carried REDACT_PII for
+      // exactly this case the whole time. The output bytes are identical either
+      // way, which is why it went unnoticed; what differed was the reason in the
+      // record, and on a document whose point is to evidence WHY each masking
+      // happened, a wrong reason is the defect.
+      action = 'REDACT_PII'
+      reason = span.reason || (span.piiType ? `PII_${span.piiType}_DETECTED` : 'PII_DETECTED')
     } else {
       action = 'REDACT_ALL'
       reason = 'UNTAGGED_TEXT'
