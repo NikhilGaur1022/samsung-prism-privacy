@@ -1,9 +1,45 @@
 import { useEffect, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { Camera, Mic, FileText, PlayCircle } from 'lucide-react'
+import { Camera, Mic, FileText, Video, PlayCircle } from 'lucide-react'
 import Sidebar from '../../components/Sidebar'
 import PageHeader from '../../components/PageHeader'
 import { createSession, listProjects } from '../../lib/api'
+
+// The four capture modalities, as data rather than four near-identical copies of
+// the same twenty lines of JSX — which is what this was, and is why adding a
+// fourth was worth doing here rather than by pasting a third time.
+//
+// `route` is where a freshly created session of this type belongs: audio and text
+// have dedicated workspaces, while image and video both use the general session
+// page (the video panel already lives on it).
+const SESSION_TYPES = [
+  {
+    value: 'IMAGE',
+    label: 'Image',
+    Icon: Camera,
+    blurb: 'Face recognition, blurring, and visual PII masking.',
+  },
+  {
+    value: 'VIDEO',
+    label: 'Video',
+    Icon: Video,
+    blurb: 'Face tracking and blurring across frames. Clips must be silent.',
+  },
+  {
+    value: 'AUDIO',
+    label: 'Audio',
+    Icon: Mic,
+    blurb: 'Diarization, voice matching, and spoken PII muting.',
+  },
+  {
+    value: 'TEXT',
+    label: 'Text',
+    Icon: FileText,
+    blurb: 'Subject quote tagging, unconsented & PII text redaction.',
+  },
+]
+
+const ROUTE_FOR = { AUDIO: 'audio', TEXT: 'text' }
 
 const FIELD_CLASS =
   'mt-1.5 w-full rounded-lg border border-border bg-canvas px-3 py-2 text-sm text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand'
@@ -13,7 +49,7 @@ export default function NewSession() {
   const { state } = useLocation()
   const [projects, setProjects] = useState([])
   const [projectId, setProjectId] = useState(state?.projectId ?? '')
-  const [sessionType, setSessionType] = useState('IMAGE') // 'IMAGE' | 'AUDIO' | 'TEXT'
+  const [sessionType, setSessionType] = useState('IMAGE')
   const [location, setLocation] = useState('')
   const [error, setError] = useState(null)
   const [submitting, setSubmitting] = useState(false)
@@ -39,13 +75,8 @@ export default function NewSession() {
         location: location.trim() || undefined,
         type: sessionType,
       })
-      if (sessionType === 'AUDIO') {
-        navigate(`/sessions/${session.id}/audio`)
-      } else if (sessionType === 'TEXT') {
-        navigate(`/sessions/${session.id}/text`)
-      } else {
-        navigate(`/sessions/${session.id}`)
-      }
+      const sub = ROUTE_FOR[sessionType]
+      navigate(sub ? `/sessions/${session.id}/${sub}` : `/sessions/${session.id}`)
     } catch (err) {
       setError(err)
       setSubmitting(false)
@@ -95,60 +126,29 @@ export default function NewSession() {
                 <label className="block text-sm font-semibold text-ink mb-1.5">
                   Session Type
                 </label>
-                <div className="grid grid-cols-3 gap-3">
-                  <button
-                    type="button"
-                    onClick={() => setSessionType('IMAGE')}
-                    className={`flex flex-col items-start p-3.5 rounded-xl border text-left transition ${
-                      sessionType === 'IMAGE'
-                        ? 'border-brand bg-brand-soft/40 ring-2 ring-brand'
-                        : 'border-border bg-canvas hover:bg-surface'
-                    }`}
-                  >
-                    <div className="flex items-center gap-1.5 text-ink font-bold text-xs">
-                      <Camera size={16} className={sessionType === 'IMAGE' ? 'text-brand' : 'text-ink-faint'} />
-                      <span>Image</span>
-                    </div>
-                    <p className="mt-1 text-[11px] leading-tight text-ink-faint">
-                      Face recognition, blurring, and visual PII masking.
-                    </p>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setSessionType('AUDIO')}
-                    className={`flex flex-col items-start p-3.5 rounded-xl border text-left transition ${
-                      sessionType === 'AUDIO'
-                        ? 'border-brand bg-brand-soft/40 ring-2 ring-brand'
-                        : 'border-border bg-canvas hover:bg-surface'
-                    }`}
-                  >
-                    <div className="flex items-center gap-1.5 text-ink font-bold text-xs">
-                      <Mic size={16} className={sessionType === 'AUDIO' ? 'text-brand' : 'text-ink-faint'} />
-                      <span>Audio</span>
-                    </div>
-                    <p className="mt-1 text-[11px] leading-tight text-ink-faint">
-                      Diarization, voice matching, and spoken PII muting.
-                    </p>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setSessionType('TEXT')}
-                    className={`flex flex-col items-start p-3.5 rounded-xl border text-left transition ${
-                      sessionType === 'TEXT'
-                        ? 'border-brand bg-brand-soft/40 ring-2 ring-brand'
-                        : 'border-border bg-canvas hover:bg-surface'
-                    }`}
-                  >
-                    <div className="flex items-center gap-1.5 text-ink font-bold text-xs">
-                      <FileText size={16} className={sessionType === 'TEXT' ? 'text-brand' : 'text-ink-faint'} />
-                      <span>Text</span>
-                    </div>
-                    <p className="mt-1 text-[11px] leading-tight text-ink-faint">
-                      Subject quote tagging, unconsented & PII text redaction.
-                    </p>
-                  </button>
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                  {SESSION_TYPES.map(({ value, label, Icon, blurb }) => {
+                    const selected = sessionType === value
+                    return (
+                      <button
+                        key={value}
+                        type="button"
+                        aria-pressed={selected}
+                        onClick={() => setSessionType(value)}
+                        className={`flex flex-col items-start p-3.5 rounded-xl border text-left transition ${
+                          selected
+                            ? 'border-brand bg-brand-soft/40 ring-2 ring-brand'
+                            : 'border-border bg-canvas hover:bg-surface'
+                        }`}
+                      >
+                        <div className="flex items-center gap-1.5 text-ink font-bold text-xs">
+                          <Icon size={16} className={selected ? 'text-brand' : 'text-ink-faint'} />
+                          <span>{label}</span>
+                        </div>
+                        <p className="mt-1 text-[11px] leading-tight text-ink-faint">{blurb}</p>
+                      </button>
+                    )
+                  })}
                 </div>
               </div>
 
@@ -168,7 +168,9 @@ export default function NewSession() {
                 className="mt-6 flex items-center gap-2 rounded-lg bg-brand px-5 py-2.5 text-sm font-semibold text-white disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-dark shadow-sm transition hover:bg-brand-dark"
               >
                 <PlayCircle size={16} strokeWidth={2} />
-                {submitting ? 'Starting…' : `Start ${sessionType === 'AUDIO' ? 'Audio' : sessionType === 'TEXT' ? 'Text' : 'Image'} Session`}
+                {submitting
+                  ? 'Starting…'
+                  : `Start ${SESSION_TYPES.find((t) => t.value === sessionType)?.label ?? 'Image'} Session`}
               </button>
             </form>
           )}

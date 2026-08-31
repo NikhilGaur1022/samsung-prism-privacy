@@ -27,6 +27,30 @@ function refreshTokens() {
   return refreshInFlight
 }
 
+// Endpoints where a 401 is an ANSWER rather than an expired access token, so a
+// refresh-and-retry would be wrong:
+//
+//   login / register / verify — anonymous. A 401 from /verify means the code was
+//     wrong, and refreshing on it would turn a clear "that code is not right"
+//     into a silent failure. There is also no session to refresh yet.
+//   refresh — a 401 from the refresh endpoint means the refresh token is gone
+//     too, so retrying it is an infinite loop, not a recovery.
+//
+// This used to be `!path.startsWith('/auth/subject/')`, which over-matched: /me
+// and /logout live under the same prefix but ARE authenticated calls. So the one
+// request the dashboard makes on mount to read your own record — getMe() — was
+// the single request in the app that could never recover from an expired access
+// token. It 401'd, the refresh beside it was never attempted, and the portal
+// bounced the principal to the OTP screen mid-session. That is the exact failure
+// the comment at the top of this file describes; the retry existed, /me was just
+// excluded from it.
+const NO_REFRESH_RETRY = [
+  '/auth/subject/login',
+  '/auth/subject/register',
+  '/auth/subject/verify',
+  '/auth/subject/refresh',
+]
+
 async function request(path, options = {}) {
   const send = () =>
     fetch(`${BASE_URL}${path}`, {
@@ -37,10 +61,8 @@ async function request(path, options = {}) {
 
   let res = await send()
 
-  // One retry, for an expired access token only. The auth endpoints are
-  // excluded: a 401 from /verify means the code was wrong, and refreshing on
-  // that would turn a clear "that code is not right" into a silent failure.
-  if (res.status === 401 && !path.startsWith('/auth/subject/')) {
+  // One retry, for an expired access token only.
+  if (res.status === 401 && !NO_REFRESH_RETRY.some((p) => path.startsWith(p))) {
     if (await refreshTokens()) res = await send()
   }
 
@@ -275,29 +297,12 @@ export function createDsarPackageToken(id) {
   return request(`/api/v1/me/dsar/${id}/package-token`, { method: 'POST' })
 }
 
-// --- Photos (DPDP §11) --------------------------------------------------------
-// The subject's own record of photos they appear in, grouped by project. The
-// server derives "appears in" from confirmed face-tag links against the
-// session cookie's subject id, never from anything sent here.
+// --- Photo summary (DPDP §11) -------------------------------------------------
+// Counts, purposes and consent state grouped by project — never the photographs
+// themselves. getMyRedactedPhoto used to fetch frame bytes straight from a
+// session cookie; the material now comes only from an approved ACCESS package,
+// downloaded once through downloadDsarPackage() above.
 
-export function getMyPhotos() {
+export function getMyPhotoSummary() {
   return request('/api/v1/me/photos')
-}
-
-// Binary, so it bypasses request(): everyone but the requesting principal is
-// blurred server-side. A 409 means the redaction has not been confirmed yet —
-// callers should check `viewable` on the photo entry before ever calling this.
-export async function getMyRedactedPhoto(photoId) {
-  const res = await fetch(`${BASE_URL}/api/v1/me/photos/${photoId}/redacted`, {
-    credentials: 'include',
-  })
-
-  if (!res.ok) {
-    const body = await res.json().catch(() => null)
-    const error = new Error(body?.error ?? `Photo fetch failed with status ${res.status}`)
-    error.status = res.status
-    throw error
-  }
-
-  return res.blob()
 }

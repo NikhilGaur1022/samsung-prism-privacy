@@ -441,13 +441,22 @@ export async function execute(requestId, admin, { inline = true } = {}) {
     const finished = await executePurgeJob(job.id, { admin })
 
     if (finished.status === 'COMPLETED') {
-      const certificate = await issueCertificate(finished.id, admin)
+      // A project erasure is not certifiable and must not be: the certificate
+      // attests that everything held about a person is gone, and here the person
+      // and their other projects remain. The completed purge job is the proof at
+      // this scope — see assertClosableErasure().
+      const certificate =
+        finished.scope === 'PROJECT' ? null : await issueCertificate(finished.id, admin)
       const updated = await prisma.dsarRequest.update({
         where: { id: requestId },
         data: { status: 'REVIEW' },
         select: REQUEST_FIELDS,
       })
-      return { request: withSla(updated), purgeJob: finished, certificateId: certificate.id }
+      return {
+        request: withSla(updated),
+        purgeJob: finished,
+        ...(certificate ? { certificateId: certificate.id } : { scope: 'PROJECT' }),
+      }
     }
 
     // Partial: the request stays EXECUTING and the SLA clock keeps running, which
@@ -473,18 +482,48 @@ export async function execute(requestId, admin, { inline = true } = {}) {
   return { request: withSla(updated) }
 }
 
+/**
+ * The proof an erasure needs before it can be closed, at the scope it was run.
+ *
+ * A whole-subject erasure needs a signed deletion certificate. A project erasure
+ * cannot have one — the certificate asserts that everything held about a person
+ * is gone, and a §6(4) withdrawal from one project leaves the person, their
+ * identity row, their key and their other projects deliberately intact. Its
+ * proof is a purge job that completed at PROJECT scope.
+ *
+ * Requiring a certificate for both would deadlock every withdrawal: executable
+ * and never closable.
+ */
+async function assertClosableErasure(request) {
+  if (!['ERASE', 'WITHDRAWAL_ERASURE'].includes(request.type)) return
+
+  if (!request.projectId) {
+    const certificate = await getCertificateForRequest(request.id)
+    if (!certificate) {
+      throw new ApiError(409, 'Cannot close an erasure with no deletion certificate issued')
+    }
+    return
+  }
+
+  const completed = await prisma.purgeJob.findFirst({
+    where: { dsarRequestId: request.id, scope: 'PROJECT', status: 'COMPLETED' },
+    select: { id: true },
+  })
+  if (!completed) {
+    throw new ApiError(
+      409,
+      'Cannot close a project erasure before its purge job has completed. The completed job is the proof at this scope, in place of a whole-subject deletion certificate.',
+    )
+  }
+}
+
 export async function approveResolution(requestId, { note }, admin) {
   const request = await prisma.dsarRequest.findUnique({ where: { id: requestId } })
   if (!request) throw new ApiError(404, 'DSAR request not found')
   assertTransition(request.status, 'CLOSED')
 
-  // An erasure cannot be closed without the certificate that proves it happened.
-  if (['ERASE', 'WITHDRAWAL_ERASURE'].includes(request.type)) {
-    const certificate = await getCertificateForRequest(requestId)
-    if (!certificate) {
-      throw new ApiError(409, 'Cannot close an erasure with no deletion certificate issued')
-    }
-  }
+  // An erasure cannot be closed without proof it happened, at its own scope.
+  await assertClosableErasure(request)
 
   const updated = await prisma.dsarRequest.update({
     where: { id: requestId },
@@ -538,15 +577,10 @@ export async function closeRequest(requestId, { note }, admin) {
     )
   }
 
-  // Same rule approveResolution() enforces, restated rather than shared: an
-  // erasure with no certificate has no proof it happened, and this is a second
-  // door into the same transition.
-  if (['ERASE', 'WITHDRAWAL_ERASURE'].includes(request.type)) {
-    const certificate = await getCertificateForRequest(requestId)
-    if (!certificate) {
-      throw new ApiError(409, 'Cannot close an erasure with no deletion certificate issued')
-    }
-  }
+  // The same rule approveResolution() enforces. Shared now rather than restated:
+  // what counts as proof depends on the SCOPE of the erasure, and two copies of
+  // that reasoning is how one door starts accepting what the other refuses.
+  await assertClosableErasure(request)
 
   const failed = await prisma.dsarItemAction.count({
     where: { dsarRequestId: requestId, status: 'FAILED' },

@@ -58,6 +58,14 @@ export default function SessionVideoPanel({ sessionId, canCapture, sessionStatus
   const [videos, setVideos] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+  // Kept apart from `error` on purpose. A per-file rejection from an upload and
+  // a failure to list the clips are different facts with different lifetimes,
+  // and sharing one slot lost the rejection every time: onPick set the reason,
+  // then called load(), whose success path clears `error` — so the operator saw
+  // the message appear and vanish in the same tick, with no way to read why
+  // their clip was refused. The commonest refusal is the 422 for a soundtrack,
+  // which is precisely the one they need to read to know what to do next.
+  const [rejection, setRejection] = useState(null)
   const [busy, setBusy] = useState(false)
   const inputRef = useRef(null)
 
@@ -81,15 +89,34 @@ export default function SessionVideoPanel({ sessionId, canCapture, sessionStatus
     load()
   }, [load])
 
+  // Redaction is queued work that runs AFTER finalize, so a clip is ANALYZED
+  // when this panel mounts and becomes REDACTED a minute or two later. Nothing
+  // told the page that: it loaded once, showed "Faces found, not yet blurred",
+  // and stayed that way forever. The operator is then sitting in front of a
+  // screen that will never update, concluding the blurred copy was never made —
+  // which is exactly the wrong conclusion, because it usually has been.
+  //
+  // DEFERRED is excluded deliberately: that is a terminal failure state and
+  // polling it forever would be a busy-wait on something no amount of waiting
+  // fixes.
+  const awaitingRedaction = videos.some((v) => !isFinished(v) && v.status !== 'DEFERRED')
+
+  useEffect(() => {
+    if (!awaitingRedaction) return
+    const timer = setInterval(load, 5000)
+    return () => clearInterval(timer)
+  }, [awaitingRedaction, load])
+
   const onPick = async (event) => {
     const files = Array.from(event.target.files ?? [])
     if (files.length === 0) return
     setBusy(true)
     setError(null)
+    setRejection(null)
     try {
       const res = await uploadVideo(sessionId, files)
       if (res?.failed > 0) {
-        setError({
+        setRejection({
           message:
             `${res.failed} of ${files.length} clip(s) were rejected: ` +
             (res.rejected ?? []).map((r) => `${r.filename} — ${r.reason}`).join('; '),
@@ -97,7 +124,10 @@ export default function SessionVideoPanel({ sessionId, canCapture, sessionStatus
       }
       await load()
     } catch (err) {
-      setError({ message: err.message })
+      // A single-file upload rejected outright throws rather than returning a
+      // 207 body, so the reason arrives here — it is still a rejection, not a
+      // transport failure, and it has to survive the load() below the same way.
+      setRejection({ message: err.message })
     } finally {
       setBusy(false)
       if (inputRef.current) inputRef.current.value = ''
@@ -169,6 +199,23 @@ export default function SessionVideoPanel({ sessionId, canCapture, sessionStatus
         </p>
       )}
 
+      {rejection && (
+        <p className="mt-3 flex items-start gap-2 rounded-lg bg-danger-soft p-3 text-sm font-medium text-danger">
+          <AlertTriangle size={15} strokeWidth={2.5} className="mt-0.5 shrink-0" />
+          <span>
+            {rejection.message}
+            {' '}
+            <button
+              type="button"
+              onClick={() => setRejection(null)}
+              className="underline underline-offset-2"
+            >
+              Dismiss
+            </button>
+          </span>
+        </p>
+      )}
+
       {loading ? (
         <p className="mt-4 flex items-center gap-2 text-sm font-medium text-ink-faint">
           <Loader2 size={15} strokeWidth={2.5} className="animate-spin" />
@@ -180,6 +227,14 @@ export default function SessionVideoPanel({ sessionId, canCapture, sessionStatus
         </p>
       ) : (
         <>
+          {awaitingRedaction && sessionStatus === 'ARCHIVED' && (
+            <p className="mt-4 flex items-start gap-2 rounded-lg bg-warning-soft p-3 text-sm font-medium text-warning">
+              <Loader2 size={15} strokeWidth={2.5} className="mt-0.5 shrink-0 animate-spin" />
+              Blurring is still running. The player appears here on its own as soon as each
+              blurred copy is written — no need to refresh.
+            </p>
+          )}
+
           {unfinished > 0 && sessionStatus !== 'ARCHIVED' && (
             <p className="mt-4 flex items-start gap-2 rounded-lg bg-warning-soft p-3 text-sm font-medium text-warning">
               <AlertTriangle size={15} strokeWidth={2.5} className="mt-0.5 shrink-0" />

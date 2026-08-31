@@ -1,41 +1,42 @@
 import { prisma } from '../../config/prisma.js'
-import { isResolved } from '../../lib/photoState.js'
 
 // DPDP §11 — "a summary of personal data being processed and the processing
-// activities undertaken". For an image platform that means the principal must be
-// able to answer *how many photos am I in, and under which purpose*, without
-// filing a DSAR. The answer is derived from PhotoSubject, the same link table
-// erasure operates on, so the count a principal sees and the count an erasure
-// would destroy can never disagree.
+// activities undertaken". Note *summary*: the section entitles the principal to
+// know what is held about them and on what basis, not to a self-service viewer
+// over the collected material.
 //
-// Scope is deliberately narrow: no other principal on the frame is named, no
-// face box is returned, and no storage path ever leaves this function. The photo
-// itself is served only through the per-person redacted route, which blurs
-// everyone else.
-export async function listMyPhotos(subjectId) {
+// This surface therefore returns counts, purposes and consent state only. It
+// used to return one row per photograph — id, session code, capture location,
+// timestamp, and a `viewable` flag the portal used to fetch the actual bytes —
+// which made the portal a standing read channel over the dataset, available to
+// anyone holding a session cookie and answerable to no approval.
+//
+// Actual material is delivered through an ACCESS request instead: reviewed by a
+// data admin, approved by the DPO, packaged as redacted derivatives with a
+// manifest, and downloaded once through a single-use token. That path is
+// auditable and revocable; a photo grid in a portal is neither.
+//
+// The counts are derived from PhotoSubject, the same link table erasure operates
+// on, so the number a principal sees and the number an erasure would destroy can
+// never disagree.
+export async function summariseMyPhotos(subjectId) {
   const links = await prisma.photoSubject.findMany({
     where: { subjectId },
-    orderBy: { createdAt: 'desc' },
     select: {
-      id: true,
       createdAt: true,
       consent: {
         select: { consentId: true, status: true, policyVersion: true, consentedAt: true, revokedAt: true },
       },
       photo: {
         select: {
-          id: true,
+          // No storagePath and no redactedPath: nothing downstream can turn this
+          // response into a fetch, because nothing here names a stored object.
+          // Enforced by the select rather than by remembering not to spread it.
           sessionId: true,
           takenAt: true,
           createdAt: true,
-          redactedPath: true,
-          piiStatus: true,
           session: {
             select: {
-              code: true,
-              status: true,
-              location: true,
-              archivedAt: true,
               project: { select: { id: true, name: true, purpose: true, retention: true, status: true } },
             },
           },
@@ -45,35 +46,34 @@ export async function listMyPhotos(subjectId) {
   })
 
   const byProject = new Map()
+  const allSessions = new Set()
+  let first = null
+  let last = null
 
   for (const link of links) {
     const { photo } = link
     const project = photo.session.project
+    const at = photo.takenAt ?? photo.createdAt
+
     if (!byProject.has(project.id)) {
       byProject.set(project.id, {
         project,
         consent: link.consent,
         photoCount: 0,
         sessions: new Set(),
-        photos: [],
+        first: null,
+        last: null,
       })
     }
     const group = byProject.get(project.id)
     group.photoCount += 1
     group.sessions.add(photo.sessionId)
-    group.photos.push({
-      photoId: photo.id,
-      sessionId: photo.sessionId,
-      sessionCode: photo.session.code,
-      sessionStatus: photo.session.status,
-      location: photo.session.location,
-      takenAt: photo.takenAt ?? photo.createdAt,
-      linkedAt: link.createdAt,
-      // Whether the principal can currently view their own copy. Any mask that
-      // did not confirm — including one that never ran — means invariant 8
-      // serves the frame to nobody, including its own subject.
-      viewable: isResolved(photo),
-    })
+    if (!group.first || at < group.first) group.first = at
+    if (!group.last || at > group.last) group.last = at
+
+    allSessions.add(photo.sessionId)
+    if (!first || at < first) first = at
+    if (!last || at > last) last = at
   }
 
   const projects = [...byProject.values()].map((g) => ({
@@ -81,12 +81,16 @@ export async function listMyPhotos(subjectId) {
     consent: g.consent,
     photoCount: g.photoCount,
     sessionCount: g.sessions.size,
-    photos: g.photos,
+    firstCollectedAt: g.first,
+    lastCollectedAt: g.last,
   }))
 
   return {
     totalPhotos: links.length,
     projectCount: projects.length,
+    sessionCount: allSessions.size,
+    firstCollectedAt: first,
+    lastCollectedAt: last,
     projects,
   }
 }

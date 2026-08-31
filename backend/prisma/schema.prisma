@@ -481,6 +481,12 @@ enum SessionType {
   IMAGE
   AUDIO
   TEXT
+  // Video-only capture. IMAGE sessions can still hold clips alongside stills —
+  // that is how video worked before this member existed, and those sessions are
+  // still out there — so nothing keys "has video" off this value. It means "this
+  // session collects clips and nothing else", which is what lets the UI drop the
+  // stills panel and the end-of-session guard stop asking for a photo.
+  VIDEO
 }
 
 enum SessionStatus {
@@ -895,6 +901,12 @@ enum PurgeJobStatus {
 // full erasure and would certify as one.
 enum PurgeJobScope {
   FULL
+  // One project's worth: everything the withdrawn consent authorised, and
+  // nothing that is held per-subject. The identity row, the per-subject DEK and
+  // the enrollments survive, because a §6(4) withdrawal from one project is not
+  // a request to delete the account. Certifiable, but the certificate must name
+  // the project rather than claim a whole-subject erasure.
+  PROJECT
   PARTIAL
 }
 

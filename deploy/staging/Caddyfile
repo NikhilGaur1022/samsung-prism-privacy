@@ -1,0 +1,146 @@
+# TWO origins, each of them internally single-origin — and that distinction is
+# the whole design, so it is worth being precise about.
+#
+# The API sets its session cookies with `sameSite: 'strict'` (backend/src/lib/
+# cookies.js). Splitting the PORTALS from the API across hostnames breaks that:
+# the browser stops sending the cookie and the portal logs you out on the next
+# request. `trycloudflare.com` is on the Public Suffix List, so two
+# *.trycloudflare.com names are as cross-site as two unrelated domains — there
+# is no shared parent to fall back to.
+#
+# What is safe is giving each AUDIENCE its own origin that carries its own copy
+# of the API underneath it. A cookie minted on origin A is sent back to origin
+# A on every request that portal makes, because those requests are same-origin.
+# Nothing ever needs to travel between A and B: an admin session and a subject
+# session are separate sessions with separate cookie names, and neither portal
+# calls the other's host.
+#
+#   :8080  admin origin  -> /admin  is the console, plus the API. The user
+#                           portal is still served at / here, so an old link or
+#                           a QR minted before the split keeps working.
+#   :8081  user origin   -> the user portal at /, plus the API. NO /admin: the
+#                           console is not reachable on the link handed to data
+#                           principals.
+#
+# TLS is terminated by cloudflared in front of this, so this speaks plain HTTP
+# and auto_https is off. Both ports are published on the host as well, so the
+# stack is reachable at http://<lan-ip>:8080 and :8081 without the tunnels —
+# note that a bare LAN IP over HTTP is not a secure context, so camera capture
+# and the enrollment selfie only work over the tunnels' HTTPS URLs.
+{
+	auto_https off
+	admin off
+}
+
+# The three top-level prefixes the Express app actually mounts (backend/
+# src/app.js: /api/v1/*, /auth/*, /health). Matched at the paths the backend
+# already serves rather than behind a stripped /api prefix, because the refresh
+# cookies are scoped to Path=/auth/subject/refresh and Path=/auth/admin/refresh
+# — a rewrite here would set a cookie path the browser never matches again, and
+# silent session refresh would fail in a way that looks like random logouts.
+#
+# Imported into BOTH sites: each origin has to be able to serve its own API, or
+# the portal on it would be making cross-site requests and we are back to the
+# cookie problem above.
+(api) {
+	@api path /api/* /auth/* /health /health/*
+	handle @api {
+		reverse_proxy backend:4000 {
+			transport http {
+				# DSAR export packages and media downloads are built on demand
+				# and can be slow.
+				read_timeout 300s
+			}
+		}
+	}
+}
+
+# Cache policy for the static bundles, and the reason it has to be explicit.
+#
+# Caddy's file_server sets Last-Modified and an ETag but no Cache-Control. With
+# no Cache-Control and no Expires, a browser falls back to HEURISTIC freshness
+# — roughly a tenth of the file's age — and will serve its cached copy without
+# revalidating at all. For hashed assets that is harmless. For index.html it is
+# not: Vite content-hashes every asset filename, so a stale index.html asks for
+# script names that no longer exist after a rebuild, every one of them 404s, and
+# the page renders as an empty <div id="root">. Nothing in any server log looks
+# wrong, and it reproduces in exactly one browser — whichever one happened to
+# cache the old entry point.
+#
+# So: the entry points must revalidate every time, and the hashed assets, which
+# can never change content under a fixed name, are cached forever.
+#
+# Deliberately NOT applied to /api/*, /auth/* or /health: those are the
+# backend's responses to own. Blanket no-cache here would overwrite the
+# `no-store` the API sets on voice-enrollment playback, which is a weaker
+# guarantee than the one that route intends.
+(cache) {
+	@hashed path /assets/* /admin/assets/*
+	header @hashed Cache-Control "public, max-age=31536000, immutable"
+
+	@entry {
+		not path /api/* /auth/* /health /health/* /assets/* /admin/assets/*
+	}
+	header @entry Cache-Control "no-cache"
+}
+
+# The user portal is the fallback on both sites. react-router owns the path
+# space, so an unknown path is the app's 404 to render, not Caddy's.
+(user-portal) {
+	handle {
+		root * /srv/user
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+# ------------------------------------------------------------ admin origin --
+:8080 {
+	encode gzip zstd
+	import cache
+	import api
+
+	# Canonicalise the bare /admin to /admin/.
+	#
+	# The comment that used to sit here said no trailing-slash redirect was
+	# needed, because the bundle's asset URLs are absolute and load fine either
+	# way. That was true and beside the point. The ASSETS were never the problem:
+	# react-router is handed basename="/admin/" (Vite's BASE_URL), its
+	# stripBasename does a literal startsWith, "/admin" does not start with
+	# "/admin/", and the router matches no route and renders nothing. Serving a
+	# perfectly good index.html at the bare path produced a blank white console
+	# with every server-side check green.
+	#
+	# admin-portal/src/App.jsx now normalises that basename, which is the real
+	# fix and works wherever the bundle is served. This redirect stands in front
+	# of it so the address bar, bookmarks and shared links all settle on one
+	# canonical form instead of a path that only works because the app forgives
+	# it. Belt and braces on the URL people actually type.
+	redir /admin /admin/ 308
+
+	# Admin console, built with base=/admin/ so its asset URLs are absolute and
+	# survive a deep link.
+	@admin path /admin /admin/*
+	handle @admin {
+		root * /srv
+		try_files {path} /admin/index.html
+		file_server
+	}
+
+	import user-portal
+}
+
+# ------------------------------------------------------------- user origin --
+:8081 {
+	encode gzip zstd
+	import cache
+	import api
+
+	# Deliberately no /admin handler. The admin bundle is in this image (one
+	# image serves both sites) but nothing routes to it here, so /admin on this
+	# origin falls through to the user portal's react-router 404. That is a
+	# routing decision, not a security boundary — the console is worthless
+	# without an admin session cookie, which only the other origin can mint —
+	# but it keeps the console off the link that goes out to data principals.
+	import user-portal
+}

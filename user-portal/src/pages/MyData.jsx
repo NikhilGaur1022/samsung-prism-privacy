@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Image as ImageIcon, ScanFace, ShieldCheck, User } from 'lucide-react'
+import { AudioLines, Image as ImageIcon, Lock, ScanFace, ShieldCheck, User } from 'lucide-react'
 import TopBar from '../components/TopBar'
 import Card from '../components/Card'
 import Badge from '../components/Badge'
@@ -9,10 +9,27 @@ import {
   getEnrollmentStatus,
   getMe,
   getMyParticipations,
-  getMyPhotos,
-  getMyRedactedPhoto,
+  getMyPhotoSummary,
+  enrollmentImageUrl,
   listConsentProjects,
+  listEnrollments,
+  listVoiceEnrollments,
+  voiceEnrollmentAudioUrl,
 } from '../lib/api'
+
+const POSE_LABEL = { FRONT: 'Front', LEFT: 'Left', RIGHT: 'Right' }
+
+// Dates are rendered day-precision on purpose. A capture timestamp is itself a
+// fact about where the principal was and when; the day is enough to make the
+// summary meaningful without rebuilding a movement log out of it.
+const day = (d) => (d ? new Date(d).toLocaleDateString() : null)
+
+function collectedRange(first, last) {
+  const a = day(first)
+  const b = day(last)
+  if (!a) return null
+  return a === b ? `Collected ${a}` : `Collected ${a} – ${b}`
+}
 
 const CONSENT_LABEL = {
   ACTIVE: { tone: 'success', label: 'Active' },
@@ -20,73 +37,23 @@ const CONSENT_LABEL = {
   PURGED: { tone: 'neutral', label: 'Purged' },
 }
 
-// A single photo tile. Only ever fetches bytes for entries the server marked
-// viewable — anything else means redaction has not been confirmed, and the
-// image cannot be shown to anyone, including the principal it belongs to.
-function PhotoThumb({ photo }) {
-  const [url, setUrl] = useState(null)
-  const [error, setError] = useState(null)
-
-  useEffect(() => {
-    if (!photo.viewable) return undefined
-    let cancelled = false
-    let objectUrl = null
-
-    getMyRedactedPhoto(photo.photoId)
-      .then((blob) => {
-        if (cancelled) return
-        objectUrl = URL.createObjectURL(blob)
-        setUrl(objectUrl)
-      })
-      .catch((err) => {
-        if (!cancelled) setError(err)
-      })
-
-    return () => {
-      cancelled = true
-      if (objectUrl) URL.revokeObjectURL(objectUrl)
-    }
-  }, [photo.photoId, photo.viewable])
-
-  if (!photo.viewable) {
-    return (
-      <div className="flex aspect-square flex-col items-center justify-center rounded-card bg-canvas p-2 text-center">
-        <p className="text-[10px] font-semibold leading-snug text-ink-faint">
-          Privacy masking has not finished — this photo can&apos;t be shown to anyone yet, including you.
-        </p>
-      </div>
-    )
-  }
-
-  if (error) {
-    return (
-      <div className="flex aspect-square flex-col items-center justify-center rounded-card bg-canvas p-2 text-center">
-        <p className="text-[10px] font-semibold text-danger">Could not load this photo.</p>
-      </div>
-    )
-  }
-
-  if (!url) {
-    return <div className="aspect-square animate-pulse rounded-card bg-canvas" />
-  }
-
-  return (
-    <img
-      src={url}
-      alt={`Your copy of a photo from session ${photo.sessionCode}`}
-      className="aspect-square w-full rounded-card object-cover"
-    />
-  )
-}
-
 // DPDP §11: the summary a data principal is entitled to of what is held about
 // them and on what basis. Every figure here comes straight off an API response.
+//
+// A summary is all this page shows. It used to render the photographs as well,
+// as a grid the portal fetched frame by frame — which turned a session cookie
+// into a standing read over the collected material, with no review, no record of
+// what a principal was actually shown, and nothing to revoke if the account were
+// taken over. Copies are obtained by raising an ACCESS request instead: reviewed,
+// approved by the DPO, and delivered once to the secure inbox.
 export default function MyData() {
   const [me, setMe] = useState(null)
   const [projects, setProjects] = useState(null)
   const [enrollment, setEnrollment] = useState(null)
   const [participations, setParticipations] = useState(null)
   const [photos, setPhotos] = useState(null)
+  const [poses, setPoses] = useState([])
+  const [clips, setClips] = useState([])
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(true)
 
@@ -96,14 +63,20 @@ export default function MyData() {
       listConsentProjects(),
       getEnrollmentStatus(),
       getMyParticipations(),
-      getMyPhotos(),
+      getMyPhotoSummary(),
+      listEnrollments(),
+      // 503 when AUDIO_CAPTURE_ENABLED is off. That is "not offered here", not a
+      // failure, so it resolves to an empty list rather than blanking the page.
+      listVoiceEnrollments().catch(() => ({ items: [] })),
     ])
-      .then(([meRes, projectsRes, enrollmentRes, participationsRes, photosRes]) => {
+      .then(([meRes, projectsRes, enrollmentRes, participationsRes, photosRes, posesRes, clipsRes]) => {
         setMe(meRes)
         setProjects(projectsRes.items)
         setEnrollment(enrollmentRes)
         setParticipations(participationsRes.items)
         setPhotos(photosRes)
+        setPoses(posesRes.items)
+        setClips(clipsRes.items)
       })
       .catch(setError)
       .finally(() => setLoading(false))
@@ -182,6 +155,70 @@ export default function MyData() {
               </Badge>
             </Card>
 
+            {/* The enrollment media itself is shown, unlike anything collected in
+                a session. The distinction is who produced it and why: these are
+                the reference shots and the voice sample the principal recorded
+                themselves, held one per subject as the key that face and speaker
+                matching run against. Showing them back is how someone checks what
+                their own reference set actually contains before deciding whether
+                to delete a frame or withdraw biometric consent, and none of it
+                discloses anybody else. Session material is a different thing —
+                other people are in it, it was captured by an agent under a
+                project purpose, and it goes through an approved access request. */}
+            {poses.length > 0 && (
+              <div className="mt-3 flex flex-wrap gap-3">
+                {poses.map((item) => (
+                  <div key={item.id}>
+                    <img
+                      src={enrollmentImageUrl(item.id)}
+                      alt={`Your ${POSE_LABEL[item.pose] ?? 'enrollment'} reference photo`}
+                      className="h-20 w-20 rounded-card object-cover"
+                    />
+                    <p className="mt-1 text-center text-[10px] font-bold text-ink-faint">
+                      {POSE_LABEL[item.pose] ?? '—'}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {clips.length > 0 && (
+              <>
+                <p className="mt-6 text-xs font-bold uppercase tracking-wide text-ink-faint">
+                  Voice enrollment
+                </p>
+                <Card className="mt-3 space-y-3 py-3">
+                  <div className="flex items-center gap-3">
+                    <IconChip icon={AudioLines} tone="brand" size="sm" />
+                    <p className="text-sm font-semibold text-ink">
+                      {clips.length} voice clip{clips.length === 1 ? '' : 's'} on file
+                    </p>
+                  </div>
+                  {clips.map((clip) => (
+                    <div key={clip.id}>
+                      <p className="text-xs font-bold text-ink">
+                        {clip.durationSec == null ? '—' : `${clip.durationSec.toFixed(1)} seconds`}
+                        <span className="ml-2 font-medium text-ink-faint">{day(clip.createdAt)}</span>
+                      </p>
+                      {/* preload="none" so opening this page does not pull every
+                          clip the person has ever recorded onto the device. */}
+                      <audio controls preload="none" src={voiceEnrollmentAudioUrl(clip.id)} className="mt-1 w-full" />
+                    </div>
+                  ))}
+                </Card>
+              </>
+            )}
+
+            {(poses.length > 0 || clips.length > 0) && (
+            <p className="mt-2 text-xs font-medium text-ink-faint">
+              Add, replace or delete these under{' '}
+              <Link to="/consent" className="font-bold text-brand underline-offset-2 hover:underline">
+                Give consent
+              </Link>
+              .
+            </p>
+            )}
+
             <p className="mt-6 text-xs font-bold uppercase tracking-wide text-ink-faint">
               Sessions you have joined ({participations.length})
             </p>
@@ -204,7 +241,9 @@ export default function MyData() {
               ))}
             </div>
 
-            <p className="mt-6 text-xs font-bold uppercase tracking-wide text-ink-faint">Photos</p>
+            <p className="mt-6 text-xs font-bold uppercase tracking-wide text-ink-faint">
+              Photos of you
+            </p>
             {photos.totalPhotos === 0 ? (
               <Card className="mt-3 flex items-center gap-3">
                 <IconChip icon={ImageIcon} tone="neutral" size="sm" />
@@ -216,9 +255,10 @@ export default function MyData() {
               <>
                 <p className="mt-3 text-sm font-semibold text-ink">
                   You appear in {photos.totalPhotos} photo{photos.totalPhotos === 1 ? '' : 's'} across{' '}
-                  {photos.projectCount} project{photos.projectCount === 1 ? '' : 's'}.
+                  {photos.projectCount} project{photos.projectCount === 1 ? '' : 's'} and{' '}
+                  {photos.sessionCount} session{photos.sessionCount === 1 ? '' : 's'}.
                 </p>
-                <div className="mt-3 space-y-4">
+                <div className="mt-3 space-y-2.5">
                   {photos.projects.map((pp) => (
                     <Card key={pp.project.id} className="py-3">
                       <div className="flex items-start justify-between gap-3">
@@ -236,16 +276,40 @@ export default function MyData() {
                       <p className="mt-2 text-xs font-medium text-ink-muted">
                         {pp.photoCount} photo{pp.photoCount === 1 ? '' : 's'} · {pp.sessionCount} session
                         {pp.sessionCount === 1 ? '' : 's'}
+                        {collectedRange(pp.firstCollectedAt, pp.lastCollectedAt)
+                          ? ` · ${collectedRange(pp.firstCollectedAt, pp.lastCollectedAt)}`
+                          : ''}
                       </p>
-                      <div className="mt-3 grid grid-cols-3 gap-2 sm:grid-cols-4">
-                        {pp.photos.map((photo) => (
-                          <PhotoThumb key={photo.photoId} photo={photo} />
-                        ))}
-                      </div>
                     </Card>
                   ))}
                 </div>
               </>
+            )}
+
+            {/* Says plainly why there are no thumbnails here, and where the
+                copies actually come from. An absent feature with no explanation
+                reads as a broken page, and a principal who cannot find the
+                access route does not have the access right. Only shown when
+                there is in fact material to ask for. */}
+            {photos.totalPhotos > 0 && (
+            <Card className="mt-3 flex items-start gap-3 py-3">
+              <IconChip icon={Lock} tone="neutral" size="sm" />
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-semibold text-ink">The photos themselves aren&apos;t shown here</p>
+                <p className="mt-1 text-xs font-medium text-ink-muted">
+                  This page is your summary: what is held, for what purpose, and under which consent.
+                  To get copies of the material, raise an access request. It is checked by a data
+                  administrator, approved by the Data Protection Officer, and delivered once to your
+                  secure inbox — with everyone else in the frame masked.
+                </p>
+                <Link
+                  to="/requests/new"
+                  className="mt-2 inline-flex text-xs font-bold text-brand underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+                >
+                  Request a copy of your data
+                </Link>
+              </div>
+            </Card>
             )}
 
             <div className="mt-6 grid grid-cols-2 gap-3">

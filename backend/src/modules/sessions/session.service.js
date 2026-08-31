@@ -82,8 +82,12 @@ export async function createSession({ projectId, location, type }, admin) {
   // to the project. Throws 403 PROJECT_NOT_APPROVED.
   await assertCollectable(projectId, admin)
 
-  const sessionType = type === 'AUDIO' ? 'AUDIO' : type === 'TEXT' ? 'TEXT' : 'IMAGE'
-  const prefix = sessionType === 'AUDIO' ? 'AUD' : sessionType === 'TEXT' ? 'TXT' : 'COL'
+  // Unknown values fall back to IMAGE rather than throwing: the zod schema on the
+  // route is what rejects a bad type, and a second, silent rejection here would
+  // just mint the wrong kind of session.
+  const SESSION_TYPES = { AUDIO: 'AUD', TEXT: 'TXT', VIDEO: 'VID', IMAGE: 'COL' }
+  const sessionType = SESSION_TYPES[type] ? type : 'IMAGE'
+  const prefix = SESSION_TYPES[sessionType]
   const code = `${prefix}-${randomInt(1000, 9999)}`
   const session = await prisma.session.create({
     data: { code, projectId, agentId: admin.id, location: location || null, type: sessionType },
@@ -111,7 +115,7 @@ export async function listSessions(admin, { status, type }) {
     orderBy: { createdAt: 'desc' },
     include: {
       project: { select: { id: true, name: true } },
-      _count: { select: { participants: true, photos: true, recordings: true, documents: true } },
+      _count: { select: { participants: true, photos: true, recordings: true, documents: true, videos: true } },
     },
   })
 
@@ -121,6 +125,7 @@ export async function listSessions(admin, { status, type }) {
     photoCount: _count.photos,
     recordingCount: _count.recordings,
     documentCount: _count.documents,
+    videoCount: _count.videos,
   }))
 }
 
@@ -153,11 +158,19 @@ export async function getSession(sessionId, admin) {
         },
       },
       jobs: { orderBy: { createdAt: 'desc' }, take: 1 },
+      // Count only. The clips themselves are fetched separately by the video
+      // panel, but the page needs to know whether any exist BEFORE that request
+      // lands — the end-of-session button is gated on having something to
+      // process, and gating it on `photos.length` alone made a video-only
+      // session impossible to end from the UI at all.
+      _count: { select: { videos: true } },
     },
   })
 
   return {
     ...session,
+    videoCount: session._count?.videos ?? 0,
+    _count: undefined,
     participants: session.participants.map((p) => ({
       id: p.id,
       subjectId: p.subjectId,
@@ -2021,19 +2034,12 @@ export async function readPersonRedactedPhoto(sessionId, photoId, subjectId, adm
   return buildPersonRedacted(sessionId, photoId, subjectId)
 }
 
-// The principal's own §11 view of a photo they appear in. There is no `admin` and
-// no session ownership check: the authorization is the PhotoSubject link itself,
-// re-proved here rather than trusted from the caller. Everyone but the principal
-// is blurred by exactly the same code path the agent's per-person view uses — a
-// second implementation is a second place for the blur to be forgotten.
-export async function readPersonRedactedPhotoForSubject(photoId, subjectId) {
-  const link = await prisma.photoSubject.findUnique({
-    where: { photoId_subjectId: { photoId, subjectId } },
-    select: { photo: { select: { sessionId: true } } },
-  })
-  if (!link) throw new ApiError(404, 'Photo not found')
-  return buildPersonRedacted(link.photo.sessionId, photoId, subjectId)
-}
+// There is no subject-facing counterpart to readPersonRedactedPhoto. A principal
+// gets a §11 SUMMARY from /me/photos and the material itself through an approved
+// ACCESS request, whose package builder reads the redacted derivative under a
+// DPO-approved selection. Serving frames straight to a session cookie was a read
+// channel over the dataset with no approval step, so the function that did it was
+// removed rather than left unexported for something to pick up again.
 
 async function buildPersonRedacted(sessionId, photoId, subjectId) {
   const photo = await prisma.photo.findFirst({

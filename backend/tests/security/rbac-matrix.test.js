@@ -300,14 +300,28 @@ const MATRIX = {
   'GET /api/v1/subjects/:subjectId/voice-enrollments': A('collectionAgent', 'super_admin'),
   'DELETE /api/v1/subjects/:subjectId/voice-enrollments/:id': A('collectionAgent', 'super_admin'),
 
+  // --- provenance lookup ---
+  // Reads the signed stamp back out of an image that has left the platform and
+  // resolves it to a project, a session, an export and — deliberately — named
+  // people. The stamp is pseudonymous precisely so a leaked file does not carry
+  // identities; this endpoint undoes that, so it is dpo/super_admin only and
+  // every resolution is written as an AccessEvent against the administrator.
+  'POST /api/v1/provenance/lookup': A('dpo', 'super_admin'),
+
   // --- the principal's own surface ---
   'PATCH /api/v1/me/biometric-consent': A('subject'),
   'GET /api/v1/me/enrollment-status': A('subject'),
   'GET /api/v1/me/participations': A('subject'),
-  // DPDP §11 — the principal's own answer to "how many photos am I in", and
-  // their own copy of one, with everyone else blurred.
+  // DPDP §11 — the principal's own answer to "how many photos am I in", as a
+  // summary: counts, purposes and consent state, no photo ids and no bytes.
+  //
+  // GET /me/photos/:photoId/redacted used to sit here and served the frame
+  // itself to any holder of a subject session. It was removed, not narrowed:
+  // material reaches a principal through an ACCESS request, which is reviewed,
+  // DPO-approved, packaged and downloaded once. The stale-entry check below is
+  // what keeps this honest — if that route is ever remounted it lands in the
+  // unclassified list and this suite fails.
   'GET /api/v1/me/photos': A('subject'),
-  'GET /api/v1/me/photos/:photoId/redacted': A('subject'),
   'POST /api/v1/me/enrollments': A('subject'),
   'GET /api/v1/me/enrollments': A('subject'),
   'GET /api/v1/me/enrollments/:id/image': A('subject'),

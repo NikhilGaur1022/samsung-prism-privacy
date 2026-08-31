@@ -4,7 +4,13 @@
 # diarization.py, transcription.py, speaker_id.py) already checks
 # torch.cuda.is_available() and falls back to CPU automatically — it will
 # just be slow.
-FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+# Parameterised the same way video-worker's base is, so a machine without a GPU
+# does not pull several GB of CUDA runtime nothing can use:
+#
+#   GPU (default):  docker compose build audio-worker
+#   CPU:            docker compose build --build-arg BASE=python:3.12-slim audio-worker
+ARG BASE=nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+FROM ${BASE}
 
 RUN apt-get update && apt-get install -y \
     python3-pip python3-dev ffmpeg git curl && \

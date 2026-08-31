@@ -301,6 +301,13 @@ export async function createPurgeJob(dsarRequestId, admin = null, { items = null
     throw new ApiError(400, `DSAR type ${request.type} is not an erasure`)
   }
 
+  // A request that names a project erases that project's data, not the person.
+  // This is the whole fix for the withdrawal bug: raiseWithdrawalErasure has
+  // always carried projectId onto the request, and this executor used to drop it
+  // on the floor and walk the entire subject — destroying their data in every
+  // other project, crypto-shredding the DEK and anonymising the identity row.
+  const projectId = scoped ? null : (request.projectId ?? null)
+
   if (!scoped) {
     const existing = await prisma.purgeJob.findFirst({
       // scope: FULL matters. Without it a scoped job left PARTIAL by a failed
@@ -312,7 +319,26 @@ export async function createPurgeJob(dsarRequestId, admin = null, { items = null
     if (existing) return existing
   }
 
-  const discovery = scoped ? null : await runDiscovery(request.subjectId)
+  const discovery = scoped ? null : await runDiscovery(request.subjectId, { projectId })
+
+  // Belt and braces on the thing that actually went wrong. If a project-scoped
+  // request ever produces a walk that still names the identity row or the
+  // per-subject key, that is a whole-subject erasure wearing a project's label,
+  // and it must not be planned at all — a loud refusal is recoverable, an
+  // executed one is not.
+  if (projectId && discovery) {
+    const subjectLevel = discovery.locations.filter(
+      (l) => l.locationCode === 'PII' || l.objectType === 'SubjectKey',
+    )
+    if (subjectLevel.length > 0) {
+      throw new ApiError(
+        500,
+        `Refusing to plan a project-scoped erasure that names ${subjectLevel
+          .map((l) => l.objectType)
+          .join(', ')}. Those are whole-subject locations and this request covers one project.`,
+      )
+    }
+  }
   const locations = scoped
     ? await locationsForItems(request.subjectId, items)
     : discovery.locations.map((l) => ({
@@ -327,8 +353,12 @@ export async function createPurgeJob(dsarRequestId, admin = null, { items = null
       dsarRequestId,
       subjectId: request.subjectId,
       status: 'QUEUED',
-      scope: scoped ? 'PARTIAL' : 'FULL',
-      meta: scoped ? { batchId, itemIds: items.map((i) => i.id) } : undefined,
+      scope: scoped ? 'PARTIAL' : projectId ? 'PROJECT' : 'FULL',
+      meta: scoped
+        ? { batchId, itemIds: items.map((i) => i.id) }
+        : projectId
+          ? { projectId, unattributedLinks: discovery.counts.unattributedLinks ?? 0 }
+          : undefined,
       locationsTotal: locations.length,
       locations: { create: locations.map((l) => ({ ...l, status: 'PENDING' })) },
     },

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 
 import SessionVideoPanel from './SessionVideoPanel'
 
@@ -99,6 +99,57 @@ describe('SessionVideoPanel', () => {
     render(<SessionVideoPanel sessionId="s1" canCapture sessionStatus="ACTIVE" />)
 
     expect(await screen.findByText(/switched off in this environment/i)).toBeInTheDocument()
+  })
+
+  // Redaction is queued work that finishes minutes after finalize. The panel
+  // used to load once, so an operator who arrived while blurring was still
+  // running sat in front of a screen that would never update and concluded no
+  // blurred copy had been made.
+  it('picks up the blurred copy on its own once redaction finishes', async () => {
+    vi.useFakeTimers()
+    try {
+      listVideos
+        .mockResolvedValueOnce({ videos: [clip({ status: 'ANALYZED', redactedPath: null })] })
+        .mockResolvedValue({ videos: [clip()] })
+
+      const { container } = render(
+        <SessionVideoPanel sessionId="s1" canCapture={false} sessionStatus="ARCHIVED" />,
+      )
+
+      // act() around the timer advance, not just await: the poll resolves a
+      // promise inside the interval callback, and without act React never
+      // flushes that state update, so the assertion below reads a DOM that is
+      // one render behind.
+      await act(async () => {})
+      expect(listVideos).toHaveBeenCalledTimes(1)
+      expect(container.querySelector('video')).toBeNull()
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000)
+      })
+      expect(container.querySelector('video')).not.toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // DEFERRED is terminal. Polling it would be a busy-wait on something no
+  // amount of waiting fixes.
+  it('does not poll a clip whose analysis already failed', async () => {
+    vi.useFakeTimers()
+    try {
+      listVideos.mockResolvedValue({ videos: [clip({ status: 'DEFERRED', redactedPath: null })] })
+      render(<SessionVideoPanel sessionId="s1" canCapture={false} sessionStatus="ARCHIVED" />)
+
+      await act(async () => {})
+      expect(listVideos).toHaveBeenCalledTimes(1)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(20000)
+      })
+      expect(listVideos).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('hides the upload control once the session is no longer capturing', async () => {

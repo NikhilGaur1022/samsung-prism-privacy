@@ -110,12 +110,50 @@ A voice print is §2 sensitive personal data on the same footing as a face embed
 | `DELETE /me/voice-enrollments/:eid` | ✓ self | ✗ | ✗ | ✗ | ✗ | ✗ |
 | **voice embedding bytes** | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ — no route exists, none may be added |
 
+### Image provenance (DPO)
+| Endpoint | Subject | dpo | dataOwner | collectionAgent | dataAdmin | super |
+|---|---|---|---|---|---|---|
+| `POST /provenance/lookup` | ✗ | ✓ | ✗ | ✗ | ✗ | ✓ |
+
+> **A documented exception to §A, taken deliberately.** §A says dpo "cannot see
+> any personal data". This endpoint returns names and email addresses: given an
+> image that has left the platform, it reads the signed export stamp back out and
+> re-derives the export-scoped subject refs to say who is in the frame.
+>
+> The exception is scoped to the one question the role cannot otherwise answer —
+> *this file turned up on a training share, whose data is it and do I have to
+> notify them* — and it is bounded three ways: the candidate set is only the
+> subjects still linked to that one photo, never a search; each identity resolved
+> writes its own `AccessEvent` (`SUBJECT_PII` / `SEARCH` /
+> `PROVENANCE_LOOKUP_IDENTIFIED`) against the administrator; and the lookup itself
+> writes one more against the photo. Using the tool is as answerable as the reads
+> it investigates.
+>
+> A ref that matches nobody is reported, not dropped: it means the person was
+> erased *after* the export, so the copy in hand is data that outlived a deletion
+> the principal was told was complete.
+>
+> **dpo is still absent from `/sessions/:id/photos` and every other session media
+> read.** Tracing an image does not grant browsing the session it came from; the
+> provenance page renders the session record inline instead.
+
 ### Subject / biometrics
+
+> **§11 is a summary right, not a viewer.** `GET /me/photos` returns counts,
+> purposes and consent state grouped by project — no photo ids, no session codes,
+> no capture locations, no bytes. `GET /me/photos/:pid/redacted` used to serve the
+> frame itself to any holder of a subject session; it was removed rather than
+> narrowed, because a portal endpoint that streams material on a cookie is a
+> standing read over the dataset with no review step and nothing to revoke.
+> Material reaches a principal through an **ACCESS request**: data-admin review,
+> DPO approval, redacted derivatives with a manifest, single-use download token.
+> `rbac-matrix.test.js` fails if the route is ever remounted.
+
 | Endpoint | Subject | dpo | dataOwner | collectionAgent | dataAdmin | super |
 |---|---|---|---|---|---|---|
 | `GET /me` | ✓ self | ✗ | ✗ | ✗ | ✗ | ✗ |
-| `GET /me/photos` | ✓ self | ✗ | ✗ | ✗ | ✗ | ✗ |
-| `GET /me/photos/:pid/redacted` | ✓ self, others blurred | ✗ | ✗ | ✗ | ✗ | ✗ |
+| `GET /me/photos` | ✓ self — **summary only** (counts, purpose, consent) | ✗ | ✗ | ✗ | ✗ | ✗ |
+| **photo bytes to a subject** | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ — no route exists, none may be added |
 | `GET /me/consents` | ✓ self | ✗ | ✗ | ✗ | ✗ | ✗ |
 | `POST /me/consents/:id/revoke` | ✓ self | ✗ | ✗ | ✗ | ✗ | ✗ |
 | `POST /me/enrollment` | ✓ self | ✗ | ✗ | ✗ | ✗ | ✗ |

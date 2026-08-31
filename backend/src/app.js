@@ -28,6 +28,7 @@ import { meRoutes } from './modules/me/me.routes.js'
 import { joinRoutes, sessionInviteRoutes } from './modules/join/join.routes.js'
 import { consentTemplateRoutes } from './modules/consentTemplates/consentTemplate.routes.js'
 import { auditRoutes, accessEventRoutes } from './modules/audit/audit.routes.js'
+import { provenanceRoutes } from './modules/provenance/provenance.routes.js'
 import { dsarRoutes } from './modules/dsar/dsar.routes.js'
 import { importRoutes } from './modules/import/import.routes.js'
 import { dashboardRoutes } from './modules/dashboard/dashboard.routes.js'
@@ -54,6 +55,7 @@ const ALL_ROUTERS = [
   documentRoutes,
   dsarRoutes,
   opsRoutes,
+  provenanceRoutes,
   handoffRoutes,
   importRoutes,
   joinRoutes,
@@ -191,6 +193,7 @@ export function createApp() {
   // not an oversight authority.
   app.use('/api/v1/imports', importRoutes)
   app.use('/api/v1/audit', auditRoutes)
+  app.use('/api/v1/provenance', provenanceRoutes)
   app.use('/api/v1/access-events', accessEventRoutes)
   // Public — no auth middleware anywhere above it on this path, and mounted before
   // sessionRoutes' router-level requireAdminAuth can see anything.

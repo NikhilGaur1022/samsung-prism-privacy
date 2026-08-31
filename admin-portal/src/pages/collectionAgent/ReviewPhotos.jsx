@@ -175,7 +175,16 @@ export default function ReviewPhotos() {
     setError(null)
     try {
       await finalizeSession(sessionId)
-      navigate('/sessions')
+      // Where finalising lands you depends on what the session actually holds.
+      //
+      // Photos are redacted synchronously and their blurred copies live on the
+      // People screen, so the sessions list is a fine place to end up. Clips are
+      // not: redaction is queued and finishes minutes later, and the only player
+      // for a blurred clip is on the session page. Dropping a video session at
+      // /sessions therefore ends the flow one screen short of the actual output
+      // — the operator finalises, gets bounced to a list, and never sees that a
+      // blurred video was produced at all.
+      navigate(videos.length > 0 ? `/sessions/${sessionId}` : '/sessions')
     } catch (err) {
       setError(err)
       setBusy(false)

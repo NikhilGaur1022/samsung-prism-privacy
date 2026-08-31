@@ -5,6 +5,62 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Prism | Consent Manager</title>
+    <script>
+      // Self-heal a stale cached shell.
+      //
+      // This is the failure that has now blanked this console twice, and it
+      // leaves no trace anywhere a server-side investigation would look. Vite
+      // content-hashes every asset filename, so an index.html a browser cached
+      // before the last deploy asks for script names the server no longer has.
+      // Those 404, nothing renders into #root, and the page is silently blank —
+      // every server-side check comes back 200 and healthy, because it is.
+      //
+      // Caddy sends `Cache-Control: no-cache` on this file so it revalidates,
+      // but that header cannot reach a copy a browser cached BEFORE the header
+      // existed: that copy sits under heuristic freshness and is served without
+      // ever asking the server. Nothing deployed can evict it. The page has to
+      // notice and recover on its own.
+      //
+      // location.reload() fetches the main resource with cache mode "reload",
+      // which forces revalidation and replaces the stale HTML with the current
+      // one — so one reload is the whole cure. Capture phase, because resource
+      // load errors fire on the element and do not bubble.
+      //
+      // The sessionStorage flag makes this fire at most once per tab: if the
+      // asset is genuinely missing rather than merely stale, reloading forever
+      // would turn a blank page into a reload loop, which is worse.
+      (function () {
+        var KEY = 'prism.reloadedForStaleShell'
+        addEventListener(
+          'error',
+          function (event) {
+            var el = event.target
+            if (!el || (el.tagName !== 'SCRIPT' && el.tagName !== 'LINK')) return
+            try {
+              if (sessionStorage.getItem(KEY)) return
+              sessionStorage.setItem(KEY, '1')
+            } catch (err) {
+              // Private mode or blocked site data: recovering once without a
+              // guard still beats a permanently blank page, but a loop does
+              // not, so decline rather than risk one.
+              return
+            }
+            location.reload()
+          },
+          true,
+        )
+        // Booted successfully, so clear the guard. Without this the recovery is
+        // available once per tab for the life of that tab, and the second
+        // deploy during a long session strands the operator again.
+        addEventListener('load', function () {
+          try {
+            sessionStorage.removeItem(KEY)
+          } catch (err) {
+            /* nothing to clear if storage is unavailable */
+          }
+        })
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>

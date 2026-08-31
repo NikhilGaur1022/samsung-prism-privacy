@@ -4,7 +4,21 @@ import { ApiError } from '../middleware/errorHandler.js'
 import { logger } from './logger.js'
 import { IS_HARDENED } from '../config/env.js'
 
-const resend = new Resend(process.env.RESEND_API_KEY)
+// Constructed on first use, not at import. The SDK's constructor THROWS when the
+// key is absent, so building it eagerly turned an unset RESEND_API_KEY into a
+// boot-time crash for the whole process — including for a deployment that
+// configures SMTP instead and legitimately has no Resend key at all, which is
+// exactly the shape of deploy/prod.env.example. The transport is chosen per
+// send() call below; deciding it at import meant the unused branch could still
+// take the server down.
+let resendClient = null
+function getResend() {
+  if (!process.env.RESEND_API_KEY) {
+    throw new ApiError(502, 'No email transport configured — set SMTP_* or RESEND_API_KEY')
+  }
+  resendClient ??= new Resend(process.env.RESEND_API_KEY)
+  return resendClient
+}
 const FROM = process.env.MAIL_FROM ?? process.env.RESEND_FROM_EMAIL ?? 'Prism <onboarding@resend.dev>'
 
 // SMTP (Mailjet) is preferred when configured — unlike the Resend shared sandbox
@@ -42,7 +56,14 @@ async function send({ to, subject, html }) {
       error = err
     }
   } else {
-    ;({ error } = await resend.emails.send({ from: FROM, to, subject, html }))
+    // try/catch as well as the returned `error`: getResend() throws when no
+    // transport is configured at all, and that has to reach the same handling
+    // below as a rejected send rather than escaping as an unhandled throw.
+    try {
+      ;({ error } = await getResend().emails.send({ from: FROM, to, subject, html }))
+    } catch (err) {
+      error = err
+    }
   }
   if (!error) return
 

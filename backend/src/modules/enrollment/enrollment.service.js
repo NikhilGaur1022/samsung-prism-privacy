@@ -45,6 +45,30 @@ export async function embedImage(buffer, filename = 'selfie.jpg') {
   return body
 }
 
+// What a caller is allowed to see of an enrollment row.
+//
+// listEnrollments() has always used an explicit select to keep `embedding` out
+// of API responses, but the create path returned the Prisma row whole — so the
+// one response that carried the freshly sealed vector, the storage path and the
+// key id was the POST that produced them. Sealed is not the same as safe to
+// publish: handing the ciphertext to the client gives away material that is only
+// meant to exist at rest, and encKeyId names the DEK that seals it.
+//
+// Projecting here rather than in the two route handlers means a third caller
+// cannot reintroduce the leak by forgetting to.
+function publicView(row) {
+  if (!row) return row
+  return {
+    id: row.id,
+    detScore: row.detScore,
+    source: row.source,
+    pose: row.pose,
+    width: row.width,
+    height: row.height,
+    createdAt: row.createdAt,
+  }
+}
+
 export async function createEnrollment({ subjectId, file, source, capturedBy = null, pose = null }) {
   const subject = await prisma.subject.findUnique({ where: { masterUserId: subjectId } })
   if (!subject) throw new ApiError(404, 'Subject not found')
@@ -76,10 +100,20 @@ export async function createEnrollment({ subjectId, file, source, capturedBy = n
   }
 
   const sha256 = createHash('sha256').update(file.buffer).digest('hex')
-  const existing = await prisma.subjectFaceEnrollment.findFirst({
-    where: { subjectId, sha256, deletedAt: null },
+  // Deliberately NOT filtered by deletedAt, and that filter being here was a bug.
+  //
+  // The unique index behind this row is (subjectId, sha256) over the WHOLE table,
+  // tombstones included — deleteEnrollment soft-deletes and keeps the row because
+  // the audit chain references it. So a lookup that skipped tombstones found
+  // nothing for a photo the subject had previously removed, fell through to
+  // create(), and Postgres rejected it with P2002. The subject saw a 409 they
+  // could never clear: that exact image was unenrollable forever, the live
+  // gallery stayed empty, and recognition therefore matched nobody while
+  // redaction — which needs no gallery — went on working normally.
+  const existing = await prisma.subjectFaceEnrollment.findUnique({
+    where: { subjectId_sha256: { subjectId, sha256 } },
   })
-  if (existing) return { duplicate: true, enrollment: existing }
+  if (existing && !existing.deletedAt) return { duplicate: true, enrollment: publicView(existing) }
 
   // Normalise on the way in so every enrollment image is one orientation, one
   // format and one bounded size regardless of which device shot it.
@@ -107,32 +141,69 @@ export async function createEnrollment({ subjectId, file, source, capturedBy = n
     subjectId,
   )
 
-  const enrollment = await prisma.subjectFaceEnrollment.create({
-    data: {
-      subjectId,
-      imagePath,
-      sha256,
-      detScore: result.det_score,
-      width: meta.width ?? null,
-      height: meta.height ?? null,
-      source,
-      capturedBy,
-      pose: pose ?? null,
-      embedding: sealedEmbedding,
-      embeddingDim: result.embedding.length,
-      encKeyId: keyId,
-    },
-  })
+  const row = {
+    imagePath,
+    detScore: result.det_score,
+    width: meta.width ?? null,
+    height: meta.height ?? null,
+    source,
+    capturedBy,
+    pose: pose ?? null,
+    embedding: sealedEmbedding,
+    embeddingDim: result.embedding.length,
+    encKeyId: keyId,
+  }
+
+  // upsert, not create: re-enrolling a photo the subject once deleted has to
+  // revive that tombstone rather than insert beside it, because the unique index
+  // permits exactly one row per (subject, image). The tombstone's id is what the
+  // audit chain already points at, so reviving keeps that history addressable —
+  // the chain reads CAPTURED -> DELETED -> CAPTURED(revived) on one id instead of
+  // fragmenting across two.
+  //
+  // deletedAt and createdAt are both reset: the row is live again, captured now.
+  // Nothing is silently resurrected — the vector and the file were destroyed on
+  // delete, and both fields here are freshly derived from the image just
+  // uploaded, not recovered.
+  const enrollment = await prisma.subjectFaceEnrollment
+    .upsert({
+      where: { subjectId_sha256: { subjectId, sha256 } },
+      create: { subjectId, sha256, ...row },
+      update: { ...row, deletedAt: null, createdAt: new Date() },
+    })
+    .catch(async (err) => {
+      // Two uploads of the same image racing each other: both passed the check
+      // above, one lost. That is a duplicate, not a failure — answer it the same
+      // way the non-racing path does rather than surfacing a raw Prisma error.
+      if (err?.code !== 'P2002') throw err
+      await deleteFile(imagePath).catch(() => {})
+      return null
+    })
+
+  if (enrollment === null) {
+    const winner = await prisma.subjectFaceEnrollment.findUnique({
+      where: { subjectId_sha256: { subjectId, sha256 } },
+    })
+    return { duplicate: true, enrollment: publicView(winner) }
+  }
 
   await writeAuditLog({
     entityType: 'Subject',
     entityId: subjectId,
     action: 'ENROLLMENT_CAPTURED',
     actorId: capturedBy,
-    payload: { enrollmentId: enrollment.id, source, pose: pose ?? null, detScore: result.det_score },
+    payload: {
+      enrollmentId: enrollment.id,
+      source,
+      pose: pose ?? null,
+      detScore: result.det_score,
+      // Distinguishes a first capture from the re-capture of a previously
+      // deleted image, which share an action and a row id.
+      ...(existing ? { revived: true } : {}),
+    },
   })
 
-  return { duplicate: false, enrollment }
+  return { duplicate: false, enrollment: publicView(enrollment) }
 }
 
 // The select is explicit for one reason: `embedding` must never appear in an API

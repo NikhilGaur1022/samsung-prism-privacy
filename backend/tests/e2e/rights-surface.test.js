@@ -8,7 +8,7 @@ import * as projectService from '../../src/modules/projects/project.service.js'
 import * as dsarService from '../../src/modules/dsar/dsar.service.js'
 import * as dashboardService from '../../src/modules/dashboard/dashboard.service.js'
 import { buildAccessPackage, downloadPackage, issuePackageToken } from '../../src/modules/dsar/export.service.js'
-import { buildWorld, checkPreconditions, closeResources, destroyWorld, photoByFixture, runSession } from './world.js'
+import { buildWorld, checkPreconditions, closeResources, destroyWorld, runSession } from './world.js'
 
 // WAVE 6 — the rights and oversight surface added on top of the wave-5 pipeline.
 //
@@ -21,7 +21,6 @@ import { buildWorld, checkPreconditions, closeResources, destroyWorld, photoByFi
 
 let world
 let run
-let groupPhoto
 let blocked = null
 
 test.before(async () => {
@@ -29,7 +28,6 @@ test.before(async () => {
   if (blocked) return
   world = await buildWorld()
   run = await runSession(world)
-  groupPhoto = await photoByFixture(run.session.id, 'group.jpg', run.photos)
 })
 
 test.after(async () => {
@@ -52,7 +50,7 @@ test('a principal can count the photos they appear in, and sees only their own l
   const a = world.subjects.a.masterUserId
   const b = world.subjects.b.masterUserId
 
-  const mine = await meService.listMyPhotos(a)
+  const mine = await meService.summariseMyPhotos(a)
 
   const linkCount = await prisma.photoSubject.count({ where: { subjectId: a } })
   assert.equal(mine.totalPhotos, linkCount, 'the §11 count must equal the link rows erasure would destroy')
@@ -74,57 +72,42 @@ test('a principal can count the photos they appear in, and sees only their own l
 
   // Nor may it name where anything is stored.
   assert.ok(!/storagePath|redactedPath|storage\//.test(serialized), 'a storage path leaked into the §11 response')
-})
 
-test("a principal's own copy of a shared frame is served, with the other person blurred", async () => {
-  const a = world.subjects.a.masterUserId
-
-  const onGroup = new Set(groupPhoto.subjects.map((s) => s.subjectId))
-  assert.ok(onGroup.has(a), 'the fixture did not put subject A on group.jpg')
-  assert.ok(onGroup.size >= 2, 'this assertion is meaningless unless the frame is shared')
-
-  const { buffer, mimeType } = await sessionService.readPersonRedactedPhotoForSubject(groupPhoto.id, a)
-  assert.equal(mimeType, 'image/jpeg')
-  assert.ok(buffer.length > 0)
-
-  // The derivative is a different object from the original — not a redirect to it.
-  const original = await prisma.photo.findUnique({
-    where: { id: groupPhoto.id },
-    select: { storagePath: true },
+  // Nor may it identify an individual photograph. §11 is a summary right; the
+  // material comes from an approved ACCESS package. A photo id here would let a
+  // portal — or anyone with a stolen session cookie — enumerate the dataset,
+  // which is what this response used to permit.
+  const linkedIds = await prisma.photoSubject.findMany({
+    where: { subjectId: a },
+    select: { photoId: true, photo: { select: { sessionId: true } } },
   })
-  assert.ok(original.storagePath, 'the original is gone; this test cannot prove anything')
-  const raw = await sessionService.readRawForDsar(groupPhoto.sessionId, groupPhoto.id, {
-    dsarRequestId: 'test-context',
-  })
-  assert.notEqual(
-    buffer.length,
-    raw.buffer.length,
-    'the per-person copy is byte-identical to the original — nothing was blurred',
-  )
-})
-
-test('a principal cannot read a frame they are not linked to', async () => {
-  // A subject with no link anywhere. The route is authorised by the link itself,
-  // so the absence of one must be a 404 and not an empty-but-successful read.
-  const stranger = await prisma.subject.create({
-    data: {
-      fullName: `E2E stranger ${world.tag}`,
-      email: `e2e-${world.tag}-stranger@test.invalid`,
-      group: 'VOLUNTEER',
-      status: 'ACTIVE',
-      registrationChannel: 'SELF',
-    },
-  })
-
-  try {
-    await assert.rejects(
-      () => sessionService.readPersonRedactedPhotoForSubject(groupPhoto.id, stranger.masterUserId),
-      (err) => err.statusCode === 404,
-      'a principal with no link to the photo was served it anyway',
-    )
-  } finally {
-    await prisma.subject.delete({ where: { masterUserId: stranger.masterUserId } })
+  for (const link of linkedIds) {
+    assert.ok(!serialized.includes(link.photoId), 'a photo id leaked into the §11 summary')
+    assert.ok(!serialized.includes(link.photo.sessionId), 'a session id leaked into the §11 summary')
   }
+  assert.ok(!/"viewable"|"photos"\s*:\s*\[/.test(serialized), 'the §11 summary carried per-photo rows')
+
+  // What it must still carry: the numbers, so the principal can tell whether the
+  // count is right and challenge it if not.
+  assert.equal(group.photoCount, mine.totalPhotos)
+  assert.ok(group.sessionCount >= 1)
+  assert.ok(mine.firstCollectedAt instanceof Date, 'the summary must say when collection happened')
+})
+
+test('there is no subject-facing route that serves a photograph', async () => {
+  // The §11 read channel was removed rather than narrowed, so the assertion is
+  // about absence: neither the service function nor the route may come back
+  // without this failing. rbac-matrix.test.js covers the mount; this covers the
+  // module surface, because an export with no route is one line away from one.
+  assert.equal(
+    sessionService.readPersonRedactedPhotoForSubject,
+    undefined,
+    'a subject-facing photo reader is exported again — material must come from an approved ACCESS package',
+  )
+
+  // And the package path still works, which is what makes the removal a
+  // redirection of the access right rather than a removal of it.
+  assert.equal(typeof buildAccessPackage, 'function')
 })
 
 // ---------------------------------------------------------------------------

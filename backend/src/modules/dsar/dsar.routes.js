@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { z } from 'zod'
 import { requireAdminAuth } from '../../middleware/requireAdminAuth.js'
 import { requireRole } from '../../middleware/requireRole.js'
+import { queryBoolean, itemQuerySchema } from './query.schema.js'
 import { ApiError } from '../../middleware/errorHandler.js'
 import * as dsarService from './dsar.service.js'
 import * as itemSearchService from './itemSearch.service.js'
@@ -10,15 +11,6 @@ import * as certificateService from './certificate.service.js'
 import * as timelineService from './timeline.service.js'
 import { buildAccessPackage } from './export.service.js'
 import { getPurgeJob } from './purge.service.js'
-
-// z.coerce.boolean() applies JavaScript truthiness to a query string, so the
-// string "false" coerces to TRUE. `?includeDeleted=false` therefore returned
-// deleted items — the exact opposite of what was asked for — and any caller
-// passing the value explicitly got the wrong answer. Only an absent parameter
-// behaved correctly.
-const queryBoolean = z
-  .enum(['true', 'false', '1', '0'])
-  .transform((v) => v === 'true' || v === '1')
 
 export const dsarRoutes = Router()
 
@@ -56,19 +48,6 @@ const subjectSearchSchema = z.object({
   cursor: z.string().max(500).optional(),
 })
 
-// No `q` here and no free-text anywhere: the item grid filters by enum and by
-// date, never by a string an operator typed at a person's data.
-const itemQuerySchema = z.object({
-  type: z.enum(['PHOTO', 'AUDIO']).optional(),
-  origin: z.enum(['COLLECTION_SESSION', 'IMPORT', 'ENROLLMENT']).optional(),
-  projectId: uuid.optional(),
-  from: z.coerce.date().optional(),
-  to: z.coerce.date().optional(),
-  includeDeleted: queryBoolean.default(false),
-  cursor: z.string().max(500).optional(),
-  limit: z.coerce.number().int().min(1).max(200).default(50),
-})
-
 // Selection is `itemIds` OR `filter`, never both — an operator who ticked rows
 // and an operator who said "everything matching" are making different claims,
 // and merging them silently would widen a delete past what was on screen. The
@@ -80,7 +59,9 @@ const itemActionSchema = z
     itemIds: z.array(uuid).min(1).max(1000).optional(),
     filter: z
       .object({
-        type: z.enum(['PHOTO', 'AUDIO']).optional(),
+        // See query.schema.js — the same DataItemType mirror. Omitting VIDEO here
+        // meant "select all matching" could not reach a subject's clips at all.
+        type: z.enum(['PHOTO', 'AUDIO', 'VIDEO']).optional(),
         origin: z.enum(['COLLECTION_SESSION', 'IMPORT', 'ENROLLMENT']).optional(),
         projectId: uuid.optional(),
         from: z.coerce.date().optional(),
@@ -110,7 +91,7 @@ const packageSchema = z.object({
       z.object({ itemIds: z.array(uuid).min(1).max(2000) }),
       z.object({
         filter: z.object({
-          type: z.enum(['PHOTO', 'AUDIO']).optional(),
+          type: z.enum(['PHOTO', 'AUDIO', 'VIDEO']).optional(),
           origin: z.enum(['COLLECTION_SESSION', 'IMPORT', 'ENROLLMENT']).optional(),
           projectId: uuid.optional(),
           from: z.coerce.date().optional(),

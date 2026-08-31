@@ -1,0 +1,326 @@
+# PRISM — whole stack on one machine, reachable from any device through a
+# tunnel. Run it from this directory: `docker compose up -d`.
+#
+# How this differs from the two compose files already in the repo:
+#
+#   backend/docker-compose.yml   dependencies only. The API and the seven
+#                                workers run on the host under `npm run dev`.
+#   deploy/compose.prod.yml      a public host: Postgres is Supabase, Caddy
+#                                holds three real hostnames and gets Let's
+#                                Encrypt certs over HTTP-01, and only four of
+#                                the seven workers are declared.
+#   THIS FILE                    self-contained: Postgres is in the stack, all
+#                                seven workers run, all five AI workers run, and
+#                                the public URL comes from a Cloudflare tunnel
+#                                so no DNS, no port forwarding and no
+#                                certificate handling are needed.
+#
+# Everything is on one origin (see Caddyfile) because the API's session cookies
+# are sameSite=strict.
+
+name: prism-staging
+
+# --------------------------------------------------------------------------
+# Backend: one image, thirteen containers. The API plus seven queue/timer
+# workers, none of which the API process supervises — an absent worker fails
+# quietly rather than loudly, which is why they are declared here rather than
+# started by hand. docs/DEPLOY.md §6 lists what each one stops doing.
+# --------------------------------------------------------------------------
+x-backend-env: &backend-env
+  # Container-internal addresses, set here and not in app.env so that a stale
+  # localhost value copied out of a dev .env cannot override them.
+  DATABASE_URL: postgresql://prism_app:${APP_DB_PASSWORD}@postgres:5432/prism?sslmode=require&connect_timeout=30
+  DIRECT_URL: postgresql://prism_app:${APP_DB_PASSWORD}@postgres:5432/prism?sslmode=require&connect_timeout=30
+  ADMIN_DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/prism?sslmode=require&connect_timeout=30
+  QDRANT_URL: http://qdrant:6333
+  REDIS_URL: redis://redis:6379
+  FACE_SERVICE_URL: http://face-worker:8001
+  PII_SERVICE_URL: http://image-pii-worker:8002
+  AUDIO_SERVICE_URL: http://audio-worker:8003
+  TEXT_SERVICE_URL: http://text-worker:8004
+  VIDEO_SERVICE_URL: http://video-worker:8005
+  STORAGE_ROOT: /data/media
+  PORT: "4000"
+
+  # `development`, not `staging` or `production`, and this is a deliberate
+  # trade rather than an oversight. config/env.js treats staging and production
+  # alike as HARDENED, and a hardened environment refuses to echo OTP codes to
+  # the client (lib/otp.js) — with no SMTP credentials configured, that means
+  # nobody can log into the user portal at all. `development` + EXPOSE_DEV_OTP
+  # keeps the OTP visible in the UI response.
+  #
+  # What that costs, so it is on the record: session cookies are not marked
+  # Secure (they still work over the tunnel's HTTPS), and preflight failures are
+  # reported but not fatal. What it does NOT cost is media encryption — that is
+  # keyed off MEDIA_KEK being present, not off NODE_ENV, and MEDIA_KEK is set in
+  # app.env. Set NODE_ENV=production here and add real SMTP_* to go hardened;
+  # nothing else in this file needs to change.
+  NODE_ENV: development
+  EXPOSE_DEV_OTP: "on"
+
+  # The two public URLs, from .env. USER_PORTAL_URL is what gets emailed to data
+  # principals and encoded into the session-join QR a volunteer's phone scans,
+  # so it is the USER tunnel; ADMIN_APP_BASE_URL is what an admin invite link
+  # points at, so it is the ADMIN tunnel. They must be tunnel URLs, never
+  # internal addresses. These are the ONLY things that have to change when a
+  # tunnel URL rotates — the portals issue same-origin relative requests and
+  # never need rebuilding.
+  APP_BASE_URL: ${USER_URL}
+  USER_PORTAL_URL: ${USER_URL}
+  ADMIN_APP_BASE_URL: ${PUBLIC_URL}/admin
+  # Both origins, comma-separated (app.js:80 splits on ","). The portals make
+  # same-origin requests so CORS is not load-bearing here, but a request that
+  # arrives with an Origin header still has to match one of these.
+  CORS_ORIGINS: ${PUBLIC_URL},${USER_URL}
+
+  # cloudflared -> caddy -> express. An exact count, never `true`: Express would
+  # otherwise trust the whole X-Forwarded-For chain, letting a client forge the
+  # IP written into the access ledger and mint a fresh rate-limit bucket per
+  # request.
+  TRUST_PROXY_HOPS: "2"
+
+  # All five AI workers are in this stack, so both capture modalities can be on.
+  AUDIO_CAPTURE_ENABLED: "on"
+  VIDEO_CAPTURE_ENABLED: "on"
+
+x-backend-base: &backend-base
+  build:
+    context: ../../backend
+  image: prism-backend:staging
+  env_file: [./app.env]
+  environment: *backend-env
+  # Shared, not per-service: lib/storage.js is a local-disk store and the
+  # retention sweep, the DSAR purge and the export builder all write into the
+  # same tree as the API. Splitting these across hosts needs an S3 backend
+  # first.
+  volumes:
+    - media:/data/media
+  depends_on:
+    postgres: { condition: service_healthy }
+    redis: { condition: service_healthy }
+    qdrant: { condition: service_started }
+  restart: unless-stopped
+
+services:
+  # ------------------------------------------------------------------ edge --
+  web:
+    build:
+      # Repo root: the image builds both SPAs from source.
+      context: ../..
+      dockerfile: deploy/staging/Dockerfile.web
+    image: prism-web:staging
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    ports:
+      # Also reachable on the LAN without the tunnels, for debugging. Camera
+      # capture will not work over these — a bare IP on HTTP is not a secure
+      # context — but everything else does.
+      - "8080:8080"   # admin origin
+      - "8081:8081"   # user origin
+    depends_on: [backend]
+    restart: unless-stopped
+
+  # The public URLs. Two quick tunnels, one per origin — one for the people who
+  # run the study, one for the people whose data it is. A quick tunnel needs no
+  # Cloudflare account and no DNS: it prints an https://<random>.trycloudflare
+  # .com hostname on startup, which `./url.sh` reads back out of these logs.
+  # The hostname changes every time the container restarts — that is the price
+  # of needing no credentials. For URLs that survive a restart, see README.md
+  # § "A stable URL".
+  #
+  # Two containers rather than one with two --url flags because cloudflared
+  # takes exactly one origin per quick tunnel.
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate --url http://web:8080
+    depends_on: [web]
+    restart: unless-stopped
+
+  tunnel-user:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate --url http://web:8081
+    depends_on: [web]
+    restart: unless-stopped
+
+  # -------------------------------------------------------------- datastore --
+  # Generates the self-signed certificate Postgres needs to serve TLS, once,
+  # into a volume. A separate one-shot container rather than an
+  # docker-entrypoint-initdb.d script because those run against a temporary
+  # server during first-init only — the certificate has to exist before the
+  # real postmaster starts, on every boot, including the first.
+  pg-certs:
+    image: alpine:3.20
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        if [ ! -s /certs/server.key ]; then
+          apk add --no-cache openssl >/dev/null
+          openssl req -new -x509 -days 3650 -nodes -text \
+            -out /certs/server.crt -keyout /certs/server.key -subj "/CN=postgres"
+        fi
+        chmod 600 /certs/server.key
+        chmod 644 /certs/server.crt
+        chown 999:999 /certs/server.key /certs/server.crt
+        echo "postgres tls material ready"
+    volumes:
+      - pgcerts:/certs
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: prism
+    # TLS on, so that DATABASE_URL can carry sslmode=require exactly as it must
+    # in production. preflight check #7 fails a production URL without it, and
+    # having it true here means flipping NODE_ENV to production is a one-line
+    # change rather than a database rebuild.
+    command:
+      - postgres
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/certs/server.crt
+      - -c
+      - ssl_key_file=/certs/server.key
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - pgcerts:/certs:ro
+    ports:
+      # 5434, matching backend/docker-compose.yml's note that 5432/5433/54322
+      # are already taken on this machine.
+      - "127.0.0.1:5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d prism"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    depends_on:
+      pg-certs: { condition: service_completed_successfully }
+    restart: unless-stopped
+
+  redis:
+    # 7.4: BullMQ's floor is 6.2 and preflight check #15 enforces it.
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: [redis_data:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    volumes: [qdrant_storage:/qdrant/storage]
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------- api --
+  backend:
+    <<: *backend-base
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:4000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # --------------------------------------------------------------- workers --
+  # All seven. deploy/compose.prod.yml declares only four; item-action, export
+  # and reaper exist in backend/src/workers and are started by `npm run dev`,
+  # so leaving them out means the DSAR item actions, the export builder and the
+  # orphaned-blob reaper never run.
+  worker-recognition:
+    <<: *backend-base
+    command: ["node", "src/workers/recognition.worker.js"]
+
+  worker-redaction:
+    <<: *backend-base
+    command: ["node", "src/workers/redaction.worker.js"]
+
+  worker-purge:
+    <<: *backend-base
+    command: ["node", "src/workers/purge.worker.js"]
+
+  worker-retention:
+    <<: *backend-base
+    command: ["node", "src/workers/retention.worker.js"]
+
+  worker-item-action:
+    <<: *backend-base
+    command: ["node", "src/workers/itemAction.worker.js"]
+
+  worker-export:
+    <<: *backend-base
+    command: ["node", "src/workers/export.worker.js"]
+
+  worker-reaper:
+    <<: *backend-base
+    command: ["node", "src/workers/reaper.worker.js"]
+
+  # ------------------------------------------------------------ ai workers --
+  # Every one of these runs on CPU. Only audio-worker's Dockerfile has a CUDA
+  # base at all, and its model loaders already probe torch.cuda.is_available();
+  # video-worker's Dockerfile is CPU by default by design and probes
+  # onnxruntime's available providers. This machine has no NVIDIA runtime, so
+  # audio-worker is built from the slim base — see its BASE build arg.
+  face-worker:
+    build: ../../face-worker
+    # ~300MB of insightface buffalo_l weights fetch on first run. Without this
+    # volume they re-download on every restart.
+    volumes: [face_models:/models]
+    restart: unless-stopped
+
+  # Not optional: redaction fails closed without it, so a stack missing this
+  # silently stops publishing redacted frames (piiStatus=DEFERRED) rather than
+  # publishing unmasked ones.
+  image-pii-worker:
+    build: ../../ai-core/image-pii-worker
+    restart: unless-stopped
+
+  text-worker:
+    build: ../../ai-core/text-services
+    restart: unless-stopped
+
+  video-worker:
+    build: ../../ai-core/video-worker
+    environment:
+      PII_SERVICE_URL: http://image-pii-worker:8002
+    depends_on: [image-pii-worker]
+    # Shares face-worker's volume: both load the identical buffalo_l pack, and
+    # that is a correctness requirement — a track embedded with a different
+    # model compared against the session gallery produces confident nonsense.
+    volumes: [face_models:/models]
+    restart: unless-stopped
+
+  audio-worker:
+    build:
+      context: ../../ai-core/audio-worker
+      args:
+        # No NVIDIA runtime on this host, so the CUDA base would be several GB
+        # of driver stack nothing can call. diarization.py, transcription.py and
+        # speaker_id.py each fall back to CPU on their own.
+        BASE: python:3.12-slim
+    environment:
+      # Diarization needs a Hugging Face token for the gated
+      # pyannote/speaker-diarization-3.1 checkpoint. Without one the service
+      # still starts and /embed and /redact still work — only /analyze fails.
+      HF_TOKEN: ${HF_TOKEN:-}
+      WHISPER_MODEL_SIZE: ${WHISPER_MODEL_SIZE:-small}
+    # Whisper and the pyannote checkpoints land in the HF cache on first
+    # analyze — roughly a gigabyte. Without a volume that cache lives in the
+    # container's writable layer and is thrown away by every recreate.
+    volumes: [audio_models:/root/.cache/huggingface]
+    restart: unless-stopped
+
+volumes:
+  media:
+  pgdata:
+  pgcerts:
+  qdrant_storage:
+  redis_data:
+  face_models:
+  audio_models:

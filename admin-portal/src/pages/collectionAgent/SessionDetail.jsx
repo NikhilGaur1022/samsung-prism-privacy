@@ -344,6 +344,19 @@ export default function SessionDetail() {
 
   const rosterIds = new Set(session.participants.map((p) => p.subjectId))
   const capturing = session.status === 'ACTIVE'
+  // A VIDEO session collects clips and nothing else, so the stills panel is not
+  // just empty on it — it is an invitation to capture something the session is
+  // not for. IMAGE sessions keep both panels: they may legitimately hold clips
+  // alongside photos, and every session created before the VIDEO type existed
+  // holds its clips under IMAGE.
+  const videoOnly = session.type === 'VIDEO'
+  // What "there is something to process" means. Gating this on photos alone made
+  // a video-only session impossible to end from the UI: the button stayed
+  // disabled forever, so the recognition pass was never enqueued and every clip
+  // sat at PENDING_ANALYSIS looking like a dead pipeline. The backend has always
+  // accepted either (endSession counts photos AND videos); only this button
+  // disagreed.
+  const hasCaptures = session.photos.length > 0 || (session.videoCount ?? 0) > 0
 
   return (
     <div className="flex min-h-svh bg-canvas">
@@ -357,10 +370,11 @@ export default function SessionDetail() {
             capturing ? (
               <button
                 onClick={handleEnd}
-                disabled={busy || session.photos.length === 0}
+                disabled={busy || !hasCaptures}
                 className="flex items-center gap-2 rounded-lg bg-brand px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-dark"
               >
-                <StopCircle size={16} strokeWidth={2} /> End session & detect faces
+                <StopCircle size={16} strokeWidth={2} />{' '}
+                {videoOnly ? 'End session & analyse clips' : 'End session & detect faces'}
               </button>
             ) : session.status === 'ARCHIVED' ? (
               <Link
@@ -392,8 +406,19 @@ export default function SessionDetail() {
         {session.status === 'PROCESSING' && (
           <div className="mt-5 flex items-center gap-2 rounded-lg bg-warning-soft px-3 py-2.5 text-sm font-semibold text-warning">
             <Loader2 size={16} className="animate-spin" />
-            Running face detection on {session.job?.photosTotal ?? session.photos.length} photos (
-            {session.job?.photosDone ?? 0} done). You'll be taken to tagging automatically.
+            {videoOnly ? (
+              <>
+                Analysing {session.videoCount ?? 0} clip
+                {(session.videoCount ?? 0) === 1 ? '' : 's'} — face tracking runs frame by
+                frame, so this takes a few minutes per clip on this machine.
+              </>
+            ) : (
+              <>
+                Running face detection on {session.job?.photosTotal ?? session.photos.length}{' '}
+                photos ({session.job?.photosDone ?? 0} done). You'll be taken to tagging
+                automatically.
+              </>
+            )}
           </div>
         )}
 
@@ -510,6 +535,7 @@ export default function SessionDetail() {
             )}
           </section>
 
+          {!videoOnly && (
           <section className="rounded-card bg-surface p-6 shadow-card">
             <h2 className="text-base font-bold text-ink">Capture</h2>
             <p className="mt-0.5 text-xs font-medium text-ink-faint">
@@ -626,6 +652,7 @@ export default function SessionDetail() {
               </div>
             </div>
           </section>
+          )}
 
           <SessionVideoPanel
             sessionId={sessionId}

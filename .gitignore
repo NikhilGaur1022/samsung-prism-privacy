@@ -59,10 +59,24 @@ ENV/
 # Redis dev snapshot — a local artifact, never a source file
 dump.rdb
 
-# Deploy secrets and built portal output — never committed.
+# Deploy secrets and built portal output.
+#
+# deploy/staging/.env and app.env ARE tracked, deliberately, and hold FRESHLY
+# GENERATED values that have never protected any real data — so a clone is
+# deployable without a scavenger hunt. They are not the secrets of any live
+# deployment, and a real one's values must never be committed over them:
+# MEDIA_KEK is not recoverable and a leaked one decrypts every sealed media
+# blob. Regenerate with deploy/gen-secrets.sh; keep real values out of band.
+#
+# prod.env stays ignored with no exception — production secrets protect real
+# subjects' media and have no business in version control at any point.
 deploy/prod.env
 deploy/.env
 deploy/www/
+# Negations, and they must come AFTER the broad `.env*` rule further up or that
+# rule wins — git applies the last matching pattern, not the most specific.
+!deploy/staging/.env
+!deploy/staging/app.env
 
 # Supabase CLI local scratch state. .temp/start-secrets holds the CLI's
 # well-known local demo keys and a generated DB password — worthless off this

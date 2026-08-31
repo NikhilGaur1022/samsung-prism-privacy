@@ -1,7 +1,7 @@
 import {
   FolderCheck, FileText, Gauge, ClipboardList, FolderKanban, FilePlus,
   Activity, Database, FileBarChart, ListChecks, PlayCircle, UserCheck, ShieldCheck,
-  Camera, Inbox, SearchCode, Share2, Lock, FileClock, Upload,
+  Camera, Inbox, SearchCode, Share2, Lock, FileClock, Upload, ScanSearch,
 } from 'lucide-react'
 
 // One table, one direction. Until this file was inverted each role carried its
@@ -215,6 +215,17 @@ export const PAGES = [
   },
 
   // --- Oversight -------------------------------------------------------------
+  {
+    path: '/image-provenance',
+    label: 'Image Provenance',
+    icon: ScanSearch,
+    group: 'oversight',
+    // POST /provenance/lookup — reads the signed export stamp back out of an
+    // image and resolves it to a project, a session, an export and named people.
+    // dpo/super_admin only: the stamp is pseudonymous by design and this undoes
+    // that, so every resolution is written to the access ledger.
+    roles: ['dpo', 'super_admin'],
+  },
   {
     path: '/sla-monitoring',
     label: 'SLA Monitoring',

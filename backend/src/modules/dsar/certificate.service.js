@@ -61,6 +61,20 @@ export async function issueCertificate(purgeJobId, admin = null) {
     )
   }
 
+  // A project erasure is not a whole-subject erasure, and this certificate says
+  // DPDP_ERASURE over a subject pseudonym. The two gates below would refuse it
+  // anyway — a project purge deliberately leaves the per-subject key alive, and
+  // the residue sweep is over every path prefix for the subject, which still
+  // holds the other projects' files. Refusing here says why, instead of failing
+  // later with "the subject key has not been destroyed", which reads as a broken
+  // purge rather than a correct one.
+  if (job.scope === 'PROJECT') {
+    throw new ApiError(
+      409,
+      'Cannot certify a project-scoped erasure. A deletion certificate attests that everything held about a person is gone; this job erased one project\'s data and the subject remains, with their other projects intact. The completed purge job is the proof at this scope.',
+    )
+  }
+
   const existing = await prisma.deletionCertificate.findUnique({
     where: { dsarRequestId: job.dsarRequestId },
   })

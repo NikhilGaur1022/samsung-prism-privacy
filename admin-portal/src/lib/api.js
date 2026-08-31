@@ -985,3 +985,29 @@ export function getQueueHealth() {
 export function requeueStalled(payload = {}) {
   return request('/api/v1/ops/requeue', { method: 'POST', body: JSON.stringify(payload) })
 }
+
+// --- Image provenance ---------------------------------------------------------
+// Reads the signed stamp back out of an image that has left the platform.
+// lib/imageMetadata.js has stamped every exported JPEG since the export pipeline
+// landed; until this endpoint existed nothing could ask an image what it was.
+//
+// Multipart, so it bypasses request() — the shared helper sets a JSON
+// content-type, which stops the browser generating the multipart boundary.
+export async function lookupImageProvenance(file) {
+  const form = new FormData()
+  form.append('image', file, file.name ?? 'image.jpg')
+
+  const res = await fetch(`${BASE_URL}/api/v1/provenance/lookup`, {
+    method: 'POST',
+    credentials: 'include',
+    body: form,
+  })
+
+  const body = await res.json().catch(() => null)
+  if (!res.ok) {
+    const error = new Error(body?.error ?? `Provenance lookup failed with status ${res.status}`)
+    error.status = res.status
+    throw error
+  }
+  return body
+}

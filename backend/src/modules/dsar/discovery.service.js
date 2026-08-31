@@ -62,7 +62,35 @@ function location(locationCode, objectType, objectId, storagePath = null, meta =
  *   subject is not the only one present. Those photos must survive, be
  *   re-redacted, and never be handed to a delete.
  */
-export async function runDiscovery(subjectId) {
+export async function runDiscovery(subjectId, { projectId = null } = {}) {
+  // Project scoping, and why it is keyed on the CONSENT rather than the session.
+  //
+  // A withdrawal under §6(4) revokes one project's consent. What loses its
+  // lawful basis is exactly what that consent authorised — not everything the
+  // person has ever given us. Every subject-linking row (PhotoSubject,
+  // SessionParticipant, AudioSegment, VideoSubject, TextSpan) carries the
+  // consentId it was collected under, so that column is both the correct
+  // semantic key and a complete one.
+  //
+  // Without this, a withdrawal from one project walked the whole subject: it
+  // destroyed their data in every OTHER project, crypto-shredded the per-subject
+  // DEK, and anonymised the identity row — deleting the account in response to a
+  // request that never asked for it. consent.service.js reasons carefully about
+  // exactly this two lines before it raises the erasure ("If any other project
+  // still has active consent it stays"), and then handed the job to an executor
+  // that ignored the project entirely.
+  const scopedConsents = projectId
+    ? await prisma.projectConsent.findMany({
+        where: { subjectId, projectId },
+        select: { consentId: true },
+      })
+    : null
+  const projectScoped = scopedConsents !== null
+  const consentIds = scopedConsents?.map((c) => c.consentId) ?? []
+  // Spread into a where clause. Empty when unscoped, so every query below keeps
+  // its whole-subject behaviour untouched.
+  const byConsent = projectScoped ? { consentId: { in: consentIds } } : {}
+
   const [
     subject,
     consents,
@@ -78,11 +106,11 @@ export async function runDiscovery(subjectId) {
       select: { masterUserId: true, fullName: true, email: true, status: true, createdAt: true },
     }),
     prisma.projectConsent.findMany({
-      where: { subjectId },
+      where: { subjectId, ...(projectScoped ? { projectId } : {}) },
       select: { consentId: true, projectId: true, status: true, consentedAt: true, revokedAt: true },
     }),
     prisma.photoSubject.findMany({
-      where: { subjectId },
+      where: { subjectId, ...byConsent },
       select: {
         id: true,
         photoId: true,
@@ -99,16 +127,25 @@ export async function runDiscovery(subjectId) {
         },
       },
     }),
-    prisma.subjectFaceEnrollment.findMany({
-      where: { subjectId },
-      select: { id: true, imagePath: true, sha256: true, embedding: true, encKeyId: true, deletedAt: true },
-    }),
-    prisma.subjectVoiceEnrollment.findMany({
-      where: { subjectId },
-      select: { id: true, audioPath: true, sha256: true, embedding: true, encKeyId: true, deletedAt: true },
-    }),
+    // The enrollment selfie and the voice print are held once per SUBJECT, not
+    // per project, so a single project's withdrawal never reaches them. When the
+    // LAST consent goes, consent.service.js calls deleteAllEnrollments directly
+    // — that is where the "no basis left" decision belongs, because it is the
+    // only place that can count the remaining consents.
+    projectScoped
+      ? []
+      : prisma.subjectFaceEnrollment.findMany({
+          where: { subjectId },
+          select: { id: true, imagePath: true, sha256: true, embedding: true, encKeyId: true, deletedAt: true },
+        }),
+    projectScoped
+      ? []
+      : prisma.subjectVoiceEnrollment.findMany({
+          where: { subjectId },
+          select: { id: true, audioPath: true, sha256: true, embedding: true, encKeyId: true, deletedAt: true },
+        }),
     prisma.sessionParticipant.findMany({
-      where: { subjectId },
+      where: { subjectId, ...byConsent },
       select: { id: true, sessionId: true, consentId: true },
     }),
     prisma.dsarRequest.findMany({
@@ -116,7 +153,7 @@ export async function runDiscovery(subjectId) {
       select: { id: true, type: true, status: true, createdAt: true },
     }),
     prisma.textSpan.findMany({
-      where: { subjectId },
+      where: { subjectId, ...byConsent },
       include: {
         document: {
           select: {
@@ -135,7 +172,7 @@ export async function runDiscovery(subjectId) {
   // the sole-speaker test is made against the recording and not against this
   // subject's slice of it.
   const recordings = await prisma.recording.findMany({
-    where: { segments: { some: { subjectId } } },
+    where: { segments: { some: { subjectId, ...byConsent } } },
     select: {
       id: true,
       sessionId: true,
@@ -151,12 +188,19 @@ export async function runDiscovery(subjectId) {
   // sole-appearance test is made against the clip and not against this
   // subject's slice of it — the same shape as `recordings` above.
   const videos = await prisma.videoAsset.findMany({
-    where: {
-      OR: [
-        { subjects: { some: { subjectId } } },
-        { tracks: { some: { taggedSubjectId: subjectId } } },
-      ],
-    },
+    // Scoped, the consent LINK is the only admissible route in. The tracks
+    // branch finds clips this subject was tagged in with no link written, which
+    // is right for a whole-subject erasure and wrong for a project one: a track
+    // carries no consent, so it carries no project, and following it would pull
+    // in footage from projects the subject never withdrew from.
+    where: projectScoped
+      ? { subjects: { some: { subjectId, ...byConsent } } }
+      : {
+          OR: [
+            { subjects: { some: { subjectId } } },
+            { tracks: { some: { taggedSubjectId: subjectId } } },
+          ],
+        },
     select: {
       id: true,
       sessionId: true,
@@ -172,15 +216,20 @@ export async function runDiscovery(subjectId) {
   })
 
   const faces = await prisma.faceDetection.findMany({
-    where: {
-      OR: [
-        { taggedSubjectId: subjectId },
-        // Crops on photos this subject appears in but which were never tagged to
-        // anyone are still potentially crops OF this subject — an untagged face
-        // on a two-person photo is not evidence that it belongs to the other one.
-        { photoId: { in: photoLinks.map((l) => l.photoId) }, taggedSubjectId: null },
-      ],
-    },
+    // Same rule as the video query: scoped, reach crops only through the photos
+    // the filtered links named. `taggedSubjectId` alone spans every project.
+    where: projectScoped
+      ? { photoId: { in: photoLinks.map((l) => l.photoId) } }
+      : {
+          OR: [
+            { taggedSubjectId: subjectId },
+            // Crops on photos this subject appears in but which were never tagged
+            // to anyone are still potentially crops OF this subject — an untagged
+            // face on a two-person photo is not evidence that it belongs to the
+            // other one.
+            { photoId: { in: photoLinks.map((l) => l.photoId) }, taggedSubjectId: null },
+          ],
+        },
     select: { id: true, photoId: true, cropPath: true, taggedSubjectId: true },
   })
 
@@ -370,11 +419,18 @@ export async function runDiscovery(subjectId) {
   // The key itself is a location. It is deliberately the LAST thing destroyed —
   // destroying it early would make the blobs we still have to hash unreadable,
   // and the hash-before is the evidence.
-  locations.push(
-    location(LOCATIONS.L5_EMBEDDING, 'SubjectKey', subjectId, null, {
-      note: 'per-subject DEK — crypto-shred, executed last',
-    }),
-  )
+  // Crypto-shredding is a whole-subject act and can never belong to a project
+  // erasure: the DEK seals this subject's media in EVERY project, so destroying
+  // it to honour one withdrawal would make everything the other projects still
+  // lawfully hold permanently unreadable. Same reasoning locationsForItems
+  // states for a scoped item delete.
+  if (!projectScoped) {
+    locations.push(
+      location(LOCATIONS.L5_EMBEDDING, 'SubjectKey', subjectId, null, {
+        note: 'per-subject DEK — crypto-shred, executed last',
+      }),
+    )
+  }
 
   // ---- Identity, consents, roster ------------------------------------------
   for (const consent of consents) {
@@ -399,7 +455,12 @@ export async function runDiscovery(subjectId) {
   }
 
   if (subject) {
-    locations.push(location('PII', 'Subject', subject.masterUserId, null, { action: 'ANONYMISE' }))
+    // The identity row survives a project erasure. Withdrawing from one project
+    // is not a request to delete the account, and anonymising the row here is
+    // what silently turned one into the other.
+    if (!projectScoped) {
+      locations.push(location('PII', 'Subject', subject.masterUserId, null, { action: 'ANONYMISE' }))
+    }
   }
 
   // ---- L20 clips, L21 blurred derivatives, TRACK attributions ---------------
@@ -543,10 +604,15 @@ export async function runDiscovery(subjectId) {
   }
 
   // ---- L9/L10 packages ------------------------------------------------------
-  const evidence = await prisma.dsarEvidence.findMany({
-    where: { dsarRequestId: { in: dsarRequests.map((r) => r.id) }, storagePath: { not: null } },
-    select: { id: true, storagePath: true, kind: true },
-  })
+  // A DSAR export package is built per REQUEST, across everything the subject
+  // holds. It is not attributable to one project, so a project erasure leaves it
+  // — shredding it would destroy evidence belonging to other requests.
+  const evidence = projectScoped
+    ? []
+    : await prisma.dsarEvidence.findMany({
+        where: { dsarRequestId: { in: dsarRequests.map((r) => r.id) }, storagePath: { not: null } },
+        select: { id: true, storagePath: true, kind: true },
+      })
   for (const item of evidence) {
     locations.push(
       location(
@@ -563,18 +629,24 @@ export async function runDiscovery(subjectId) {
   // yet, and silently leaving it out of a discovery result would make the result
   // read as "there is nothing there" instead of "this is not built". L11 exists
   // and genuinely cannot be rewritten; crypto-shredding is the whole answer.
-  locations.push(
-    location(LOCATIONS.L8_VAULT, 'VaultObject', subjectId, null, {
-      action: 'TOMBSTONE',
-      note: 'vault ingest is not implemented; nothing to purge, recorded so the gap is visible',
-    }),
-  )
-  locations.push(
-    location(LOCATIONS.L11_BACKUP, 'Backup', subjectId, null, {
-      action: 'TOMBSTONE',
-      note: 'backup media cannot be rewritten; covered by destroying the per-subject DEK',
-    }),
-  )
+  // Both tombstones are whole-subject claims. L11 in particular says backups are
+  // "covered by destroying the per-subject DEK" — which a project erasure
+  // deliberately does not do, so asserting it here would be a false statement on
+  // the certificate.
+  if (!projectScoped) {
+    locations.push(
+      location(LOCATIONS.L8_VAULT, 'VaultObject', subjectId, null, {
+        action: 'TOMBSTONE',
+        note: 'vault ingest is not implemented; nothing to purge, recorded so the gap is visible',
+      }),
+    )
+    locations.push(
+      location(LOCATIONS.L11_BACKUP, 'Backup', subjectId, null, {
+        action: 'TOMBSTONE',
+        note: 'backup media cannot be rewritten; covered by destroying the per-subject DEK',
+      }),
+    )
+  }
 
   // Existence check on disk, so the purge does not report "deleted" for objects
   // that were already gone and does not silently skip ones that are still there.
@@ -610,12 +682,27 @@ export async function runDiscovery(subjectId) {
     )
   }
 
+  // Rows this subject holds that carry NO consentId. A project erasure cannot
+  // reach them — with no consent there is no project to attribute them to — so
+  // they are counted and reported rather than quietly left out. A non-zero value
+  // here means the walk was incomplete for a reason a human has to judge, which
+  // is precisely the thing this file's header refuses to hide.
+  const unattributed = projectScoped
+    ? await prisma.photoSubject.count({ where: { subjectId, consentId: null } })
+    : 0
+
   return {
     subjectId,
+    // What this walk covered. A purge job, its evidence row and any certificate
+    // built from it all read these, so "everything" and "one project's worth"
+    // can never be confused for one another downstream.
+    scope: projectScoped ? 'PROJECT' : 'FULL',
+    projectId: projectScoped ? projectId : null,
     generatedAt: new Date().toISOString(),
     subjectExists: Boolean(subject),
     counts: {
       total: locations.length,
+      ...(projectScoped ? { unattributedLinks: unattributed } : {}),
       photos: photoLinks.length,
       multiSubjectPhotos: multiSubjectPhotos.length,
       faceCrops: faces.length,

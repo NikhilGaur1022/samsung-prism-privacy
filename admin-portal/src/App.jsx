@@ -12,6 +12,7 @@ import Dashboard from './pages/Dashboard'
 import Placeholder from './pages/Placeholder'
 import ProjectApprovals from './pages/dpo/ProjectApprovals'
 import ConsentTemplates from './pages/dpo/ConsentTemplates'
+import ImageProvenance from './pages/dpo/ImageProvenance'
 import SlaMonitoring from './pages/dpo/SlaMonitoring'
 import ComplianceReports from './pages/dpo/ComplianceReports'
 import DsarQueue from './pages/dataAdmin/DsarQueue'
@@ -46,6 +47,7 @@ import SessionPhotos from './pages/SessionPhotos'
 const PAGE_COMPONENTS = {
   '/project-approvals': ProjectApprovals,
   '/consent-templates': ConsentTemplates,
+  '/image-provenance': ImageProvenance,
   '/sla-monitoring': SlaMonitoring,
   '/compliance-reports': ComplianceReports,
   '/dsar-queue': DsarQueue,
@@ -70,6 +72,26 @@ const PAGE_COMPONENTS = {
   '/queue-health': QueueHealth,
 }
 
+// Vite's BASE_URL always carries a trailing slash ("/admin/"), and React Router
+// cannot use it in that form. Its stripBasename does a literal startsWith, so
+// with basename "/admin/" the pathname "/admin" — no trailing slash — does not
+// match, matchRoutes returns null, and the router renders NOTHING. The console
+// comes up as a blank white page with no error, no failed request, and every
+// server-side check returning 200, because the server did its job perfectly.
+//
+// "/admin/" and "/admin/anything" work, so the bug hides: it only appears on
+// the bare URL, which is exactly the one people type and bookmark. Dropping the
+// trailing slash matches both forms — stripBasename then checks that the next
+// character is "/" or end-of-string, so "/admin" and "/admin/sessions" both
+// resolve and "/administrator" correctly does not.
+//
+// "/" is left alone: React Router special-cases it, and "" would break the
+// startsWith check for every path.
+export function routerBasename(base) {
+  if (!base || base === '/') return '/'
+  return base.endsWith('/') ? base.slice(0, -1) : base
+}
+
 export default function App() {
   return (
     // Wraps the whole router. Until this existed a thrown render presented as a
@@ -80,7 +102,13 @@ export default function App() {
           rendering at 3.4x the viewport with content clipped mid-word. */}
       <UnsupportedViewport />
       <AuthProvider>
-        <BrowserRouter>
+        {/* basename, not "/": both SPAs and the API are served from a single
+            origin in the deployed stack (deploy/staging), with the admin console
+            mounted under /admin. Vite's BASE_URL carries whatever `base` the
+            build used, so this is "/" in dev and "/admin/" in that build with no
+            second knob to keep in sync — see routerBasename for why that value
+            cannot be handed to BrowserRouter as-is. */}
+        <BrowserRouter basename={routerBasename(import.meta.env.BASE_URL)}>
           <Routes>
           <Route path="/login" element={<Login />} />
           <Route path="/accept-invite" element={<AcceptInvite />} />
@@ -89,6 +117,15 @@ export default function App() {
           {/* Oversight view of one session's redacted set. Deliberately NOT open to
               collectionAgent — that role has SessionDetail, which shows the same
               session with the roster and the capture controls it still needs. */}
+          {/* dpo is deliberately NOT here, and the Image Provenance page hides
+              its session link for that role as a result. session.routes.js gives
+              the reason at its mediaReaders guard: matrix §A says dpo "cannot
+              see any personal data", and a blurred bystander is still a
+              photograph of the consented subject. Adding the role here would
+              403 on the API anyway — mediaReaders is
+              requireRole('collectionAgent','dataOwner','dataAdmin','super_admin')
+              — so the link would be both a dead end and a policy regression. The
+              provenance page renders the session record inline instead. */}
           <Route
             path="/sessions/:sessionId/photos"
             element={

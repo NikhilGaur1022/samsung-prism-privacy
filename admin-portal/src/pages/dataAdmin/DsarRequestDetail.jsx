@@ -140,6 +140,7 @@ const ORIGINS = ['COLLECTION_SESSION', 'IMPORT', 'ENROLLMENT']
 const ITEM_TYPES = [
   { value: 'PHOTO', label: 'Photos' },
   { value: 'AUDIO', label: 'Audio' },
+  { value: 'VIDEO', label: 'Video' },
 ]
 
 const ACTION_COPY = {

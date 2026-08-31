@@ -1,0 +1,11 @@
+-- Adds VIDEO to SessionType.
+--
+-- Additive only: no existing row changes type. Sessions created before this
+-- migration keep whatever clips they hold under IMAGE, which is why
+-- itemCountFor() still counts photos+videos for IMAGE rather than moving clips
+-- under the new member.
+--
+-- IF NOT EXISTS so re-running against a database that already has the value is
+-- a no-op rather than a failure — `migrate deploy` runs this on every boot of
+-- ./up.sh.
+ALTER TYPE "SessionType" ADD VALUE IF NOT EXISTS 'VIDEO';

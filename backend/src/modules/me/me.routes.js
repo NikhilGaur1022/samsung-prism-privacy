@@ -3,15 +3,12 @@ import { z } from 'zod'
 import { prisma } from '../../config/prisma.js'
 import { requireSubjectAuth } from '../../middleware/requireSubjectAuth.js'
 import { ApiError } from '../../middleware/errorHandler.js'
-import { logAccess } from '../../middleware/logAccess.js'
 import * as enrollmentService from '../enrollment/enrollment.service.js'
 import * as meService from './me.service.js'
-import { readPersonRedactedPhotoForSubject } from '../sessions/session.service.js'
 import * as dsarService from '../dsar/dsar.service.js'
 import { downloadPackage, issuePackageToken } from '../dsar/export.service.js'
 import { getCertificateForRequest, verifyCertificate } from '../dsar/certificate.service.js'
 import { getSubjectTimeline } from '../dsar/timeline.service.js'
-import { mediaReadLimiter } from '../../middleware/rateLimiter.js'
 
 // Subject-facing account state that isn't enrollment CRUD. Shares the /api/v1/me
 // mount with selfEnrollmentRoutes; every handler takes the subject id from the
@@ -81,38 +78,25 @@ meRoutes.get('/participations', async (req, res, next) => {
   }
 })
 
-// DPDP §11 — "how many photos am I actually in, and under what purpose". This is
-// the access right answered directly rather than through a 30-day DSAR: the
-// principal's own link rows, grouped by project, with no other principal named.
+// DPDP §11 — "how many photos am I in, and under what purpose". Counts, purposes
+// and consent state grouped by project: no photo ids, no session codes, no
+// capture locations, no other principal named. The material behind these numbers
+// is obtained by raising an ACCESS request, not from here.
 meRoutes.get('/photos', async (req, res, next) => {
   try {
-    res.json(await meService.listMyPhotos(req.subject.masterUserId))
+    res.json(await meService.summariseMyPhotos(req.subject.masterUserId))
   } catch (err) {
     next(err)
   }
 })
 
-// The principal's own copy of a frame they appear in. Everyone else on it is
-// blurred (invariant: same builder as the agent's per-person view) and the read
-// is logged before any decryption, exactly like an operator read — a subject
-// looking at their own face is still an access to biometric data.
-meRoutes.get(
-  '/photos/:photoId/redacted',
-  mediaReadLimiter,
-  logAccess('REDACTED_PHOTO', (req) => req.params.photoId, { purpose: 'SUBJECT_ACCESS' }),
-  async (req, res, next) => {
-    try {
-      const { buffer, mimeType } = await readPersonRedactedPhotoForSubject(
-        z.string().uuid().parse(req.params.photoId),
-        req.subject.masterUserId,
-      )
-      res.set('Cache-Control', 'private, no-store')
-      res.type(mimeType).send(buffer)
-    } catch (err) {
-      next(err)
-    }
-  },
-)
+// There is deliberately no route here that serves the principal a photograph.
+// DPDP §11 entitles them to a SUMMARY of what is processed; the material itself
+// is delivered through an ACCESS request — data-admin review, DPO approval,
+// redacted derivatives, a manifest, and a single-use download token. A portal
+// endpoint that streams frames to anyone holding a session cookie is a standing
+// read channel over the dataset with no approval step and nothing to revoke, so
+// GET /me/photos/:photoId/redacted was removed rather than narrowed.
 
 // ---------------------------------------------------------------------------
 // DPDP §11 / §12 / §13 — the data principal's own rights surface

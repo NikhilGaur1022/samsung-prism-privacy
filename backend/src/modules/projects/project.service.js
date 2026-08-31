@@ -501,9 +501,11 @@ export async function listProjectSessions(projectId, admin) {
 function itemCountFor(type, counts) {
   switch (type) {
     case 'IMAGE':
-      // An IMAGE session is the visual-capture session: there is no VIDEO
-      // member of SessionType, so clips hang off this type too and a
-      // video-only session would otherwise report itself as holding nothing.
+      // Still both, even though VIDEO now exists as its own member. An IMAGE
+      // session may legitimately hold clips alongside stills, and every session
+      // created before VIDEO existed holds its clips under this type — counting
+      // photos alone here would make those report themselves as holding less
+      // than they do.
       return counts.photos + counts.videos
     case 'VIDEO':
       return counts.videos

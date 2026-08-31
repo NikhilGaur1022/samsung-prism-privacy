@@ -1,0 +1,38 @@
+# Caddy with both SPAs baked in. Build context is the REPO ROOT — this needs
+# user-portal/ and admin-portal/ — see the `web` service in compose.yml.
+#
+# The portals are built here rather than by deploy/build-portals.sh because that
+# script needs node and npm on the host, and the whole point of this stack is
+# that the host needs nothing but Docker.
+#
+# Neither build bakes in an API hostname: VITE_API_BASE_URL is left empty so the
+# clients issue same-origin relative requests (`fetch('/api/v1/...')`). That is
+# what makes the tunnel URL swappable without rebuilding a single asset — only
+# the backend's own env carries the public URL, and only for the links it emails
+# and encodes into join QRs.
+
+# --- user portal -----------------------------------------------------------
+FROM node:22-bookworm-slim AS user-build
+WORKDIR /src
+COPY user-portal/package.json user-portal/package-lock.json* ./
+RUN npm ci
+COPY user-portal/ ./
+ENV VITE_API_BASE_URL=""
+RUN npm run build
+
+# --- admin portal ----------------------------------------------------------
+FROM node:22-bookworm-slim AS admin-build
+WORKDIR /src
+COPY admin-portal/package.json admin-portal/package-lock.json* ./
+RUN npm ci
+COPY admin-portal/ ./
+ENV VITE_API_BASE_URL=""
+# Read by vite.config.js -> `base`, and read back by App.jsx as
+# import.meta.env.BASE_URL for react-router's basename.
+ENV VITE_BASE_PATH="/admin/"
+RUN npm run build
+
+# --- server ----------------------------------------------------------------
+FROM caddy:2-alpine
+COPY --from=user-build  /src/dist /srv/user
+COPY --from=admin-build /src/dist /srv/admin
