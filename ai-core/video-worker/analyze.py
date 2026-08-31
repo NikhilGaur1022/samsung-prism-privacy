@@ -26,8 +26,10 @@ _face_app: FaceAnalysis | None = None
 def face_app() -> FaceAnalysis:
     global _face_app
     if _face_app is None:
+        import os
         providers = onnx_providers()
-        app = FaceAnalysis(name="buffalo_l", providers=providers)
+        root_dir = os.environ.get("INSIGHTFACE_HOME", "~/.insightface/models")
+        app = FaceAnalysis(name="buffalo_l", root=root_dir, providers=providers)
         app.prepare(ctx_id=0 if "CUDAExecutionProvider" in providers else -1, det_size=(640, 640))
         _face_app = app
         logger.info("insightface ready, providers=%s", providers)

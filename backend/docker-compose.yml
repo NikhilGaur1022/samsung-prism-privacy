@@ -126,15 +126,10 @@ services:
     build: ../ai-core/video-worker
     container_name: prism-video-worker
     environment:
-      # Reached over the compose network, not localhost: the PII detector is a
-      # fail-closed dependency of /analyze, and pointing this at the host would
-      # make every analyze 503 with a connection error that looks like the
-      # detector is broken rather than misaddressed.
-      # Overridable so the worker can be run on its own against a PII detector
-      # already running on the host (PII_SERVICE_URL=http://host.docker.internal:8002
-      # docker compose --profile video up -d --no-deps video-worker). The default
-      # is unchanged and is still the compose-network address.
-      PII_SERVICE_URL: ${PII_SERVICE_URL:-http://image-pii-worker:8002}
+      # We hardcode the compose-network address because the backend's .env
+      # automatically sets PII_SERVICE_URL=http://localhost:8002 for the host API,
+      # which would otherwise be injected here and break the container's networking.
+      PII_SERVICE_URL: http://image-pii-worker:8002
     depends_on:
       - image-pii-worker
     # Shares face-worker's model volume. Both load the identical buffalo_l pack
