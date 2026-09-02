@@ -10,11 +10,18 @@ import { workerFetch, readWorkerError } from '../../lib/workerFetch.js'
 
 const VIDEO_SERVICE_URL = process.env.VIDEO_SERVICE_URL ?? 'http://localhost:8005'
 
-// Relaxable, but not by accident. Video capture in this platform is muted by
-// contract: no voice-consent decision is attached to a clip, and the worker's
-// /redact passes -an so a soundtrack would be silently dropped from the
-// derivative while surviving in the original. Rejecting at upload is the only
-// point where the agent is still on site and can re-record.
+// Opts OUT of stripping, and is for one situation only: a deployment that has a
+// lawful basis for the soundtrack and processes it as a recording elsewhere.
+//
+// Left unset — the default — a clip's audio stream is removed at ingest, because
+// video capture here carries no voice-consent decision and the worker's /redact
+// passes -an regardless. Without the strip a soundtrack nobody screened would
+// survive in the ORIGINAL while silently vanishing from the derivative, which is
+// the worst of both: unscreened voice data retained, and a derivative that does
+// not match the thing it derives from.
+//
+// Setting this true keeps the audio in the stored original. It does not create a
+// consent basis for it; it only says one exists.
 const ALLOW_AUDIO = process.env.VIDEO_ALLOW_AUDIO === 'true'
 
 const EXTENSION_BY_MIME = {
@@ -101,26 +108,63 @@ export async function uploadVideo(sessionId, file, admin) {
     throw new ApiError(409, `Session is ${session.status} — video cannot be added`)
   }
 
+  // Hashed over what the AGENT HANDED US, not over what we store.
+  //
+  // The two differ whenever a soundtrack is stripped below, and the difference
+  // matters: this hash's job is to make a retried upload of the same file
+  // collapse onto the same row, and only the upload's own bytes are stable
+  // enough to do that. The muted copy is not — the mp4 muxer stamps timings into
+  // the container, so remuxing one source file twice yields two different
+  // digests, and hashing that would defeat the unique index it feeds.
   const sha256 = createHash('sha256').update(file.buffer).digest('hex')
 
   // De-duplicated on content within the session, exactly as photos and
   // recordings are. Without it a retried upload creates a second row over
   // identical bytes and the DSAR item grid double-counts what we hold.
+  //
+  // Checked BEFORE the worker calls below, not after: a retry of a 200MB clip
+  // should cost one database lookup, not a probe plus a full remux.
   const existing = await prisma.videoAsset.findFirst({ where: { sessionId, sha256 } })
   if (existing) return { video: existing, duplicate: true }
 
-  // Probed before anything is written. A clip with a soundtrack has to be
-  // refused while the agent can still act on it, not discovered at analyze time
-  // when the session is over and they have gone home.
-  const form = new FormData()
-  form.append('file', videoBlob(file.buffer, file.mimetype), file.originalname || 'upload.mp4')
-  const meta = await callWorker('/probe', form)
+  const meta = await callWorker(
+    '/probe',
+    () => {
+      const form = new FormData()
+      form.append('file', videoBlob(file.buffer, file.mimetype), file.originalname || 'upload.mp4')
+      return form
+    },
+  )
 
+  // A soundtrack is STRIPPED, not grounds for refusing the clip.
+  //
+  // The rule it enforces is unchanged and is not negotiable: video capture in
+  // this platform carries no voice-consent decision, so audio must never reach
+  // storage. What changed is the remedy. Refusing the upload threw away footage
+  // that was lawfully captured and correct in every other respect, and it did so
+  // at the one moment it could not be fixed — after the shoot, when re-recording
+  // means recalling the participants. Removing the stream satisfies the same
+  // contract and keeps the video.
+  //
+  // Done here, before writeFile, so no sealed blob ever contains a voice. The
+  // worker owns the ffmpeg call because ffmpeg is a hard dependency of that image
+  // and merely an accident of the host on this side.
+  let bytes = file.buffer
+  let audioStripped = false
   if (meta.has_audio && !ALLOW_AUDIO) {
-    throw new ApiError(
-      422,
-      'This video carries an audio track. Video capture in this deployment is muted by contract — no voice-consent decision is attached to a clip, so a soundtrack cannot be lawfully processed or served. Re-record with the microphone off, or capture the audio as a session recording instead.',
-      { hasAudio: true, durationSec: meta.duration_sec },
+    bytes = await callWorker(
+      '/mute',
+      () => {
+        const form = new FormData()
+        form.append('file', videoBlob(file.buffer, file.mimetype), file.originalname || 'upload.mp4')
+        return form
+      },
+      { expect: 'buffer' },
+    )
+    audioStripped = true
+    logger.info(
+      { sessionId, sha256, before: file.buffer.length, after: bytes.length },
+      'audio stream removed at ingest — a clip carries no voice-consent decision',
     )
   }
 
@@ -129,9 +173,14 @@ export async function uploadVideo(sessionId, file, admin) {
       sessionId,
       status: 'PENDING_ANALYSIS',
       storagePath: '',
-      mimeType: file.mimetype,
+      // The muted copy is always remuxed to mp4 by the worker, so the stored
+      // bytes are no longer whatever container was uploaded and the recorded
+      // mime type has to follow them — otherwise extensionFor() names the file
+      // .mov while its contents are mp4, and the player is handed a mislabelled
+      // stream.
+      mimeType: audioStripped ? 'video/mp4' : file.mimetype,
       sha256,
-      sizeBytes: file.size ?? file.buffer.length,
+      sizeBytes: bytes.length,
       durationSec: meta.duration_sec ?? null,
       fps: meta.fps ?? null,
       width: meta.width ?? null,
@@ -140,8 +189,8 @@ export async function uploadVideo(sessionId, file, admin) {
     },
   })
 
-  const relativePath = `sessions/${sessionId}/videos/${video.id}.${extensionFor(file.mimetype)}`
-  const { keyId } = await writeFile(relativePath, file.buffer)
+  const relativePath = `sessions/${sessionId}/videos/${video.id}.${extensionFor(video.mimeType)}`
+  const { keyId } = await writeFile(relativePath, bytes)
 
   const updated = await prisma.videoAsset.update({
     where: { id: video.id },
@@ -160,6 +209,10 @@ export async function uploadVideo(sessionId, file, admin) {
       mimeType: updated.mimeType,
       durationSec: updated.durationSec,
       frameCount: updated.frameCount,
+      // Recorded because the stored object is then NOT the object whose digest
+      // is in `sha256`, and an auditor comparing the two needs the reason
+      // written down rather than inferred.
+      audioStripped,
     },
   })
 
@@ -282,10 +335,31 @@ export async function analyzeVideo(videoId) {
   }
 
   const piiCount = (result.pii_spans ?? []).length
+
+  // Best-effort, and deliberately so. The overlay is a review aid; the redaction
+  // path does not read it and no access decision depends on it. Letting a failure
+  // here throw would park a fully-analysed clip as DEFERRED — which stops the
+  // derivative from ever being written and holds the session out of ARCHIVED —
+  // over a convenience that is regenerable at any time.
+  let detectedPath = null
+  try {
+    detectedPath = await writeDetectedDerivative(
+      { ...video, mimeType: video.mimeType },
+      result.tracks,
+      result.pii_spans,
+    )
+  } catch (err) {
+    logger.warn(
+      { err, videoId, sessionId: video.sessionId },
+      'detection overlay could not be written — analysis stands, the tagging screen falls back to track crops',
+    )
+  }
+
   await prisma.videoAsset.update({
     where: { id: videoId },
     data: {
       status: 'ANALYZED',
+      ...(detectedPath ? { detectedPath } : {}),
       // The clip has been SCANNED for text; whether any was found is what
       // separates MASKED from CLEAN, and neither is DEFERRED. The mask itself is
       // applied later, by redactVideos.
@@ -371,6 +445,67 @@ async function writeDerivative(video, schedule) {
 
   await writeFile(redactedPath, redacted)
   return redactedPath
+}
+
+/**
+ * Writes the detection-overlay copy: every detected box drawn over the frames,
+ * labelled with the track it belongs to, and nothing masked.
+ *
+ * This is what an operator watches BEFORE tagging. A single JPEG crop per track
+ * cannot show whether the tracker held one face across an occlusion or quietly
+ * merged two people into one track, and that is precisely the error tagging is
+ * there to catch — tag a merged track to a consenting subject and both people
+ * stay unblurred in the release.
+ *
+ * Faces are legible in it, so it is stored beside the ORIGINAL and inherits the
+ * original's access rules. It is never offered to a data owner and never served
+ * by the redacted-video route.
+ */
+async function writeDetectedDerivative(video, tracks, piiSpans) {
+  const original = await readFile(video.storagePath)
+  const spec = {
+    tracks: [
+      ...(tracks ?? []).map((t) => ({
+        start_frame: t.start_frame ?? 0,
+        end_frame: t.end_frame ?? 0,
+        boxes: t.boxes ?? [],
+        label: `#${t.track_id}`,
+        color: [80, 220, 100], // BGR green — "a face was found here"
+      })),
+      ...(piiSpans ?? []).map((s) => ({
+        start_frame: s.start_frame ?? 0,
+        end_frame: s.end_frame ?? 0,
+        boxes: s.boxes ?? [],
+        label: String(s.kind ?? 'TEXT'),
+        color: [60, 180, 250], // BGR amber — printed text, a different decision
+      })),
+    ],
+  }
+
+  const annotated = await callWorker(
+    '/annotate',
+    () => {
+      const form = new FormData()
+      form.append(
+        'file',
+        videoBlob(original, video.mimeType),
+        `${video.id}.${extensionFor(video.mimeType)}`,
+      )
+      form.append('tracks', JSON.stringify(spec))
+      return form
+    },
+    { expect: 'buffer' },
+  )
+
+  // Beside the original, NOT under `redacted/`. The path is what a reviewer reads
+  // first when asking whether an object is safe to serve, and filing an
+  // unmasked clip under `redacted/` would be a lie told by a directory name.
+  const detectedPath = video.sessionId
+    ? `sessions/${video.sessionId}/videos/detected/${video.id}.mp4`
+    : `subjects/orphan/imports/detected/${video.id}.mp4`
+
+  await writeFile(detectedPath, annotated)
+  return detectedPath
 }
 
 /**
@@ -561,19 +696,46 @@ const PUBLIC_SELECT = {
   status: true,
   piiStatus: true,
   createdAt: true,
-  // storagePath and redactedPath are deliberately absent rather than set false.
-  // Neither path is reachable through any read route — the original only through
-  // the DSAR break-glass path, the derivative only as bytes from
-  // readRedactedVideo, which re-checks the fail-closed rule before opening it.
+  // storagePath stays absent: the original is reachable only through the DSAR
+  // break-glass path, and nothing in a portal has a reason to know where it is.
+  //
+  // redactedPath and detectedPath ARE selected, but only so toPublic() can turn
+  // them into booleans — they never leave this module as paths. Omitting them
+  // entirely was a bug with a visible symptom: SessionVideoPanel gates its player
+  // on `Boolean(video.redactedPath)`, which is `undefined` for every row this
+  // select produces, so the blurred copy was never offered no matter how well the
+  // redaction had gone. The panel reported "still being processed" forever over a
+  // clip that had been finished for hours.
+  redactedPath: true,
+  detectedPath: true,
+}
+
+/**
+ * Strips the storage paths and replaces them with the only two facts a client
+ * legitimately needs from them: whether each derivative exists.
+ *
+ * A path is not merely uninteresting to a portal, it is a hint about the key
+ * scope that opens it. A boolean answers "can I play this yet" without saying
+ * anything about where the bytes live.
+ */
+function toPublic(video) {
+  if (!video) return video
+  const { redactedPath, detectedPath, ...rest } = video
+  return {
+    ...rest,
+    hasRedacted: Boolean(redactedPath),
+    hasDetected: Boolean(detectedPath),
+  }
 }
 
 export async function listVideos(sessionId, admin) {
   await loadSessionForMedia(sessionId, admin)
-  return prisma.videoAsset.findMany({
+  const videos = await prisma.videoAsset.findMany({
     where: { sessionId },
     select: { ...PUBLIC_SELECT, _count: { select: { tracks: true, piiSpans: true } } },
     orderBy: { createdAt: 'asc' },
   })
+  return videos.map(toPublic)
 }
 
 export async function getVideo(sessionId, videoId, admin) {
@@ -603,7 +765,7 @@ export async function getVideo(sessionId, videoId, admin) {
     },
   })
   if (!video) throw new ApiError(404, 'Video not found')
-  return video
+  return toPublic(video)
 }
 
 export async function readRedactedVideo(sessionId, videoId, admin) {
@@ -618,6 +780,27 @@ export async function readRedactedVideo(sessionId, videoId, admin) {
     throw new ApiError(409, 'REDACTION_PENDING — no redacted copy is available for this video yet')
   }
   return { buffer: await readFile(video.redactedPath), mimeType: 'video/mp4' }
+}
+
+/**
+ * The detection-overlay copy. Faces in it are LEGIBLE — nothing is masked.
+ *
+ * It therefore carries the original's access rules, not the derivative's, and
+ * the route in front of it admits only the roles that may see an unmasked frame
+ * during collection. It is emphatically not the thing to serve a data owner.
+ */
+export async function readDetectedVideo(sessionId, videoId, admin) {
+  await loadSessionForMedia(sessionId, admin)
+  const video = await prisma.videoAsset.findFirst({ where: { id: videoId, sessionId } })
+  if (!video) throw new ApiError(404, 'Video not found')
+
+  if (!video.detectedPath) {
+    throw new ApiError(
+      409,
+      'ANALYSIS_PENDING — no detection overlay has been written for this clip yet',
+    )
+  }
+  return { buffer: await readFile(video.detectedPath), mimeType: 'video/mp4' }
 }
 
 export async function readTrackCrop(sessionId, trackId, admin) {

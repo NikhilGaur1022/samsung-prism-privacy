@@ -79,7 +79,50 @@ export default function Certificate() {
           </Card>
         )}
 
-        <Card className="mt-5">
+        {/* What actually happened to the material, first and in plain numbers.
+            It is the question the certificate exists to answer, and it used to be
+            absent from this page entirely: the counts were in the signed payload
+            and the reader was shown "Locations purged: 47", which describes our
+            bookkeeping rather than their photographs. */}
+        {payload.outcome && (
+          <div className="mt-5 grid grid-cols-2 gap-3">
+            <Card className="bg-danger-soft">
+              <p className="text-xs font-bold uppercase tracking-wide text-danger">Erased</p>
+              <p className="mt-1 text-2xl font-extrabold tracking-tight text-danger">
+                {payload.outcome.erased}
+              </p>
+              <p className="mt-0.5 text-[11px] font-medium text-danger/80">
+                destroyed — you were the only person in them
+              </p>
+            </Card>
+            <Card className="bg-warning-soft">
+              <p className="text-xs font-bold uppercase tracking-wide text-warning">Redacted</p>
+              <p className="mt-1 text-2xl font-extrabold tracking-tight text-warning">
+                {payload.outcome.redacted}
+              </p>
+              <p className="mt-0.5 text-[11px] font-medium text-warning/80">
+                kept for other participants, with you blurred out
+              </p>
+            </Card>
+          </div>
+        )}
+
+        {payload.outcome?.byMedium && Object.keys(payload.outcome.byMedium).length > 0 && (
+          <Card className="mt-3">
+            <p className="text-xs font-bold uppercase tracking-wide text-ink-faint">Breakdown</p>
+            <dl className="mt-2 space-y-1.5 text-xs">
+              {Object.entries(payload.outcome.byMedium).map(([noun, counts]) => (
+                <Row
+                  key={noun}
+                  label={`${noun.charAt(0).toUpperCase()}${noun.slice(1)}s`}
+                  value={`${counts.erased} erased · ${counts.redacted} redacted`}
+                />
+              ))}
+            </dl>
+          </Card>
+        )}
+
+        <Card className="mt-3">
           <div className="flex items-center gap-2">
             <ShieldCheck size={16} strokeWidth={1.75} className="text-brand" />
             <p className="text-xs font-bold uppercase tracking-wide text-ink-faint">
@@ -88,10 +131,29 @@ export default function Certificate() {
           </div>
           <dl className="mt-3 space-y-2 text-xs">
             <Row label="Subject reference" value={payload.subjectPseudonym} mono />
+            {/* Only present on a project-scoped certificate, and the first thing
+                worth knowing about one: this erased a project, not the account. */}
+            <Row label="Project" value={payload.project?.name} />
             <Row label="Request type" value={payload.dsarType} />
             <Row label="Requested" value={payload.requestedAt && new Date(payload.requestedAt).toLocaleString()} />
+            <Row
+              label="You confirmed"
+              value={payload.subjectConfirmedAt && new Date(payload.subjectConfirmedAt).toLocaleString()}
+            />
             <Row label="Completed" value={payload.completedAt && new Date(payload.completedAt).toLocaleString()} />
-            <Row label="Key destroyed" value={payload.keyDestroyedAt && new Date(payload.keyDestroyedAt).toLocaleString()} />
+            {/* A project erasure deliberately keeps the key — it protects the
+                same person's other projects. Rendering a bare "—" against "Key
+                destroyed" reads as something that failed, so say which it is. */}
+            <Row
+              label="Encryption key"
+              value={
+                payload.keyDestroyedAt
+                  ? `Destroyed ${new Date(payload.keyDestroyedAt).toLocaleString()}`
+                  : payload.keyDestroyed === false
+                    ? 'Kept — it protects your other projects'
+                    : null
+              }
+            />
             <Row label="Locations purged" value={payload.locationsCount} />
             <Row label="Issuer" value={payload.issuer} />
           </dl>

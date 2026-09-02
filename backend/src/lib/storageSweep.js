@@ -91,6 +91,48 @@ export async function subjectPathPrefixes(prisma, subjectId) {
 }
 
 /**
+ * The same check, narrowed to one project.
+ *
+ * A project erasure deliberately leaves the subject's other projects, their
+ * enrolments and their identity row intact, so `findSubjectResidue` is the wrong
+ * question to ask about it: it sweeps every prefix for the subject and would
+ * report the material this erasure was never meant to touch as residue.
+ *
+ * What IS residue at this scope: a file under one of THIS project's sessions that
+ * carries the subject's id in its name and that no row references — the
+ * per-person derivative cache (`<photoId>.person-<subjectId>.jpg`) being the case
+ * that motivated the whole-subject sweep in the first place.
+ *
+ * Returns evidence, never deletes. Same contract as findSubjectResidue.
+ */
+export async function findProjectResidue(prisma, subjectId, projectId) {
+  const sessions = await prisma.session.findMany({
+    where: { projectId },
+    select: { id: true },
+  })
+  if (sessions.length === 0) return []
+
+  const { referenced } = await loadReferencedPaths()
+  const prefixes = sessions.map((s) => normalise(`sessions/${s.id}`))
+
+  // Walk each session subtree rather than the whole root: a project is a small
+  // slice of a deployment's media, and the whole-root walk is the expensive part.
+  const files = []
+  for (const prefix of prefixes) {
+    files.push(...(await listStoredFiles({ prefix })))
+  }
+
+  return files.filter((file) => {
+    if (referenced.has(file)) return false
+    // Only files that name the subject. A stray unreferenced blob belonging to
+    // someone else in the same session is a real problem, but it is not THIS
+    // principal's erasure being incomplete, and refusing their certificate over
+    // it would be both wrong and unfixable by them.
+    return file.includes(subjectId)
+  })
+}
+
+/**
  * Files on disk that could belong to this subject and that no row references.
  *
  * This is the erasure-completeness check. It returns the evidence, it does not

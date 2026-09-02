@@ -547,6 +547,30 @@ const handlers = {
   },
 
   async L20(loc, job) {
+    // The detection overlay goes first, and it goes UNCONDITIONALLY — before the
+    // retention check below, not after it.
+    //
+    // Everything else in this handler is about a clip that other subjects are
+    // still entitled to. That reasoning does not reach this file: the overlay
+    // masks nobody, so it shows the erasing subject's face as plainly as the
+    // original does. Retaining it "because someone else is still linked" would
+    // leave a legible copy of the exact person who just erased, which is the one
+    // outcome erasure has to prevent.
+    //
+    // Nothing is lost by deleting it. It is a pre-tagging review aid derived
+    // entirely from the original, and re-running analysis regenerates it.
+    const asset = await prisma.videoAsset.findUnique({
+      where: { id: loc.objectId },
+      select: { detectedPath: true },
+    })
+    if (asset?.detectedPath) {
+      if (await fileExists(asset.detectedPath)) await shredFile(asset.detectedPath)
+      await prisma.videoAsset.updateMany({
+        where: { id: loc.objectId },
+        data: { detectedPath: null },
+      })
+    }
+
     // Mirrors L2 and L14. The original is the source every future re-blur is
     // built from, so it is retained while anyone else is still linked — a row
     // pointing at shredded bytes would make the clip permanently

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { AlertTriangle, Film, Loader2, ShieldCheck, Upload, Video } from 'lucide-react'
+import { AlertTriangle, Eye, Film, Loader2, ShieldCheck, Upload, Video } from 'lucide-react'
 
 import { listVideos, uploadVideo, mediaUrl } from '../lib/api'
 import StatusPill from './StatusPill'
@@ -37,10 +37,17 @@ const STATUS_LABEL = {
 }
 
 // Mirrors backend/src/lib/photoState.js — a clip is only finished when the
-// status says so AND a derivative actually exists. Two columns, because a
-// status can be set by a code path that crashed before writing the bytes.
+// status says so AND a derivative actually exists. Two facts, because a status
+// can be set by a code path that crashed before writing the bytes.
+//
+// Reads `hasRedacted`, NOT `redactedPath`. The list endpoint has never returned
+// a storage path — PUBLIC_SELECT withholds them deliberately — so the old check
+// was `Boolean(undefined)` on every row in production and no player was ever
+// offered, however well the redaction had gone. It passed review because the
+// unit test below mocked `redactedPath` into the fixture, so the assertion was
+// against a field the server does not send.
 function isFinished(video) {
-  return video.status === 'REDACTED' && Boolean(video.redactedPath)
+  return video.status === 'REDACTED' && Boolean(video.hasRedacted)
 }
 
 function describe(video) {
@@ -264,19 +271,48 @@ export default function SessionVideoPanel({ sessionId, canCapture, sessionStatus
 
                   {note && <p className="mt-2 text-xs font-medium text-ink-faint">{note}</p>}
 
-                  {finished ? (
-                    <>
+                  {/* Two different clips, shown at two different moments.
+
+                      The detection overlay appears as soon as analysis lands, so
+                      the operator can check the tracks BEFORE tagging — which is
+                      the only point where a merged track can still be corrected.
+                      The blurred copy appears once redaction has run, which is
+                      after tagging. Showing them side by side would invite the
+                      operator to treat the unmasked one as the deliverable. */}
+                  {video.hasDetected && canCapture ? (
+                    <div className="mt-3">
                       <video
                         controls
                         preload="metadata"
-                        className="mt-3 w-full rounded-lg bg-canvas"
+                        className="w-full rounded-lg bg-canvas"
+                        src={mediaUrl.detectedVideo(sessionId, video.id)}
+                      />
+                      <p className="mt-1.5 flex items-start gap-1.5 text-xs font-medium text-warning">
+                        <Eye size={13} strokeWidth={2.5} className="mt-0.5 shrink-0" />
+                        <span>
+                          Detection overlay — {video._count?.tracks ?? 0} track
+                          {(video._count?.tracks ?? 0) === 1 ? '' : 's'} found. Faces are
+                          <strong> not blurred</strong> here. Check that each box follows one
+                          person before tagging; this view is for you, not for release.
+                        </span>
+                      </p>
+                    </div>
+                  ) : null}
+
+                  {finished ? (
+                    <div className="mt-3">
+                      <video
+                        controls
+                        preload="metadata"
+                        className="w-full rounded-lg bg-canvas"
                         src={mediaUrl.redactedVideo(sessionId, video.id)}
                       />
                       <p className="mt-1.5 flex items-center gap-1.5 text-xs font-medium text-success">
                         <ShieldCheck size={13} strokeWidth={2.5} />
-                        Blurred copy. The original is never played here.
+                        Blurred copy — everyone not tagged to a consenting participant. The
+                        original is never played here.
                       </p>
-                    </>
+                    </div>
                   ) : null}
                 </li>
               )

@@ -833,6 +833,14 @@ model DsarRequest {
   slaDueAt      DateTime  @map("sla_due_at")
   internalDueAt DateTime? @map("internal_due_at")
 
+  // When the principal themselves pressed Erase, having reviewed the package of
+  // what they are about to lose. Null means they have not, and for an ERASE
+  // request that is a hard block on execution — see assertSubjectConfirmed().
+  //
+  // It is a timestamp rather than a boolean because "when did they agree" is the
+  // question an auditor asks, and a boolean cannot answer it.
+  subjectConfirmedAt DateTime? @map("subject_confirmed_at")
+
   resolutionNote  String?   @map("resolution_note")
   rejectionReason String?   @map("rejection_reason")
   closedAt        DateTime? @map("closed_at")
@@ -1468,6 +1476,16 @@ model VideoAsset {
   // Bystander-blurred derivative. The original at storagePath is never
   // overwritten — same rule as Photo.redactedPath and Recording.redactedPath.
   redactedPath String? @map("redacted_path")
+  // The detection-overlay derivative: boxes and track labels drawn over the
+  // frames, with nothing masked. It exists so an operator can see what the
+  // detector found BEFORE tagging, which is the only point at which a
+  // mis-grouped track can still be corrected.
+  //
+  // Every face in it is legible, so it is NOT a redacted derivative and must
+  // never be served under the rules that govern one — it follows storagePath's
+  // access rules, not redactedPath's. It is also deleted alongside the original
+  // (L20), never alongside the blurred copy.
+  detectedPath String? @map("detected_path")
 
   mimeType  String @default("video/mp4") @map("mime_type")
   sha256    String @default("")

@@ -39,7 +39,11 @@ scratchpad/
 *$py.class
 .venv/
 venv/
-ENV/
+# `ENV/` used to sit here, inherited from a stock Python .gitignore. On Windows
+# core.ignorecase is true, so it also matched `env/` — the folder holding the
+# environment templates — and silently kept them out of the repository. The
+# virtualenvs in this project are all `.venv`, so the rule protected nothing and
+# cost the one thing a reviewer needs first.
 
 /tmp/models/
 *.wav

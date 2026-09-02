@@ -75,6 +75,66 @@ async function collect(file) {
   return { ...file, buffer }
 }
 
+/**
+ * Sends a video, honouring HTTP range requests.
+ *
+ * Without this a `<video>` element is close to unusable. The browser opens a
+ * clip by asking for `bytes=0-` and expects a 206 telling it the total size; a
+ * flat 200 with the whole body means the seek bar cannot be dragged, currentTime
+ * cannot be set, and Chrome in particular will abandon a longer file part-way
+ * and render it as a clip that simply stops early — which reads as a truncated
+ * or broken encode rather than a server that never implemented ranges.
+ *
+ * The bytes are already decrypted and in memory by the time we get here, so this
+ * slices a buffer rather than streaming from disk. That is a real ceiling on file
+ * size, and it is the same ceiling `lib/storage.js` already imposes by sealing
+ * whole buffers — worth lifting, but not in this function alone.
+ */
+function sendVideo(req, res, buffer, mimeType) {
+  // Never cached: these are personal data and every read is an AccessEvent. A
+  // cached copy would be served again without one being written.
+  res.set('Cache-Control', 'private, no-store')
+  res.set('Accept-Ranges', 'bytes')
+  res.type(mimeType)
+
+  const header = req.headers.range
+  if (!header) {
+    res.set('Content-Length', String(buffer.length))
+    return res.send(buffer)
+  }
+
+  const unsatisfiable = () =>
+    res.status(416).set('Content-Range', `bytes */${buffer.length}`).end()
+
+  const match = /^bytes=(\d*)-(\d*)$/.exec(String(header).trim())
+  if (!match) return unsatisfiable()
+
+  const [, rawStart, rawEnd] = match
+  let start
+  let end
+  if (rawStart === '') {
+    // `bytes=-N` — the trailing N bytes. Used by players hunting for the moov
+    // atom at the end of a file that was not written with +faststart.
+    if (rawEnd === '') return unsatisfiable()
+    const count = Number(rawEnd)
+    if (!Number.isFinite(count) || count <= 0) return unsatisfiable()
+    start = Math.max(0, buffer.length - count)
+    end = buffer.length - 1
+  } else {
+    start = Number(rawStart)
+    end = rawEnd === '' ? buffer.length - 1 : Number(rawEnd)
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return unsatisfiable()
+    end = Math.min(end, buffer.length - 1)
+  }
+
+  if (start > end || start >= buffer.length || start < 0) return unsatisfiable()
+
+  res.status(206)
+  res.set('Content-Range', `bytes ${start}-${end}/${buffer.length}`)
+  res.set('Content-Length', String(end - start + 1))
+  return res.end(buffer.subarray(start, end + 1))
+}
+
 async function cleanup(files) {
   await Promise.all(files.filter(Boolean).map((f) => rmTmp(f.path, { force: true }).catch(() => {})))
 }
@@ -180,8 +240,35 @@ videoRoutes.get(
       const sessionId = uuid.parse(req.params.sessionId)
       const videoId = uuid.parse(req.params.videoId)
       const { buffer, mimeType } = await videoService.readRedactedVideo(sessionId, videoId, req.admin)
-      res.set('Cache-Control', 'private, no-store')
-      res.type(mimeType).send(buffer)
+      return sendVideo(req, res, buffer, mimeType)
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+// The detection overlay: boxes and track labels drawn over UNMASKED frames.
+//
+// captureRoles, not readRoles. Every other video read route is wider because it
+// serves the blurred derivative, and a data owner is entitled to that. This one
+// serves legible faces, so it is held to the same floor as capture itself — the
+// agent who owns the session, plus super_admin for break-glass. Widening it to
+// readRoles would hand a data owner the unredacted footage of their own project
+// through a route whose name suggests otherwise.
+videoRoutes.get(
+  '/:sessionId/videos/:videoId/detected',
+  captureRoles,
+  mediaReadLimiter,
+  // Its own object type, not REDACTED_VIDEO and not the original's. A DPO
+  // auditing "who saw an unmasked face" needs these reads to be filterable as
+  // exactly what they are: a distinct derivative in which nobody is blurred.
+  logAccess('DETECTED_VIDEO', (req) => req.params.videoId, { purpose: 'COLLECTION' }),
+  async (req, res, next) => {
+    try {
+      const sessionId = uuid.parse(req.params.sessionId)
+      const videoId = uuid.parse(req.params.videoId)
+      const { buffer, mimeType } = await videoService.readDetectedVideo(sessionId, videoId, req.admin)
+      return sendVideo(req, res, buffer, mimeType)
     } catch (err) {
       next(err)
     }

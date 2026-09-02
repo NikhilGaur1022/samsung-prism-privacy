@@ -5,6 +5,7 @@ import { requireAnyPrincipal } from '../../middleware/requireAnyPrincipal.js'
 import { requireRole } from '../../middleware/requireRole.js'
 import * as templateService from './consentTemplate.service.js'
 import { SUPPORTED_LOCALES } from './consentTemplate.service.js'
+import { dataTypeArraySchema } from '../../lib/dataTypeSchema.js'
 
 export const consentTemplateRoutes = Router()
 
@@ -15,7 +16,11 @@ const createSchema = z.object({
   name: z.string().trim().min(3).max(160),
   purpose: z.string().trim().min(20).max(2000),
   bodyByLocale: z.record(z.string(), z.string()),
-  dataTypes: z.array(z.string().trim().min(1)).min(1).optional(),
+  // Was `z.array(z.string().trim().min(1))` — any word at all. A §5 notice's data
+  // categories are the part a principal reads to decide, and the subset check
+  // that gates project approval compares them by exact string, so free text made
+  // "Face" and "face" two different categories.
+  dataTypes: dataTypeArraySchema.optional(),
   retention: z.string().trim().min(1).max(120).optional(),
   grievanceContact: z.string().trim().min(3).max(320).optional(),
   supersedesId: idSchema.optional(),

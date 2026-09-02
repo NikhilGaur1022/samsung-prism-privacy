@@ -4,6 +4,8 @@ import Sidebar from '../../components/Sidebar'
 import PageHeader from '../../components/PageHeader'
 import ListPanel from '../../components/ListPanel'
 import StatusPill from '../../components/StatusPill'
+import DataTypePicker from '../../components/DataTypePicker'
+import { formatDataTypes } from '../../lib/dataTypeLabel'
 import { listConsentTemplates, createConsentTemplate, publishConsentTemplate } from '../../lib/api'
 
 const STATUS_TONE = { DRAFT: 'neutral', PUBLISHED: 'success', SUPERSEDED: 'warning' }
@@ -17,7 +19,8 @@ function NewTemplateForm({ onCreated }) {
   const [purpose, setPurpose] = useState('')
   const [body, setBody] = useState('')
   const [retention, setRetention] = useState('')
-  const [dataTypes, setDataTypes] = useState('')
+  // An array of vocabulary codes now, not a comma-separated string.
+  const [dataTypes, setDataTypes] = useState([])
   const [grievanceContact, setGrievanceContact] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
@@ -32,16 +35,14 @@ function NewTemplateForm({ onCreated }) {
         purpose: purpose.trim(),
         bodyByLocale: { en: body.trim() },
         retention: retention.trim() || undefined,
-        dataTypes: dataTypes.trim()
-          ? dataTypes.split(',').map((t) => t.trim()).filter(Boolean)
-          : undefined,
+        dataTypes: dataTypes.length > 0 ? dataTypes : undefined,
         grievanceContact: grievanceContact.trim() || undefined,
       })
       setName('')
       setPurpose('')
       setBody('')
       setRetention('')
-      setDataTypes('')
+      setDataTypes([])
       setGrievanceContact('')
       setOpen(false)
       onCreated()
@@ -102,18 +103,20 @@ function NewTemplateForm({ onCreated }) {
             placeholder="e.g. 90 days after project close"
           />
         </label>
-        <label className="mt-4 block text-sm font-semibold text-ink">
-          Data types disclosed (comma-separated)
-          <input
-            className={FIELD_CLASS}
-            value={dataTypes}
-            onChange={(e) => setDataTypes(e.target.value)}
-            placeholder="e.g. photo, face, hands"
-          />
-          <span className="mt-1 block text-xs font-medium text-ink-faint">
-            A project can only be submitted for approval if its data types are a subset of this list.
-          </span>
-        </label>
+        {/* A fieldset, not a label: a label pointing at a group of chip buttons
+            has no single control to point at, and clicking its text would
+            activate whichever one happened to be first. */}
+        <fieldset className="mt-4 block">
+          <legend className="text-sm font-semibold text-ink">Data types disclosed</legend>
+          <p className="mt-1 text-xs font-medium text-ink-faint">
+            These are the categories the principal reads on the notice before consenting.
+            Pick from the list so a project declaring the same category matches this one
+            exactly — approval compares the two literally.
+          </p>
+          <div className="mt-3">
+            <DataTypePicker value={dataTypes} onChange={setDataTypes} />
+          </div>
+        </fieldset>
         <label className="mt-4 block text-sm font-semibold text-ink">
           Grievance contact
           <input
@@ -204,7 +207,7 @@ export default function ConsentTemplates() {
                     {t.publishedAt && ` · published ${new Date(t.publishedAt).toLocaleDateString()}`}
                   </p>
                   <p className="mt-0.5 truncate text-xs text-ink-faint">
-                    {t.dataTypes?.length ? t.dataTypes.join(', ') : 'no data types disclosed'}
+                    {formatDataTypes(t.dataTypes)}
                   </p>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">

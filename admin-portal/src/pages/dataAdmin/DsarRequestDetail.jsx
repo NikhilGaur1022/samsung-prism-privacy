@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { ArrowLeft, PackageCheck, Lock, Search, Play } from 'lucide-react'
+import { ArrowLeft, Clock, PackageCheck, Lock, Search, Play } from 'lucide-react'
 import Sidebar from '../../components/Sidebar'
 import PageHeader from '../../components/PageHeader'
 import StatusPill from '../../components/StatusPill'
@@ -172,6 +172,17 @@ export default function DsarRequestDetail() {
   const [request, setRequest] = useState(null)
   const [error, setError] = useState(null)
   const [notice, setNotice] = useState(null)
+
+  // The server refuses execution for an unconfirmed ERASE. Mirrored here so the
+  // control is disabled with a reason rather than failing on click.
+  //
+  // Declared AFTER `request`, not next to the other role booleans above it: those
+  // read `roleKey`, which arrives from a different hook, while this reads the
+  // `request` state declared on the line above. Placed with them it referenced
+  // `request` in its temporal dead zone and threw "Cannot access 'request' before
+  // initialization" — which the error boundary caught, so the whole DSAR detail
+  // screen rendered as a crash card instead of a request.
+  const awaitingSubject = request?.type === 'ERASE' && !request?.subjectConfirmedAt
 
   const [filters, setFilters] = useState({ origin: '', type: '', includeDeleted: false })
   const [page, setPage] = useState(null)
@@ -479,6 +490,18 @@ export default function DsarRequestDetail() {
               {STATUS_GUIDANCE[request.status] ?? ''}
             </p>
 
+            {/* Said plainly, next to the disabled button. The operator's job here
+                is to wait, and an unexplained greyed-out control is indistinguishable
+                from a permissions problem or a bug. */}
+            {awaitingSubject && (
+              <p className="mt-2 flex max-w-2xl items-start gap-1.5 rounded-lg bg-warning-soft p-2.5 text-xs font-semibold text-warning">
+                <Clock size={13} className="mt-0.5 shrink-0" />
+                Waiting for the data principal. They are reviewing the photographs this
+                erasure covers and must press Erase themselves before anything is destroyed
+                — approval alone is not enough for a §12(3) request.
+              </p>
+            )}
+
             {(canRunDiscovery || canExecute) && (
               <div className="flex shrink-0 items-center gap-2">
                 {canRunDiscovery && DISCOVERY_STATUSES.includes(request.status) && (
@@ -495,8 +518,21 @@ export default function DsarRequestDetail() {
                 {canExecute && EXECUTE_STATUSES.includes(request.status) && (
                   <button
                     type="button"
-                    disabled={busy}
+                    // Disabled rather than left to fail: the server refuses this
+                    // with a 409 until the principal has reviewed what the
+                    // erasure covers and pressed Erase themselves. An operator
+                    // who can click it learns that by being told no, which reads
+                    // as a broken button rather than a deliberate gate.
+                    //
+                    // Only ERASE is gated. A WITHDRAWAL_ERASURE is raised BY the
+                    // withdrawal, so the principal has already instructed it.
+                    disabled={busy || awaitingSubject}
                     onClick={runExecute}
+                    title={
+                      awaitingSubject
+                        ? 'Waiting for the data principal to confirm the erasure'
+                        : undefined
+                    }
                     className="inline-flex items-center gap-1.5 rounded-lg bg-brand px-3 py-1.5 text-xs font-bold text-white disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
                   >
                     <Play size={13} /> Execute request

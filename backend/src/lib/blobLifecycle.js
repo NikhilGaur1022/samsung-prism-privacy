@@ -129,7 +129,7 @@ export const PATH_COLUMNS = Object.freeze([
   { model: 'subjectFaceEnrollment', fields: ['imagePath'] },
   { model: 'subjectVoiceEnrollment', fields: ['audioPath'] },
   { model: 'recording', fields: ['storagePath', 'redactedPath'] },
-  { model: 'videoAsset', fields: ['storagePath', 'redactedPath'] },
+  { model: 'videoAsset', fields: ['storagePath', 'redactedPath', 'detectedPath'] },
   { model: 'videoFaceTrack', fields: ['cropPath'] },
   { model: 'textDocument', fields: ['storagePath', 'redactedPath'] },
   // The last three do not own their blobs — they point at objects owned above.

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import Sidebar from '../../components/Sidebar'
 import PageHeader from '../../components/PageHeader'
+import DataTypePicker from '../../components/DataTypePicker'
 import { listProjects, updateProject, submitProject, listConsentTemplates } from '../../lib/api'
 import { CheckCircle2, Loader2 } from 'lucide-react'
 
@@ -40,7 +41,10 @@ export default function DataRequirements() {
     setForm({
       purpose: project.purpose ?? '',
       retention: project.retention ?? '',
-      dataTypes: Array.isArray(project.dataTypes) ? project.dataTypes.join(', ') : '',
+      // Kept as an array end to end. It used to be joined into a string for the
+      // input and split back on save, which silently rewrote any stored value
+      // containing a comma.
+      dataTypes: Array.isArray(project.dataTypes) ? project.dataTypes : [],
       consentTemplateId: project.consentTemplateId ?? '',
     })
     setMessage(null)
@@ -55,9 +59,7 @@ export default function DataRequirements() {
       await updateProject(project.id, {
         purpose: form.purpose.trim(),
         retention: form.retention.trim() || undefined,
-        dataTypes: form.dataTypes.trim()
-          ? form.dataTypes.split(',').map((t) => t.trim()).filter(Boolean)
-          : undefined,
+        dataTypes: form.dataTypes.length > 0 ? form.dataTypes : undefined,
         consentTemplateId: form.consentTemplateId || undefined,
       })
       setMessage('Saved.')
@@ -153,14 +155,19 @@ export default function DataRequirements() {
                     />
                   </label>
 
-                  <label className="mt-4 block text-sm font-semibold text-ink">
-                    Data types (comma-separated)
-                    <input
-                      className={FIELD_CLASS}
-                      value={form.dataTypes}
-                      onChange={(e) => setForm({ ...form, dataTypes: e.target.value })}
-                    />
-                  </label>
+                  <fieldset className="mt-4 block">
+                    <legend className="text-sm font-semibold text-ink">Data types</legend>
+                    <p className="mt-1 text-xs font-medium text-ink-faint">
+                      Submitting for approval fails unless every category here is also on
+                      the selected consent notice.
+                    </p>
+                    <div className="mt-3">
+                      <DataTypePicker
+                        value={form.dataTypes}
+                        onChange={(next) => setForm({ ...form, dataTypes: next })}
+                      />
+                    </div>
+                  </fieldset>
 
                   <label className="mt-4 block text-sm font-semibold text-ink">
                     Consent notice

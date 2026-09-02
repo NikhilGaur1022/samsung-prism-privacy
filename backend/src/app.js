@@ -27,6 +27,7 @@ import { handoffRoutes } from './modules/handoff/handoff.routes.js'
 import { meRoutes } from './modules/me/me.routes.js'
 import { joinRoutes, sessionInviteRoutes } from './modules/join/join.routes.js'
 import { consentTemplateRoutes } from './modules/consentTemplates/consentTemplate.routes.js'
+import { dataTypeRoutes } from './modules/dataTypes/dataType.routes.js'
 import { auditRoutes, accessEventRoutes } from './modules/audit/audit.routes.js'
 import { provenanceRoutes } from './modules/provenance/provenance.routes.js'
 import { dsarRoutes } from './modules/dsar/dsar.routes.js'
@@ -52,6 +53,7 @@ const ALL_ROUTERS = [
   consentRoutes,
   consentTemplateRoutes,
   dashboardRoutes,
+  dataTypeRoutes,
   documentRoutes,
   dsarRoutes,
   opsRoutes,
@@ -182,6 +184,8 @@ export function createApp() {
   app.use('/api/v1/subjects', subjectRoutes)
   app.use('/api/v1/projects', projectRoutes)
   app.use('/api/v1/consent-templates', consentTemplateRoutes)
+  // The shared data-type vocabulary both portals pick from.
+  app.use('/api/v1/data-types', dataTypeRoutes)
   app.use('/api/v1/dashboard', dashboardRoutes)
   // Queue and pipeline health for operators. Read-only apart from a manual
   // reaper trigger; see modules/ops for why the DPO is admitted.

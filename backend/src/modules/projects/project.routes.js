@@ -5,6 +5,7 @@ import { requireRole } from '../../middleware/requireRole.js'
 import * as projectService from './project.service.js'
 import * as projectExportService from './projectExport.service.js'
 import { exportLimiter, mediaReadLimiter } from '../../middleware/rateLimiter.js'
+import { dataTypeArraySchema } from '../../lib/dataTypeSchema.js'
 
 export const projectRoutes = Router()
 
@@ -27,7 +28,11 @@ const createSchema = z.object({
   name: z.string().trim().min(3).max(160),
   purpose: z.string().trim().min(20).max(2000),
   retention: z.string().trim().min(1).max(120).optional(),
-  dataTypes: z.array(z.string().trim().min(1)).min(1).optional(),
+  // Same schema the consent-template router uses. assertPurposeLimitation
+  // compares these two lists by exact string, so they have to be normalised by
+  // the same rules or a project is refused against a notice that discloses
+  // exactly what it asked for, spelled differently.
+  dataTypes: dataTypeArraySchema.optional(),
   riskLevel: z.enum(['LOW', 'MEDIUM', 'HIGH']).optional(),
   consentTemplateId: z.string().uuid().optional(),
 })

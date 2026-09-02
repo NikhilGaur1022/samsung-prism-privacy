@@ -263,6 +263,22 @@ test('analysis produces tracks that cluster with photo faces', async (t) => {
 
   const after = await prisma.videoAsset.findUnique({ where: { id: video.id } })
   assert.equal(after.status, 'ANALYZED')
+
+  // The detection overlay, written in the same pass.
+  //
+  // It is what the operator watches before tagging: a single JPEG crop per track
+  // cannot show whether the tracker held one face across an occlusion or merged
+  // two people into one track, and a merged track tagged to a consenting subject
+  // leaves BOTH of them unblurred in the release.
+  assert.ok(after.detectedPath, 'analysis wrote no detection overlay')
+  assert.ok(
+    !after.detectedPath.includes('/redacted/'),
+    'the overlay masks nobody and must not be filed under a path that says it does',
+  )
+  const overlay = await readFile(after.detectedPath)
+  assert.ok(overlay.length > 0, 'the detection overlay is empty')
+  fx.written.push(after.detectedPath)
+
   fx.written.push(...persisted.map((r) => r.cropPath).filter(Boolean))
 })
 

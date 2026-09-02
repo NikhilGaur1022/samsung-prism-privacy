@@ -62,6 +62,9 @@ const REQUEST_FIELDS = {
   resolutionNote: true,
   rejectionReason: true,
   closedAt: true,
+  // Both portals need it: the admin workspace to explain why Execute is refused,
+  // the principal's own screen to know whether they still have to press Erase.
+  subjectConfirmedAt: true,
   createdAt: true,
   updatedAt: true,
 }
@@ -424,12 +427,40 @@ export async function attachEvidence(requestId, { kind, label, payload }, admin)
  * call the same idempotent executor, so an operator hitting execute twice cannot
  * double-delete.
  */
+/**
+ * The principal's own confirmation, required before anything is destroyed.
+ *
+ * DPO approval says the request is lawful and in scope. It does not say the
+ * principal still wants it, having seen what it covers — and an erasure is the
+ * one action in this system that cannot be undone if they did not.
+ *
+ * The flow: after approval the principal is shown every frame they appear in for
+ * that project, with every other face redacted and their own left visible, and
+ * presses Erase. Only then does this pass.
+ *
+ * WITHDRAWAL_ERASURE is exempt and must stay exempt. lib/revocation.js raises it
+ * *because* the principal withdrew consent — the withdrawal is the instruction,
+ * already made by them. Demanding a second confirmation would leave every
+ * automatic withdrawal executable by nobody and closable by nobody.
+ */
+function assertSubjectConfirmed(request) {
+  if (request.type !== 'ERASE') return
+  if (request.subjectConfirmedAt) return
+  throw new ApiError(
+    409,
+    'Cannot execute: the data principal has not confirmed this erasure. They are shown the material it covers and must press Erase themselves before anything is destroyed.',
+    { needsSubjectConfirmation: true },
+  )
+}
+
 export async function execute(requestId, admin, { inline = true } = {}) {
   const request = await prisma.dsarRequest.findUnique({ where: { id: requestId } })
   if (!request) throw new ApiError(404, 'DSAR request not found')
   if (!['DISCOVERY', 'EXECUTING'].includes(request.status)) {
     throw new ApiError(409, `Execution requires the request to be in DISCOVERY or EXECUTING, not ${request.status}`)
   }
+
+  assertSubjectConfirmed(request)
 
   if (request.status === 'DISCOVERY') assertTransition('DISCOVERY', 'EXECUTING')
   await prisma.dsarRequest.update({ where: { id: requestId }, data: { status: 'EXECUTING' } })
@@ -441,12 +472,27 @@ export async function execute(requestId, admin, { inline = true } = {}) {
     const finished = await executePurgeJob(job.id, { admin })
 
     if (finished.status === 'COMPLETED') {
-      // A project erasure is not certifiable and must not be: the certificate
-      // attests that everything held about a person is gone, and here the person
-      // and their other projects remain. The completed purge job is the proof at
-      // this scope — see assertClosableErasure().
-      const certificate =
-        finished.scope === 'PROJECT' ? null : await issueCertificate(finished.id, admin)
+      // Both scopes are certifiable now, under different certificate types:
+      // DPDP_ERASURE for a whole-subject purge, DPDP_PROJECT_ERASURE for one
+      // project's worth. The project certificate names the project, records that
+      // the per-subject key was deliberately kept, and carries the erased/redacted
+      // counts — see issueCertificate().
+      //
+      // A failure to certify must not lose the purge. The data is already gone;
+      // reporting the whole execution as failed would tell the operator to run it
+      // again, against rows that no longer exist.
+      let certificate = null
+      let certificateError = null
+      try {
+        certificate = await issueCertificate(finished.id, admin)
+      } catch (err) {
+        certificateError = err.message
+        logger.error(
+          { err, purgeJobId: finished.id, dsarRequestId: requestId, scope: finished.scope },
+          'purge completed but the certificate could not be issued — the erasure stands, the proof does not',
+        )
+      }
+
       const updated = await prisma.dsarRequest.update({
         where: { id: requestId },
         data: { status: 'REVIEW' },
@@ -455,7 +501,8 @@ export async function execute(requestId, admin, { inline = true } = {}) {
       return {
         request: withSla(updated),
         purgeJob: finished,
-        ...(certificate ? { certificateId: certificate.id } : { scope: 'PROJECT' }),
+        scope: finished.scope,
+        ...(certificate ? { certificateId: certificate.id } : { certificateError }),
       }
     }
 
@@ -485,14 +532,15 @@ export async function execute(requestId, admin, { inline = true } = {}) {
 /**
  * The proof an erasure needs before it can be closed, at the scope it was run.
  *
- * A whole-subject erasure needs a signed deletion certificate. A project erasure
- * cannot have one — the certificate asserts that everything held about a person
- * is gone, and a §6(4) withdrawal from one project leaves the person, their
- * identity row, their key and their other projects deliberately intact. Its
- * proof is a purge job that completed at PROJECT scope.
+ * A whole-subject erasure needs a signed deletion certificate.
  *
- * Requiring a certificate for both would deadlock every withdrawal: executable
- * and never closable.
+ * A project erasure now normally has one too — DPDP_PROJECT_ERASURE, which names
+ * the project and records that the per-subject key was deliberately kept. But the
+ * floor here stays the COMPLETED purge job, not the certificate, and that is not
+ * an oversight: the certificate is issued after the data is already destroyed, so
+ * a signing failure would otherwise leave a request whose material is gone and
+ * which can never be closed. The erasure is the fact; the certificate is the
+ * evidence of it, and losing the evidence must not un-finish the work.
  */
 async function assertClosableErasure(request) {
   if (!['ERASE', 'WITHDRAWAL_ERASURE'].includes(request.type)) return

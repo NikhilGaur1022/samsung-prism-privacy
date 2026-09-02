@@ -297,6 +297,47 @@ export function createDsarPackageToken(id) {
   return request(`/api/v1/me/dsar/${id}/package-token`, { method: 'POST' })
 }
 
+// --- Erasure review (before anything is destroyed) ----------------------------
+//
+// What an erasure actually covers, shown to the person asking for it. Every frame
+// they appear in for the project, rendered with THEIR face visible and every other
+// face blurred — the inverse of what the erasure itself produces, because the
+// other people in those frames never asked for anything and must not be disclosed.
+//
+// Reachable only for an ERASE request that belongs to the caller and has been
+// through discovery; the server re-checks all of that on every call.
+
+export function getErasurePackage(id) {
+  return request(`/api/v1/me/dsar/${id}/erasure-package`)
+}
+
+// No token needed, unlike the §11 package: this is a review of the caller's own
+// pending request rather than a one-shot legal deliverable, and it stays readable
+// until they decide. The route still writes an AccessEvent per frame.
+export const erasurePhotoUrl = (id, photoId) =>
+  `${BASE_URL}/api/v1/me/dsar/${id}/erasure-package/photos/${photoId}`
+
+export async function downloadErasurePackage(id) {
+  const res = await fetch(`${BASE_URL}/api/v1/me/dsar/${id}/erasure-package.zip`, {
+    credentials: 'include',
+  })
+  if (!res.ok) {
+    const body = await res.json().catch(() => null)
+    const error = new Error(body?.error ?? `Download failed with status ${res.status}`)
+    error.status = res.status
+    throw error
+  }
+  const disposition = res.headers.get('Content-Disposition') ?? ''
+  const filename = /filename="?([^";]+)"?/.exec(disposition)?.[1] ?? 'erasure-review.zip'
+  return { blob: await res.blob(), filename }
+}
+
+// The irreversible one. Nothing is destroyed until this resolves — and after it,
+// the operator's Execute stops being refused.
+export function confirmErasure(id) {
+  return request(`/api/v1/me/dsar/${id}/confirm-erasure`, { method: 'POST' })
+}
+
 // --- Photo summary (DPDP §11) -------------------------------------------------
 // Counts, purposes and consent state grouped by project — never the photographs
 // themselves. getMyRedactedPhoto used to fetch frame bytes straight from a

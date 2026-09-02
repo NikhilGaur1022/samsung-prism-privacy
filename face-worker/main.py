@@ -20,7 +20,18 @@ app = FastAPI(title="Prism Face Worker")
 
 # buffalo_l = SCRFD detector + ArcFace (512-d) recogniser. CPU is fine here: this
 # runs as a batch pass after a session ends, not in any request path.
-face_app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
+#
+# `root` is passed explicitly. Without it insightface ignores INSIGHTFACE_HOME and
+# resolves to ~/.insightface inside the container — which is the container's own
+# writable layer, not the face_models volume this service shares with
+# video-worker. The pack is ~300MB (601MB with the zip it keeps), so every
+# `docker compose up` that recreated the container re-downloaded it, and on a slow
+# link the service sat in startup for minutes while /analyze calls against it
+# failed and parked their clips DEFERRED. video-worker hit the identical bug.
+INSIGHTFACE_ROOT = os.getenv("INSIGHTFACE_HOME", "~/.insightface")
+face_app = FaceAnalysis(
+    name="buffalo_l", root=INSIGHTFACE_ROOT, providers=["CPUExecutionProvider"]
+)
 face_app.prepare(ctx_id=-1, det_size=(640, 640))
 
 # Blur strength for bystander redaction. Deliberately irreversible: a large kernel

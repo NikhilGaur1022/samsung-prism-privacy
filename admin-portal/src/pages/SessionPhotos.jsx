@@ -4,6 +4,7 @@ import { AlertTriangle, ArrowLeft, FileText, ImageOff, Loader2, Mic, ShieldCheck
 import Sidebar from '../components/Sidebar'
 import PageHeader from '../components/PageHeader'
 import StatusPill from '../components/StatusPill'
+import PhotoLightbox from '../components/PhotoLightbox'
 import { listSessionPhotos, mediaUrl } from '../lib/api'
 
 // What this session holds besides frames. Keyed off the counts rather than off
@@ -55,6 +56,8 @@ export default function SessionPhotos() {
   const navigate = useNavigate()
   const [data, setData] = useState(null)
   const [error, setError] = useState(null)
+  // Index into `viewable`, or null when the viewer is closed.
+  const [lightbox, setLightbox] = useState(null)
 
   const load = useCallback(() => {
     setError(null)
@@ -184,7 +187,7 @@ export default function SessionPhotos() {
               </div>
             ) : (
               <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-                {viewable.map((photo) => (
+                {viewable.map((photo, i) => (
                   <figure
                     key={photo.id}
                     className="overflow-hidden rounded-card bg-surface shadow-card"
@@ -193,16 +196,30 @@ export default function SessionPhotos() {
                         frame. Twelve 2816x1584 JPEGs to fill twelve 250px tiles
                         was several megabytes to paint a few hundred kilobytes
                         of pixels, and on anything slower than localhost it read
-                        as a broken gallery rather than a loading one. */}
-                    <img
-                      src={mediaUrl.redactedThumb(sessionId, photo.id)}
-                      alt="Redacted collection frame"
-                      loading="lazy"
-                      decoding="async"
-                      width="480"
-                      height="480"
-                      className="aspect-square w-full bg-canvas object-cover"
-                    />
+                        as a broken gallery rather than a loading one.
+
+                        4:3 rather than 1:1, and a button rather than a bare img.
+                        A square tile crops a 16:9 capture frame to roughly three
+                        quarters of its width, and there was nothing to click —
+                        so the only place in the product where a frame could be
+                        seen whole was the tagging screen, and this oversight
+                        view showed permanently cropped evidence. */}
+                    <button
+                      type="button"
+                      onClick={() => setLightbox(i)}
+                      aria-label={`Open frame ${i + 1} of ${viewable.length} full size`}
+                      className="block w-full cursor-zoom-in focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+                    >
+                      <img
+                        src={mediaUrl.redactedThumb(sessionId, photo.id)}
+                        alt="Redacted collection frame"
+                        loading="lazy"
+                        decoding="async"
+                        width="480"
+                        height="360"
+                        className="aspect-[4/3] w-full bg-canvas object-contain transition-transform duration-150 hover:scale-[1.02]"
+                      />
+                    </button>
                     <figcaption className="flex items-center justify-between gap-2 px-3 py-2">
                       <span className="truncate text-[11px] font-semibold text-ink-faint">
                         {new Date(photo.createdAt).toLocaleString()}
@@ -215,6 +232,18 @@ export default function SessionPhotos() {
                 ))}
               </div>
             )}
+
+            {/* Full size means the full-size REDACTED derivative — mediaUrl.redacted,
+                never mediaUrl.photo. This page is the data admin's oversight view
+                and carries no basis for an unmasked frame. */}
+            <PhotoLightbox
+              items={viewable}
+              index={lightbox}
+              onClose={() => setLightbox(null)}
+              onIndex={setLightbox}
+              srcFor={(photo) => mediaUrl.redacted(sessionId, photo.id)}
+              captionFor={(photo) => new Date(photo.createdAt).toLocaleString()}
+            />
           </>
         )}
       </main>

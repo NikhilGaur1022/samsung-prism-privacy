@@ -23,7 +23,11 @@ const SESSION_TYPES = [
     value: 'VIDEO',
     label: 'Video',
     Icon: Video,
-    blurb: 'Face tracking and blurring across frames. Clips must be silent.',
+    // Was "Clips must be silent." — true when a soundtrack was grounds for
+    // refusing the upload, and misleading now that it is removed on ingest. An
+    // agent who reads the old wording re-shoots footage that would have been
+    // accepted.
+    blurb: 'Face tracking and blurring across frames. Any audio is removed on upload.',
   },
   {
     value: 'AUDIO',

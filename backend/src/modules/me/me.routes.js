@@ -9,6 +9,13 @@ import * as dsarService from '../dsar/dsar.service.js'
 import { downloadPackage, issuePackageToken } from '../dsar/export.service.js'
 import { getCertificateForRequest, verifyCertificate } from '../dsar/certificate.service.js'
 import { getSubjectTimeline } from '../dsar/timeline.service.js'
+import {
+  listErasurePackage,
+  readErasurePackagePhoto,
+  buildErasurePackageZip,
+  confirmErasure,
+} from '../dsar/erasurePackage.service.js'
+import { mediaReadLimiter } from '../../middleware/rateLimiter.js'
 
 // Subject-facing account state that isn't enrollment CRUD. Shares the /api/v1/me
 // mount with selfEnrollmentRoutes; every handler takes the subject id from the
@@ -185,6 +192,75 @@ meRoutes.post('/dsar/:requestId/package-token', async (req, res, next) => {
   try {
     const requestId = z.string().uuid().parse(req.params.requestId)
     res.json(await issuePackageToken(requestId, req.subject.masterUserId))
+  } catch (err) {
+    next(err)
+  }
+})
+
+// --- Erasure review -------------------------------------------------------
+//
+// What the principal is shown before they destroy anything: every frame they
+// appear in for the project being erased, with every OTHER face blurred and their
+// own left visible. Mounted here rather than under /dsar because the audience is
+// the principal and the authorisation is their own session — the admin router
+// serves operators and would apply the wrong role floor.
+//
+// The literal segments below sit before nothing ambiguous, but they are kept
+// together and after /timeline for the same reason that one is: a bare
+// /:requestId/:something route would otherwise swallow them.
+
+meRoutes.get('/dsar/:requestId/erasure-package', async (req, res, next) => {
+  try {
+    const requestId = z.string().uuid().parse(req.params.requestId)
+    res.json(await listErasurePackage(requestId, req.subject.masterUserId))
+  } catch (err) {
+    next(err)
+  }
+})
+
+// One frame, rendered with everyone else blurred. Rate-limited like every other
+// media read, and it writes its own AccessEvent before decrypting anything.
+meRoutes.get('/dsar/:requestId/erasure-package/photos/:photoId', mediaReadLimiter, async (req, res, next) => {
+  try {
+    const requestId = z.string().uuid().parse(req.params.requestId)
+    const photoId = z.string().uuid().parse(req.params.photoId)
+    const { buffer, mimeType } = await readErasurePackagePhoto(
+      requestId,
+      req.subject.masterUserId,
+      photoId,
+      { req },
+    )
+    res.set('Cache-Control', 'private, no-store')
+    res.type(mimeType).send(buffer)
+  } catch (err) {
+    next(err)
+  }
+})
+
+// The same set as a ZIP. Built on demand — see buildErasurePackageZip for why it
+// is deliberately not cached.
+meRoutes.get('/dsar/:requestId/erasure-package.zip', mediaReadLimiter, async (req, res, next) => {
+  try {
+    const requestId = z.string().uuid().parse(req.params.requestId)
+    const { buffer, filename } = await buildErasurePackageZip(
+      requestId,
+      req.subject.masterUserId,
+      { req },
+    )
+    res.set('Content-Disposition', `attachment; filename="${filename}"`)
+    res.set('Cache-Control', 'private, no-store')
+    res.type('application/zip').send(buffer)
+  } catch (err) {
+    next(err)
+  }
+})
+
+// The principal presses Erase. This is the authorisation for the destruction that
+// follows; without it POST /dsar/:id/execute refuses.
+meRoutes.post('/dsar/:requestId/confirm-erasure', async (req, res, next) => {
+  try {
+    const requestId = z.string().uuid().parse(req.params.requestId)
+    res.json(await confirmErasure(requestId, req.subject.masterUserId))
   } catch (err) {
     next(err)
   }

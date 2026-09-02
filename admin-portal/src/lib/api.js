@@ -484,6 +484,15 @@ export function removeProjectAssignment(projectId, adminId) {
   return request(`/api/v1/projects/${projectId}/assignments/${adminId}`, { method: 'DELETE' })
 }
 
+// --- Data types ----------------------------------------------------------------
+
+// The shared vocabulary for consent notices and projects. Fetched rather than
+// bundled: the DPO authoring a notice and the owner declaring a project must see
+// identical options, or purpose limitation refuses a project over a spelling.
+export function listDataTypes() {
+  return request('/api/v1/data-types')
+}
+
 // --- Consent templates ---------------------------------------------------------
 
 export function listConsentTemplates(params = {}) {
@@ -903,6 +912,13 @@ export const mediaUrl = {
   // shown to someone with no lawful basis for it.
   redactedVideo: (sessionId, videoId) =>
     `${BASE_URL}/api/v1/sessions/${sessionId}/videos/${videoId}/redacted`,
+  // The detection overlay — boxes and track labels over UNMASKED frames. It is
+  // the one video surface that shows faces, and it exists for the tagging step,
+  // where an operator has to see whether a track held one person or merged two.
+  // The route behind it admits only the session's own agent (and super_admin),
+  // so a data owner opening this gets a 403 rather than the footage.
+  detectedVideo: (sessionId, videoId) =>
+    `${BASE_URL}/api/v1/sessions/${sessionId}/videos/${videoId}/detected`,
   videoTrackCrop: (sessionId, trackId) =>
     `${BASE_URL}/api/v1/sessions/${sessionId}/video-tracks/${trackId}/crop`,
 }

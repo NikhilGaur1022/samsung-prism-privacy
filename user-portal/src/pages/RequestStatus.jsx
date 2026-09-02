@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { ChevronRight, FileText } from 'lucide-react'
 import TopBar from '../components/TopBar'
 import Card from '../components/Card'
 import Badge from '../components/Badge'
 import IconChip from '../components/IconChip'
+import ErasureReview from '../components/ErasureReview'
 import { getMyDsarRequest, getMyDsarTimeline, listMyDsarRequests } from '../lib/api'
 
 // The three coarse stages. The seven-state internal enum describes our workflow,
@@ -103,13 +104,20 @@ function RequestDetail({ id }) {
   const [timeline, setTimeline] = useState(null)
   const [error, setError] = useState(null)
 
-  useEffect(() => {
+  // Extracted so the erasure review can re-run it after the principal confirms:
+  // confirming changes the request's own state, and leaving the page showing the
+  // pre-confirmation view makes the button look like it did nothing.
+  const load = useCallback(() => {
     getMyDsarRequest(id).then(setRequest).catch(setError)
     // Non-fatal on purpose: the request detail is the answer to "what is
     // happening", and losing the milestone list must not blank the page that
     // carries the rejection reason and the SLA clock.
     getMyDsarTimeline(id).then(setTimeline).catch(() => setTimeline({ entries: [] }))
   }, [id])
+
+  useEffect(() => {
+    load()
+  }, [load])
 
   if (error) {
     return (
@@ -172,6 +180,19 @@ function RequestDetail({ id }) {
             <p className="text-xs font-bold uppercase tracking-wide text-danger">Rejected</p>
             <p className="mt-1 text-sm font-medium text-danger">{request.rejectionReason}</p>
           </Card>
+        )}
+
+        {/* The review-and-confirm step. Only an ERASE reaches it: a withdrawal is
+            self-confirming (withdrawing consent IS the instruction), and an
+            access request is served through the §11 package instead.
+
+            Rendered from DISCOVERY onward and kept visible afterwards, because
+            "what did I agree to" stays a fair question once it is done. The
+            component itself handles the not-ready-yet case. */}
+        {request.type === 'ERASE' && !rejected && request.status !== 'RECEIVED' && request.status !== 'TRIAGE' && (
+          <div className="mt-3">
+            <ErasureReview requestId={request.id} onConfirmed={load} />
+          </div>
         )}
 
         {closed && request.resolutionNote && (

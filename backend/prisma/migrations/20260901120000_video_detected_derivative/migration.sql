@@ -1,0 +1,13 @@
+-- The detection-overlay derivative for a clip: boxes and track labels drawn
+-- over the frames, with nothing masked.
+--
+-- Added because the tagging step asked an operator to confirm which track is
+-- which from a single JPEG crop per track. A crop shows a face; it does not show
+-- whether the tracker held that face across an occlusion or silently merged two
+-- people into one track. That is only visible in motion, and there was no
+-- derivative in which to see it.
+--
+-- It is NOT a redacted copy. Every face in it is legible, so it inherits
+-- storage_path's access rules, not redacted_path's, and it is shredded with the
+-- original rather than with the blurred derivative.
+ALTER TABLE "video_assets" ADD COLUMN IF NOT EXISTS "detected_path" TEXT;

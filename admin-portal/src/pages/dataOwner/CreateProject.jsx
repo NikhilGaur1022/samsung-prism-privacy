@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import Sidebar from '../../components/Sidebar'
 import PageHeader from '../../components/PageHeader'
+import DataTypePicker from '../../components/DataTypePicker'
 import { createProject, listConsentTemplates } from '../../lib/api'
 import { CheckCircle2 } from 'lucide-react'
 
@@ -16,7 +17,9 @@ export default function CreateProject() {
   const [name, setName] = useState('')
   const [purpose, setPurpose] = useState('')
   const [retention, setRetention] = useState('')
-  const [dataTypes, setDataTypes] = useState('')
+  // Vocabulary codes, not a comma-separated string. Approval checks these against
+  // the notice's list by exact string, so both screens must produce identical values.
+  const [dataTypes, setDataTypes] = useState([])
   const [riskLevel, setRiskLevel] = useState('')
   const [consentTemplateId, setConsentTemplateId] = useState('')
 
@@ -43,9 +46,7 @@ export default function CreateProject() {
         name: name.trim(),
         purpose: purpose.trim(),
         retention: retention.trim() || undefined,
-        dataTypes: dataTypes.trim()
-          ? dataTypes.split(',').map((t) => t.trim()).filter(Boolean)
-          : undefined,
+        dataTypes: dataTypes.length > 0 ? dataTypes : undefined,
         riskLevel: riskLevel || undefined,
         consentTemplateId: consentTemplateId || undefined,
       })
@@ -134,15 +135,15 @@ export default function CreateProject() {
               />
             </label>
 
-            <label className="mt-4 block text-sm font-semibold text-ink">
-              Data types (comma-separated)
-              <input
-                className={FIELD_CLASS}
-                value={dataTypes}
-                onChange={(e) => setDataTypes(e.target.value)}
-                placeholder="e.g. photo, face_embedding"
-              />
-            </label>
+            <fieldset className="mt-4 block">
+              <legend className="text-sm font-semibold text-ink">Data types</legend>
+              <p className="mt-1 text-xs font-medium text-ink-faint">
+                Only categories the chosen consent notice already discloses can be approved.
+              </p>
+              <div className="mt-3">
+                <DataTypePicker value={dataTypes} onChange={setDataTypes} />
+              </div>
+            </fieldset>
 
             <label className="mt-4 block text-sm font-semibold text-ink">
               Risk level

@@ -2040,8 +2040,16 @@ export async function readPersonRedactedPhoto(sessionId, photoId, subjectId, adm
 // DPO-approved selection. Serving frames straight to a session cookie was a read
 // channel over the dataset with no approval step, so the function that did it was
 // removed rather than left unexported for something to pick up again.
+//
+// `buildPersonRedacted` IS exported, and the distinction matters: it is the
+// renderer, not a route. Its one subject-facing caller is the erasure review
+// package (modules/dsar/erasurePackage.service.js), which reaches it only through
+// a DSAR request that belongs to the caller, is an ERASE, and has been through
+// discovery — so the approval step the paragraph above insists on is present, and
+// the frames are the ones an operator already scoped rather than the dataset at
+// large. Any new caller owes the same three checks.
 
-async function buildPersonRedacted(sessionId, photoId, subjectId) {
+export async function buildPersonRedacted(sessionId, photoId, subjectId) {
   const photo = await prisma.photo.findFirst({
     where: { id: photoId, sessionId },
     include: { faces: { select: { bbox: true, taggedSubjectId: true } } },

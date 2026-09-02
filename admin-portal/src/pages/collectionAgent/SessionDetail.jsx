@@ -19,6 +19,7 @@ import {
 import Sidebar from '../../components/Sidebar'
 import PageHeader from '../../components/PageHeader'
 import SessionVideoPanel from '../../components/SessionVideoPanel'
+import PhotoLightbox from '../../components/PhotoLightbox'
 import StatusPill from '../../components/StatusPill'
 import {
   addParticipant,
@@ -237,6 +238,8 @@ export default function SessionDetail() {
   const [busy, setBusy] = useState(false)
   const [notEnrolled, setNotEnrolled] = useState([])
   const [rosterTab, setRosterTab] = useState('qr')
+  // Index into session.photos, or null when the full-size viewer is closed.
+  const [lightbox, setLightbox] = useState(null)
 
   // Fresh, not cached: reload runs right after a mutation (add/remove participant,
   // upload, end) and the 60s GET cache would otherwise echo the pre-mutation
@@ -618,25 +621,36 @@ export default function SessionDetail() {
               </p>
 
               <div className="mt-3 grid grid-cols-3 gap-2 sm:grid-cols-4">
-                {session.photos.map((photo) => (
+                {session.photos.map((photo, i) => (
                   <div key={photo.id} className="group relative overflow-hidden rounded-lg bg-canvas">
                     {/* The agent's basis for the raw original expires at ARCHIVE, so
                         /file 403s from then on and this grid rendered as a wall of
                         broken thumbnails — which read as "my photos are gone". The
-                        redacted derivative is what the role is still entitled to. */}
-                    <img
-                      src={
-                        session.status === 'ARCHIVED'
-                          ? mediaUrl.redactedThumb(sessionId, photo.id)
-                          : mediaUrl.photoThumb(sessionId, photo.id)
-                      }
-                      alt=""
-                      loading="lazy"
-                      decoding="async"
-                      width="480"
-                      height="480"
-                      className="aspect-square w-full object-cover"
-                    />
+                        redacted derivative is what the role is still entitled to.
+
+                        4:3 and contained, not a square crop: these are 16:9 capture
+                        frames, and a square tile hid a quarter of every one of them
+                        with no way to open the whole thing. */}
+                    <button
+                      type="button"
+                      onClick={() => setLightbox(i)}
+                      aria-label={`Open photo ${i + 1} of ${session.photos.length} full size`}
+                      className="block w-full cursor-zoom-in focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+                    >
+                      <img
+                        src={
+                          session.status === 'ARCHIVED'
+                            ? mediaUrl.redactedThumb(sessionId, photo.id)
+                            : mediaUrl.photoThumb(sessionId, photo.id)
+                        }
+                        alt=""
+                        loading="lazy"
+                        decoding="async"
+                        width="480"
+                        height="360"
+                        className="aspect-[4/3] w-full object-contain"
+                      />
+                    </button>
                     {capturing && (
                       <button
                         onClick={() => run(() => deletePhoto(sessionId, photo.id))}
@@ -650,6 +664,24 @@ export default function SessionDetail() {
                   </div>
                 ))}
               </div>
+
+              {/* Full size follows the same rule the tiles do: once the session is
+                  ARCHIVED the agent's basis for the original has expired, so the
+                  viewer gets the redacted derivative and never /file. */}
+              <PhotoLightbox
+                items={session.photos}
+                index={lightbox}
+                onClose={() => setLightbox(null)}
+                onIndex={setLightbox}
+                srcFor={(photo) =>
+                  session.status === 'ARCHIVED'
+                    ? mediaUrl.redacted(sessionId, photo.id)
+                    : mediaUrl.photo(sessionId, photo.id)
+                }
+                captionFor={(photo) =>
+                  photo.createdAt ? new Date(photo.createdAt).toLocaleString() : null
+                }
+              />
             </div>
           </section>
           )}
