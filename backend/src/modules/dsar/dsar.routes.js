@@ -364,7 +364,13 @@ dsarRoutes.get('/:requestId/certificate', async (req, res, next) => {
   try {
     const requestId = uuid.parse(req.params.requestId)
     const certificate = await certificateService.getCertificateForRequest(requestId)
-    if (!certificate) throw new ApiError(404, 'No certificate has been issued for this request')
+    if (!certificate) {
+      const why = await certificateService.explainMissingCertificate(requestId)
+      throw new ApiError(404, why?.explanation ?? 'No certificate has been issued for this request', {
+        reason: why?.reason,
+        certificateUnavailable: why ?? undefined,
+      })
+    }
     const verification = await certificateService.verifyCertificate(certificate.id)
     res.json({ certificate, verification })
   } catch (err) {

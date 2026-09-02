@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
-import { CircleCheck, CircleAlert, ShieldCheck } from 'lucide-react'
+import { CircleCheck, CircleAlert, ShieldCheck, Info } from 'lucide-react'
 import TopBar from '../components/TopBar'
 import Card from '../components/Card'
 import Badge from '../components/Badge'
@@ -21,6 +21,55 @@ export default function Certificate() {
   }, [requestId])
 
   if (error) {
+    // A refused certificate is a correct outcome with a reason, not a failure.
+    // Rendering it as a red error line — or, as the inbox did, as nothing at all
+    // — made an erasure that completed correctly look like one that was ignored.
+    const unavailable = error.details?.certificateUnavailable
+    if (unavailable) {
+      return (
+        <div>
+          <TopBar back />
+          <div className="px-4 md:px-8 pb-6">
+            <div className="flex flex-col items-center text-center">
+              <IconChip icon={Info} tone="neutral" size="lg" />
+              <h1 className="mt-3 text-2xl font-extrabold tracking-tight text-ink">
+                No certificate for this request
+              </h1>
+              <Badge tone="neutral" className="mt-2">
+                {unavailable.reason?.replace(/_/g, ' ').toLowerCase()}
+              </Badge>
+            </div>
+
+            <Card className="mt-5">
+              <p className="text-xs font-medium leading-relaxed text-ink-muted">{error.message}</p>
+            </Card>
+
+            {unavailable.progress && (
+              <Card className="mt-3">
+                <p className="text-xs font-bold uppercase tracking-wide text-ink-faint">Erasure</p>
+                <dl className="mt-2 space-y-2 text-xs">
+                  <Row label="Status" value={unavailable.progress.status} />
+                  <Row label="Scope" value={unavailable.progress.scope} />
+                  <Row
+                    label="Locations complete"
+                    value={`${unavailable.progress.locationsDone} of ${unavailable.progress.locationsTotal}`}
+                  />
+                  <Row
+                    label="Finished"
+                    value={
+                      unavailable.progress.finishedAt &&
+                      new Date(unavailable.progress.finishedAt).toLocaleString()
+                    }
+                  />
+                </dl>
+              </Card>
+            )}
+
+            <UnsignedOutcome outcome={unavailable.summary} />
+          </div>
+        </div>
+      )
+    }
     return (
       <div>
         <TopBar back />
@@ -206,5 +255,43 @@ function Row({ label, value, mono }) {
       <dt className="shrink-0 font-semibold text-ink-faint">{label}</dt>
       <dd className={`text-right text-ink ${mono ? 'break-all font-mono' : 'font-medium'}`}>{String(value)}</dd>
     </div>
+  )
+}
+
+const MEDIUM_LABEL = { photo: 'Photos', recording: 'Recordings', video: 'Videos' }
+
+// The same erased/redacted figures a certificate would carry, for a request that
+// cannot have one. Explicitly marked unsigned: the numbers are true, but nothing
+// here is attested, and presenting them as if they were would be the same
+// overstatement the certificate itself is careful to avoid.
+function UnsignedOutcome({ outcome }) {
+  if (!outcome || typeof outcome !== 'object') return null
+  if (!outcome.total) return null
+  const media = Object.entries(outcome.byMedium ?? {})
+
+  return (
+    <Card className="mt-3">
+      <p className="text-xs font-bold uppercase tracking-wide text-ink-faint">What happened to your data</p>
+      <dl className="mt-3 space-y-2 text-xs">
+        <Row label="Destroyed outright" value={outcome.erased} />
+        <Row label="Kept, with you removed" value={outcome.redacted} />
+      </dl>
+      {media.length > 0 && (
+        <dl className="mt-3 space-y-2 border-t border-hairline pt-3 text-xs">
+          {media.map(([k, v]) => (
+            <div key={k} className="flex items-start justify-between gap-3">
+              <dt className="shrink-0 font-semibold text-ink-faint">{MEDIUM_LABEL[k] ?? k}</dt>
+              <dd className="text-right font-medium text-ink">
+                {v.erased} erased
+                {v.redacted > 0 && <span className="text-ink-faint"> · {v.redacted} redacted</span>}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      )}
+      <p className="mt-3 text-[11px] font-medium leading-relaxed text-ink-faint">
+        These figures are not signed — no certificate was issued for this request.
+      </p>
+    </Card>
   )
 }

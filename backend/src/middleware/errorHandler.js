@@ -47,6 +47,11 @@ const PUBLISHABLE_DETAIL_KEYS = new Set([
   'unresolvedCount',
   'excludedCount',
   'reason',
+  // One purpose-named key rather than generic 'summary'/'progress', which would
+  // widen the envelope for every other error in the system — and the leaks this
+  // allowlist exists to stop were all generically-named objects. Carries only
+  // aggregate counts about the requester's own erasure, no object identifiers.
+  'certificateUnavailable',
   'field',
   'state',
   'from',

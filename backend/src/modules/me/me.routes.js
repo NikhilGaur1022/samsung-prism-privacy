@@ -7,7 +7,11 @@ import * as enrollmentService from '../enrollment/enrollment.service.js'
 import * as meService from './me.service.js'
 import * as dsarService from '../dsar/dsar.service.js'
 import { downloadPackage, issuePackageToken } from '../dsar/export.service.js'
-import { getCertificateForRequest, verifyCertificate } from '../dsar/certificate.service.js'
+import {
+  explainMissingCertificate,
+  getCertificateForRequest,
+  verifyCertificate,
+} from '../dsar/certificate.service.js'
 import { getSubjectTimeline } from '../dsar/timeline.service.js'
 import {
   listErasurePackage,
@@ -273,7 +277,16 @@ meRoutes.get('/dsar/:requestId/certificate', async (req, res, next) => {
     // a request belonging to another principal.
     await dsarService.getRequest(requestId, { subject: req.subject })
     const certificate = await getCertificateForRequest(requestId)
-    if (!certificate) throw new ApiError(404, 'No certificate has been issued yet')
+    if (!certificate) {
+      // Still a 404 — there is no certificate — but it now says which of several
+      // very different reasons applies, and carries the unsigned summary of what
+      // the erasure actually did.
+      const why = await explainMissingCertificate(requestId)
+      throw new ApiError(404, why?.explanation ?? 'No certificate has been issued yet', {
+        reason: why?.reason,
+        certificateUnavailable: why ?? undefined,
+      })
+    }
     res.json({ certificate, verification: await verifyCertificate(certificate.id) })
   } catch (err) {
     next(err)

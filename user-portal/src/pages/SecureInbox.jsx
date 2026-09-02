@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Award, Download, Inbox } from 'lucide-react'
+import { Award, Download, Inbox, Info } from 'lucide-react'
 import TopBar from '../components/TopBar'
 import Card from '../components/Card'
 import Badge from '../components/Badge'
@@ -62,16 +62,44 @@ function PackageDownload({ requestId }) {
 
 function CertificateStatus({ requestId }) {
   const [state, setState] = useState('loading')
+  const [unavailable, setUnavailable] = useState(null)
 
   useEffect(() => {
     getMyDsarCertificate(requestId)
       .then(() => setState('available'))
-      .catch((err) => setState(err.status === 404 ? 'none' : 'error'))
+      .catch((err) => {
+        if (err.status === 404) {
+          setUnavailable(err.details?.certificateUnavailable ?? null)
+          setState('none')
+        } else {
+          setState('error')
+        }
+      })
   }, [requestId])
 
   if (state === 'loading') return <p className="mt-2 text-xs font-medium text-ink-faint">Checking for a certificate…</p>
   if (state === 'error') return <p className="mt-2 text-xs font-semibold text-danger">Could not check for a certificate.</p>
-  if (state === 'none') return null
+
+  // This used to `return null`, so an erasure that completed but could not be
+  // certified showed the principal nothing whatsoever. Silence read as "you were
+  // ignored" when the truth was a deliberate refusal to overstate.
+  if (state === 'none') {
+    if (!unavailable || unavailable.reason === 'NOT_AN_ERASURE') return null
+    return (
+      <Link
+        to={`/requests/${requestId}/certificate`}
+        className="mt-3 flex items-start gap-2 rounded-2xl bg-surface-muted px-3 py-2 text-xs font-medium text-ink-muted w-fit focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+      >
+        <Info size={14} strokeWidth={2} className="mt-0.5 shrink-0 text-ink-faint" />
+        <span>
+          {unavailable.reason === 'NOT_EXECUTED'
+            ? 'This erasure has not been carried out yet.'
+            : 'No certificate was issued for this erasure.'}
+          <span className="font-bold text-brand"> See why</span>
+        </span>
+      </Link>
+    )
+  }
 
   return (
     <Link

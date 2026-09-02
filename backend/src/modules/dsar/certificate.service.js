@@ -369,6 +369,119 @@ export async function getCertificateForRequest(dsarRequestId) {
   return prisma.deletionCertificate.findUnique({ where: { dsarRequestId } })
 }
 
+// Erasure request types. A certificate attests to destruction, so nothing else
+// can produce one.
+const ERASURE_TYPES = new Set(['ERASE', 'WITHDRAWAL_ERASURE'])
+
+/**
+ * Says WHY no certificate exists for a request.
+ *
+ * Every refusal in issueCertificate() is deliberate, but all a principal ever
+ * saw was a bare 404 — and the inbox rendered that as nothing at all, so an
+ * erasure that completed correctly and one that had been ignored looked
+ * identical. "We declined to sign a statement broader than what we did" and
+ * "nothing happened" are opposite facts and were indistinguishable.
+ *
+ * The branches below mirror issueCertificate()'s gates one for one. If a gate is
+ * added or relaxed there, it has to change here too — a reason that no longer
+ * matches the code is worse than no reason, because it is a confident wrong
+ * answer on a compliance surface.
+ *
+ * Returns null when the request does not exist; the caller owns that 404.
+ */
+export async function explainMissingCertificate(dsarRequestId) {
+  const request = await prisma.dsarRequest.findUnique({
+    where: { id: dsarRequestId },
+    select: { id: true, type: true, status: true, projectId: true },
+  })
+  if (!request) return null
+
+  if (!ERASURE_TYPES.has(request.type)) {
+    return {
+      reason: 'NOT_AN_ERASURE',
+      explanation: `A deletion certificate attests to an erasure. This request is of type ${request.type}, so there is nothing for one to certify.`,
+    }
+  }
+
+  const job = await prisma.purgeJob.findFirst({
+    where: { dsarRequestId },
+    orderBy: { createdAt: 'desc' },
+    include: { locations: true },
+  })
+
+  if (!job) {
+    return {
+      reason: 'NOT_EXECUTED',
+      explanation:
+        'This erasure has not been carried out yet. A certificate is issued once the purge has run and every location has completed.',
+    }
+  }
+
+  // Offered even where a certificate cannot be, because what was destroyed is a
+  // §11 question rather than a certification one. Uses summariseOutcome so the
+  // unsigned figures and the signed ones are produced by the same code and
+  // cannot describe the same job differently.
+  const context = {
+    progress: {
+      purgeJobId: job.id,
+      status: job.status,
+      scope: job.scope,
+      locationsDone: job.locationsDone,
+      locationsTotal: job.locationsTotal,
+      finishedAt: job.finishedAt ? job.finishedAt.toISOString() : null,
+    },
+    summary: summariseOutcome(job.locations),
+    signed: false,
+  }
+
+  if (job.scope === 'PARTIAL') {
+    return {
+      reason: 'PARTIAL_SCOPE',
+      explanation:
+        'This erasure removed a named subset of items rather than everything held about you, so it cannot be certified as a whole-record deletion. The completed job is the record of what was destroyed.',
+      ...context,
+    }
+  }
+
+  if (job.scope === 'PROJECT' && !request.projectId) {
+    return {
+      reason: 'PROJECT_WITHOUT_PROJECT',
+      explanation:
+        'This was a project-scoped erasure, but the request does not name which project. A certificate has to state that, so it cannot be issued for this job.',
+      ...context,
+    }
+  }
+
+  if (job.status !== 'COMPLETED' || job.locations.some((l) => l.status !== 'DONE' && l.status !== 'SKIPPED')) {
+    return {
+      reason: 'PURGE_INCOMPLETE',
+      explanation: `The erasure is still in progress (${job.locationsDone} of ${job.locationsTotal} locations complete). A certificate is issued at 100% or not at all.`,
+      ...context,
+    }
+  }
+
+  // Only whole-subject erasures destroy the key. A project purge deliberately
+  // keeps it, or the subject's other projects would become unreadable.
+  if (job.scope !== 'PROJECT' && !job.keyDestroyedAt) {
+    return {
+      reason: 'KEY_NOT_DESTROYED',
+      explanation:
+        'The erasure completed but the per-subject encryption key was not destroyed, so it cannot yet be certified as a whole-record deletion. Please raise this with the Data Protection Officer.',
+      ...context,
+    }
+  }
+
+  // A finished, certifiable purge with no certificate is not a design decision,
+  // it is an operational gap — the signing step did not run. Said plainly rather
+  // than dressed up as an expected state.
+  return {
+    reason: 'NOT_ISSUED',
+    explanation:
+      'This erasure completed and is eligible for a certificate, but none has been issued. That is not expected — please raise it with the Data Protection Officer.',
+    ...context,
+  }
+}
+
 // Published so a principal or auditor can verify a certificate without us. It is
 // a public key; exposing it is the point.
 export function publicKeyInfo() {
