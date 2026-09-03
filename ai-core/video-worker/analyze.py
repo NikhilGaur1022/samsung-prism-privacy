@@ -187,13 +187,38 @@ def analyze(path: str, scan_pii: bool = True) -> dict:
     if not capture.isOpened():
         raise ValueError("Could not open video for decoding")
 
-    stride = max(1, settings.DETECT_STRIDE)
+    # Sampling rate in TIME, not in frames, so a 60fps clip does not do twice the
+    # work of a 30fps one for identical footage. The configured frame stride is
+    # the floor, which keeps the old behaviour on low-fps material.
+    stride = max(
+        settings.DETECT_STRIDE,
+        int(round(meta.fps / max(0.1, settings.DETECT_FPS))) or 1,
+    )
     pii_stride = max(1, int(round(meta.fps / max(0.01, settings.PII_SAMPLE_FPS))))
-    tracker = Tracker(meta.fps)
+    # The DETECTION rate, not the clip's frame rate. Tracker.step() runs once per
+    # sampled frame, so every budget inside it is denominated in samples.
+    tracker = Tracker(meta.fps / stride)
+
+    # Downscale factor for detection only. insightface resizes to det_size
+    # internally, so this changes what we pay for the resize, not what the
+    # detector sees. Boxes come back multiplied by 1/det_scale, in the original
+    # frame's coordinates, because every consumer downstream — the quality score,
+    # the representative crop, the backend's redaction schedule — works there.
+    longest = max(meta.width, meta.height)
+    det_scale = 1.0
+    if settings.DETECT_MAX_SIDE > 0 and longest > settings.DETECT_MAX_SIDE:
+        det_scale = settings.DETECT_MAX_SIDE / float(longest)
+    logger.info(
+        "analyze %dx%d @%.2ffps -> stride=%d det_scale=%.3f pii_stride=%d",
+        meta.width, meta.height, meta.fps, stride, det_scale, pii_stride,
+    )
 
     # Kept so a representative crop can be cut after the tracks are known —
     # the best frame for a track is only identifiable once the whole track is.
     best_frames: dict[int, np.ndarray] = {}
+    # Quality of the best face on each cached frame, so the cache can evict the
+    # least useful entry rather than an arbitrary one.
+    best_quality_by_frame: dict[int, float] = {}
     pii_samples: list[tuple[int, list]] = []
     frames_detected = 0
     index = -1
@@ -214,11 +239,22 @@ def analyze(path: str, scan_pii: bool = True) -> dict:
                 continue
 
             frames_detected += 1
-            faces = app.get(frame)
+            if det_scale < 1.0:
+                small = cv2.resize(
+                    frame, None, fx=det_scale, fy=det_scale, interpolation=cv2.INTER_AREA
+                )
+            else:
+                small = frame
+            faces = app.get(small)
             detections = []
+            best_quality = 0.0
+            inv = 1.0 / det_scale
             for face in faces:
-                box = tuple(float(v) for v in face.bbox)
+                # Back to full-resolution coordinates before anything else sees
+                # them. Everything downstream indexes into `frame`, not `small`.
+                box = tuple(float(v) * inv for v in face.bbox)
                 quality = _quality(frame, box, float(face.det_score))
+                best_quality = max(best_quality, quality)
                 embedding = (
                     [float(v) for v in face.normed_embedding]
                     if face.normed_embedding is not None
@@ -228,7 +264,19 @@ def analyze(path: str, scan_pii: bool = True) -> dict:
 
             tracker.step(index, detections)
             if detections:
+                # Bounded. Unbounded, this held one 6MB frame per detected frame
+                # and reached ~2.5GB on a 40-second 1080p clip — the point at
+                # which JPEG encoding started failing and /analyze answered 503.
+                #
+                # Evicting the lowest-quality frame keeps exactly the frames a
+                # representative crop is ever cut from; a track whose frame was
+                # evicted simply gets no crop, which the caller already handles.
                 best_frames[index] = frame.copy()
+                best_quality_by_frame[index] = best_quality
+                if len(best_frames) > max(1, settings.BEST_FRAME_CACHE):
+                    worst = min(best_quality_by_frame, key=best_quality_by_frame.get)
+                    best_frames.pop(worst, None)
+                    best_quality_by_frame.pop(worst, None)
     finally:
         capture.release()
 
@@ -257,13 +305,30 @@ def analyze(path: str, scan_pii: bool = True) -> dict:
         if rep_frame in best_frames:
             crop = _crop_jpeg(best_frames[rep_frame], rep_box)
 
+        # Widened by one sampling interval at each end, and this is a privacy
+        # rule rather than a rounding convenience.
+        #
+        # A face is only ever SEEN on a sampled frame, but it was already there
+        # on the frames between the previous sample and that one, and it is
+        # still there after the last one. The schedule blurs [start, end]
+        # exactly, so those frames went out unmasked — two frames of a real
+        # face at each end of every track, which at 30fps is the flash of a
+        # visible face that gets reported as "it un-blurs for a moment".
+        #
+        # redact.py holds the nearest keyframe outside the observed range, so
+        # widening costs a couple of frames of blur over the spot the face
+        # entered from. That is the cheap side of this trade.
+        margin = max(0, stride - 1)
+        first_frame = max(0, track.start_frame - margin)
+        final_frame = track.last_frame + margin
+
         out_tracks.append(
             TrackSchema(
                 track_id=track.track_id,
-                start_frame=track.start_frame,
-                end_frame=track.last_frame,
-                start_sec=round(track.start_frame / meta.fps, 3),
-                end_sec=round(track.last_frame / meta.fps, 3),
+                start_frame=first_frame,
+                end_frame=final_frame,
+                start_sec=round(first_frame / meta.fps, 3),
+                end_sec=round(final_frame / meta.fps, 3),
                 boxes=[
                     Box(frame=f, x1=b[0], y1=b[1], x2=b[2], y2=b[3]) for f, b in track.boxes
                 ],

@@ -52,21 +52,53 @@ class Track:
     def predict(self, frame: int):
         """Where this face probably is on `frame`, given where it was going.
 
-        Constant velocity. Over the 3-frame gaps this runs on, anything more
-        elaborate (Kalman, optical flow) buys accuracy the box dilation already
-        covers.
+        Constant velocity, clamped to one box-length of travel.
+
+        The clamp matters once a track is coasting. Velocity is per video frame
+        and the gap during a coast is the whole missed interval, so an
+        unclamped extrapolation of a face panning at ~27px/frame reaches 400px
+        away by the end of a half-second coast — far enough to sit on top of a
+        DIFFERENT person and match them on IoU. That silently merges two people
+        into one track, and a merged track tagged to a consenting subject
+        leaves both of them unblurred in the release. Refusing to predict
+        further than the face's own width costs a missed re-link, which just
+        starts a new track; the alternative costs a privacy breach.
         """
         gap = frame - self.last_frame
         if gap <= 0:
             return self.box
         vx, vy = self.velocity
         x1, y1, x2, y2 = self.box
-        return (x1 + vx * gap, y1 + vy * gap, x2 + vx * gap, y2 + vy * gap)
+        w, h = x2 - x1, y2 - y1
+        dx = max(-w, min(w, vx * gap))
+        dy = max(-h, min(h, vy * gap))
+        return (x1 + dx, y1 + dy, x2 + dx, y2 + dy)
 
     def update(self, frame: int, box, det_score: float):
         gap = max(1, frame - self.last_frame)
-        px1, py1, _, _ = self.box
+        held = self.box
+        px1, py1, _, _ = held
         self.velocity = ((box[0] - px1) / gap, (box[1] - py1) / gap)
+
+        # A coasted gap is a HOLD, not a movement, and the two look identical
+        # to the redactor unless this says otherwise.
+        #
+        # redact.py interpolates linearly between consecutive keyframes. With
+        # nothing here, a track that lost its face and re-found it later left
+        # two keyframes far apart in time AND in space, and the blur box slid
+        # smoothly between them across the whole gap — drifting through empty
+        # background while the real face, which had gone somewhere else
+        # entirely, was left unmasked for the duration.
+        #
+        # That is not theoretical: on a 10.7s clip one track held keyframes 48
+        # frames apart, and the blur it painted travelled across the subject's
+        # chest for 1.6 seconds as a second, wrong box while the face was
+        # blurred by a different track. Pinning the last seen box at the frame
+        # before the re-detection makes the gap a flat hold followed by a snap,
+        # which is what HOLD_SEC always claimed to do.
+        if self.missing and frame - self.last_frame > 1:
+            self.boxes.append((frame - 1, held))
+
         self.boxes.append((frame, box))
         self.last_frame = frame
         self.det_score = max(self.det_score, det_score)
@@ -83,10 +115,23 @@ class Tracker:
     at session scale (a handful of faces) is nothing.
     """
 
-    def __init__(self, fps: float):
-        # Coast for HOLD_SEC of real time, not a fixed frame count, so the same
-        # setting behaves the same on 24fps and 60fps footage.
-        self.max_missing = max(1, int(round(settings.HOLD_SEC * fps)))
+    def __init__(self, detect_fps: float):
+        # HOLD_SEC of real time, expressed in the unit `missing` is counted in.
+        #
+        # `step()` is called once per DETECTED frame and increments `missing` by
+        # one, so the budget has to be in detected frames. This was built with
+        # the clip's own frame rate instead, which on 30fps footage sampled at
+        # 10/sec made the coast 15 samples — 45 video frames, 1.5 seconds,
+        # three times the configured half-second.
+        #
+        # The cost was not a slightly generous hold. A track kept alive that
+        # long re-links to a detection made 1.5s later, and the redactor then
+        # interpolates its blur box between two positions an age apart. On a
+        # 10.7s test clip it produced two extra tracks whose only keyframes were
+        # 39 and 48 frames apart, each painting a wrong, drifting blur square
+        # over the subject's chest — the "two or three boxes for one person"
+        # this pipeline was reported for.
+        self.max_missing = max(1, int(round(settings.HOLD_SEC * detect_fps)))
         self.active: list[Track] = []
         self.finished: list[Track] = []
 

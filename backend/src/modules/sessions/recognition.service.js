@@ -11,6 +11,12 @@ import { CLUSTER_THRESHOLD, MATCH_THRESHOLD, AUTO_TAG_THRESHOLD } from '../../co
 import { analyzeVideo } from '../videos/video.service.js'
 import { videoCaptureEnabled } from '../../lib/videoFeature.js'
 
+// How often to tell the queue a video is still being analysed.
+//
+// Comfortably under the recognition worker's 60s lockDuration, so several beats
+// land inside every lock window and a single missed tick cannot stall the job.
+const VIDEO_HEARTBEAT_MS = Number(process.env.VIDEO_HEARTBEAT_MS ?? 15_000)
+
 // Detection, clustering and gallery matching used to live inside
 // recognition.worker.js, which builds a BullMQ Worker at module scope — importing
 // that file opens a Redis connection as a side effect. The end-to-end suite needs
@@ -145,7 +151,7 @@ export async function processSession(sessionId, jobId, { onProgress } = {}) {
  * leaving no track boxes: a redaction pass over it would blur nothing and still
  * write a derivative, producing an unmasked clip stamped clean.
  */
-async function analyseSessionVideos(sessionId, detected) {
+async function analyseSessionVideos(sessionId, detected, { onProgress } = {}) {
   if (!videoCaptureEnabled()) return { analysed: 0, deferred: 0, tracks: 0, skipped: 'disabled' }
 
   const videos = await prisma.videoAsset.findMany({
@@ -160,6 +166,22 @@ async function analyseSessionVideos(sessionId, detected) {
 
   for (const video of videos) {
     let result = null
+    // A clip is ONE await that can run for minutes — a 40-second 1080p clip
+    // measured at 9m22s on CPU — where the photo pass above heartbeats after
+    // every photo. Without a heartbeat of its own the lock (60s) expires long
+    // before the call returns, BullMQ declares the job stalled and redelivers
+    // it, and processSession() opens by deleting the session's detections. The
+    // result is the first run's work wiped by its own retry, twice, and a
+    // session that ends with fewer tracks than it found.
+    //
+    // A timer rather than a per-frame callback because the work happens inside
+    // the Python worker; from here the only observable is that it has not
+    // returned yet, and "still waiting" is exactly what the lock needs to hear.
+    const beat = onProgress
+      ? setInterval(() => {
+          Promise.resolve(onProgress({ videoId: video.id, phase: 'analysing' })).catch(() => {})
+        }, VIDEO_HEARTBEAT_MS)
+      : null
     try {
       result = await analyzeVideo(video.id)
     } catch (err) {
@@ -167,6 +189,11 @@ async function analyseSessionVideos(sessionId, detected) {
       // catch is here so an unexpected throw cannot abort the photo pass that
       // has already completed.
       logger.error({ err, videoId: video.id, sessionId }, 'video analysis threw — clip left unanalysed')
+    } finally {
+      // finally, not after the await: a throw above would otherwise leave the
+      // timer running for the life of the process, extending the lock on a job
+      // that has already given up.
+      if (beat) clearInterval(beat)
     }
 
     if (!result) {
@@ -277,7 +304,7 @@ async function runRecognition(sessionId, jobId, { onProgress } = {}) {
   // videoTrackCount and repTrackId, and VideoFaceTrack.clusterId points at the
   // same cluster a photo face does — but nothing ever called analyzeVideo, so
   // every one of those columns sat at its default and no clip was ever analysed.
-  const videoStats = await analyseSessionVideos(sessionId, detected)
+  const videoStats = await analyseSessionVideos(sessionId, detected, { onProgress })
 
   const clusters = clusterFaces(detected)
 

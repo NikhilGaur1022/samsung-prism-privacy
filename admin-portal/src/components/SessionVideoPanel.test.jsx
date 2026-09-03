@@ -85,6 +85,38 @@ describe('SessionVideoPanel', () => {
     expect(container.querySelector('video')).toBeNull()
   })
 
+  // Uploading a clip stores it; it does not queue it. The recognition job is
+  // enqueued in exactly one place — endSession() — so a clip sitting in a
+  // session still open for capture has no worker coming for it, ever.
+  //
+  // The panel used to label that "Waiting for analysis" and add "still being
+  // processed", both of which describe a queue the clip is not in. An operator
+  // who left the screen and came back saw the identical words and read it as a
+  // hung pipeline, when the truth was that the run was waiting on a button.
+  it('says a clip in an open session is not queued, not that it is processing', async () => {
+    listVideos.mockResolvedValue({
+      videos: [clip({ status: 'PENDING_ANALYSIS', hasRedacted: false })],
+    })
+    render(<SessionVideoPanel sessionId="s1" canCapture sessionStatus="ACTIVE" />)
+
+    // Twice, deliberately: the per-clip badge and the panel notice.
+    expect(await screen.findAllByText(/not analysed yet/i)).toHaveLength(2)
+    expect(await screen.findByText(/Nothing runs until you end the session/i)).toBeInTheDocument()
+    expect(screen.queryByText(/still being processed/i)).toBeNull()
+  })
+
+  // The same clip status once the session is closed means the opposite: the job
+  // is enqueued and running, so the processing notice is the honest one.
+  it('calls the same clip status processing once the session has been ended', async () => {
+    listVideos.mockResolvedValue({
+      videos: [clip({ status: 'PENDING_ANALYSIS', hasRedacted: false })],
+    })
+    render(<SessionVideoPanel sessionId="s1" sessionStatus="PROCESSING" />)
+
+    expect(await screen.findByText(/still being processed/i)).toBeInTheDocument()
+    expect(screen.queryByText(/Nothing runs until you end the session/i)).toBeNull()
+  })
+
   it('explains that unfinished clips are what hold the session open', async () => {
     listVideos.mockResolvedValue({
       videos: [clip(), clip({ id: 'v2', status: 'ANALYZED', hasRedacted: false })],

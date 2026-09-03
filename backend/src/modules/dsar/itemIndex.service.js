@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client'
 import { prisma } from '../../config/prisma.js'
 import { isResolved } from '../../lib/photoState.js'
 
@@ -105,6 +106,25 @@ function distinctSpeakers(segments) {
  * inline form enumerated DEFERRED and FAILED and so treated a PENDING photo,
  * whose redaction never ran at all, as available.
  */
+/**
+ * The lawful basis for holding one link, in the shape the item grid reads.
+ *
+ * `recordingItem` has asserted this since audio shipped; the photo and video
+ * forms never did, so every captured frame and clip rendered a blank basis in
+ * the DSAR item grid while the audio row beside it said "Consent" — thirteen of
+ * sixteen items blank on a subject whose PhotoSubject rows all carried a
+ * consentId. An operator reading "on what basis do we hold this" got no answer
+ * for the two largest item classes.
+ *
+ * Returned as `createMeta`, not `meta`, and the distinction is load-bearing.
+ * `writeItem` refreshes `meta` on every rebuild; the import path asserts its own
+ * `IMPORT_UNVERIFIED` / `PROJECT_CONSENT` once at ingest and must survive one.
+ * See the note on writeItem.
+ */
+function lawfulBasisMeta(consentId) {
+  return { lawfulBasis: consentId ? 'CONSENT' : 'UNVERIFIED' }
+}
+
 export function isRedactedAvailable(photo) {
   return isResolved(photo)
 }
@@ -124,6 +144,7 @@ function photoItem(link) {
     capturedAt: photo.takenAt ?? photo.createdAt,
     sharedSubjectCount: photo.subjects.length,
     redactedAvailable: isRedactedAvailable(photo),
+    createMeta: lawfulBasisMeta(link.consentId),
   }
 }
 
@@ -242,20 +263,84 @@ function voiceEnrollmentItem(enrollment) {
  * walk sees it too and would otherwise relabel it COLLECTION_SESSION and wipe
  * its `meta.lawfulBasis` on the next rebuild.
  */
+/**
+ * `createMeta` is asserted, never refreshed. `meta` is refreshed.
+ *
+ * The two exist because the table carries two kinds of fact under one column.
+ * `recordingItem` returns `meta`: segment counts and audible seconds, derived
+ * from the transcript and wrong the moment they go stale, so a rebuild must
+ * overwrite them. The lawful basis is the opposite kind of fact — asserted once,
+ * about the state of the world when the row was made, and the import path
+ * (import.service.ingestItem) creates its row itself precisely so its
+ * `IMPORT_UNVERIFIED` survives the index refresh that follows. That refresh was
+ * safe only by accident: `photoItem` returned no `meta` at all, so Prisma saw
+ * `undefined` and skipped the column. Adding a basis to `photoItem` under the
+ * old shape would have quietly rewritten every imported photo's basis to
+ * CONSENT on the next rebuild.
+ */
 async function writeItem(item, { at, deletedAt = null }, client = prisma) {
-  const { subjectId, type, sourceTable, sourceId, origin, ...fields } = item
-  return client.subjectDataItem.upsert({
+  const { subjectId, type, sourceTable, sourceId, origin, createMeta, ...fields } = item
+  const row = await client.subjectDataItem.upsert({
     where: { subjectId_type_sourceTable_sourceId: { subjectId, type, sourceTable, sourceId } },
-    create: { subjectId, type, sourceTable, sourceId, origin, ...fields, deletedAt, indexedAt: at },
+    create: {
+      subjectId,
+      type,
+      sourceTable,
+      sourceId,
+      origin,
+      ...fields,
+      ...(createMeta ? { meta: createMeta } : {}),
+      deletedAt,
+      indexedAt: at,
+    },
     update: { ...fields, deletedAt, indexedAt: at },
   })
+  return { row, createMeta: createMeta ?? null }
+}
+
+/**
+ * Fills in `createMeta` on rows that have no meta yet.
+ *
+ * `meta IS NULL` is the whole guard, and it is what makes this assert-once
+ * rather than overwrite: an import row always has meta, so it is never matched;
+ * a row created by this pass already has it; only a row that predates the basis
+ * being asserted at all is touched. That last case is the backfill — the index
+ * held 126 photo and 4 video rows with a null basis before this shipped, and
+ * without it the fix would only apply to frames collected in future.
+ *
+ * Grouped by the JSON value so a subject with forty frames costs two statements,
+ * not forty.
+ */
+async function assertCreateMeta(written, client = prisma) {
+  const byMeta = new Map()
+  for (const { row, createMeta } of written) {
+    if (!createMeta) continue
+    const key = JSON.stringify(createMeta)
+    const bucket = byMeta.get(key)
+    if (bucket) bucket.ids.push(row.id)
+    else byMeta.set(key, { meta: createMeta, ids: [row.id] })
+  }
+
+  for (const { meta, ids } of byMeta.values()) {
+    await client.subjectDataItem.updateMany({
+      where: { id: { in: ids }, meta: { equals: Prisma.DbNull } },
+      data: { meta },
+    })
+  }
 }
 
 async function writeAll(entries, at, client = prisma) {
+  const written = []
   for (let i = 0; i < entries.length; i += WRITE_CHUNK) {
     const chunk = entries.slice(i, i + WRITE_CHUNK)
-    await Promise.all(chunk.map(({ item, deletedAt }) => writeItem(item, { at, deletedAt }, client)))
+    written.push(
+      ...(await Promise.all(
+        chunk.map(({ item, deletedAt }) => writeItem(item, { at, deletedAt }, client)),
+      )),
+    )
   }
+  await assertCreateMeta(written, client)
+  return written
 }
 
 /**
@@ -327,6 +412,7 @@ function videoItem(link) {
     capturedAt: video.createdAt,
     sharedSubjectCount: Math.max(video.subjects.length, 1),
     redactedAvailable: isVideoRedactedAvailable(video),
+    createMeta: lawfulBasisMeta(link.consentId),
   }
 }
 
@@ -418,6 +504,10 @@ export async function indexPhotoSubject(link, { at = new Date() } = {}) {
   if (!row) return null
 
   const written = await writeItem(photoItem(row), { at }, prisma)
+  // Same assert-once pass the bulk path runs. Import calls this straight after
+  // creating its own row, so the null-meta guard inside is what stops it
+  // rewriting an IMPORT_UNVERIFIED basis to CONSENT.
+  await assertCreateMeta([written], prisma)
 
   const siblings = row.photo.subjects.filter((s) => s.id !== row.id).map((s) => s.id)
   if (siblings.length > 0) {
@@ -427,7 +517,7 @@ export async function indexPhotoSubject(link, { at = new Date() } = {}) {
     })
   }
 
-  return written
+  return written.row
 }
 
 /**

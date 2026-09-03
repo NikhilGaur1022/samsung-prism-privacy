@@ -1044,6 +1044,18 @@ enum AccessObjectType {
   // caught the same way: fail-closed, because the AccessEvent is written before
   // the blob is decrypted.
   REDACTED_VIDEO
+  // The detection overlay: boxes and track labels drawn over UNMASKED frames.
+  // Its own value rather than REDACTED_VIDEO because it is the opposite claim —
+  // a DPO asking "who has seen an unblurred face" needs these reads to be
+  // findable, and filing them under the redacted derivative's name would bury
+  // them among the safe ones.
+  DETECTED_VIDEO
+  // The erasure review package: the frames a principal is shown before they
+  // confirm, with every other face blurred and their own left visible. Read BY
+  // the data principal about themselves, which is still a read of personal data
+  // and still belongs in the ledger.
+  ERASURE_REVIEW_PHOTO
+  ERASURE_REVIEW_PACKAGE
   TEXT_DOCUMENT
   REDACTED_TEXT_DOCUMENT
 }

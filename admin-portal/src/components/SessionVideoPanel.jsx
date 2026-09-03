@@ -36,6 +36,24 @@ const STATUS_LABEL = {
   DEFERRED: 'Analysis failed',
 }
 
+// PENDING_ANALYSIS means two completely different things depending on whether
+// the session is still open, and the panel used to render both as "Waiting for
+// analysis" — a sentence that describes a queue.
+//
+// While the session is ACTIVE there is no queue. Upload stores the clip and
+// stops; the recognition job is enqueued in exactly one place, endSession() in
+// backend/src/modules/sessions/session.service.js, so a clip uploaded into an
+// open session is waiting for a button nobody told the operator to press. It
+// will sit there permanently, and leaving the screen and coming back shows the
+// same words, which is what makes it read as a hung pipeline rather than as a
+// step the operator still owes.
+//
+// Once the session is PROCESSING the original label is true, and stays.
+function labelFor(video, sessionStatus) {
+  if (video.status === 'PENDING_ANALYSIS' && sessionStatus === 'ACTIVE') return 'Not analysed yet'
+  return STATUS_LABEL[video.status] ?? video.status
+}
+
 // Mirrors backend/src/lib/photoState.js — a clip is only finished when the
 // status says so AND a derivative actually exists. Two facts, because a status
 // can be set by a code path that crashed before writing the bytes.
@@ -50,13 +68,16 @@ function isFinished(video) {
   return video.status === 'REDACTED' && Boolean(video.hasRedacted)
 }
 
-function describe(video) {
+function describe(video, sessionStatus) {
   if (isFinished(video)) return null
   if (video.status === 'DEFERRED') {
     return 'The video worker could not analyse this clip. Nothing has been blurred, so it will not be released and the session cannot be archived until it succeeds.'
   }
   if (video.status === 'REDACTED') {
     return 'This clip is marked blurred but no blurred copy was written. It is being treated as unfinished.'
+  }
+  if (video.status === 'PENDING_ANALYSIS' && sessionStatus === 'ACTIVE') {
+    return 'Nothing is running on this clip yet — uploading stores it, it does not queue it. Analysis starts when you end the session, and then continues on the server whether or not this page is open.'
   }
   return 'Blurring has not finished. The session stays open until it does.'
 }
@@ -156,6 +177,15 @@ export default function SessionVideoPanel({ sessionId, canCapture, sessionStatus
   }
 
   const unfinished = videos.filter((v) => !isFinished(v)).length
+  // Split on the CLIP, not the session. "Nothing is queued" is a property of a
+  // clip that is PENDING_ANALYSIS in a session still open for capture; an
+  // ANALYZED clip is genuinely mid-pipeline and holds the session open whatever
+  // the session status says. Gating the notice on sessionStatus alone told an
+  // operator with a half-processed session that nothing was running.
+  const notQueued = videos.filter(
+    (v) => v.status === 'PENDING_ANALYSIS' && sessionStatus === 'ACTIVE',
+  ).length
+  const inFlight = unfinished - notQueued
 
   return (
     <section className="rounded-card bg-surface p-6 shadow-card">
@@ -242,18 +272,26 @@ export default function SessionVideoPanel({ sessionId, canCapture, sessionStatus
             </p>
           )}
 
-          {unfinished > 0 && sessionStatus !== 'ARCHIVED' && (
+          {notQueued > 0 && (
             <p className="mt-4 flex items-start gap-2 rounded-lg bg-warning-soft p-3 text-sm font-medium text-warning">
               <AlertTriangle size={15} strokeWidth={2.5} className="mt-0.5 shrink-0" />
-              {unfinished} clip{unfinished === 1 ? '' : 's'} still being processed. This session
-              cannot be archived or handed off until every clip is blurred.
+              {notQueued} clip{notQueued === 1 ? '' : 's'} not analysed yet. Nothing runs until you
+              end the session — use “End session &amp; analyse clips” above.
+            </p>
+          )}
+
+          {inFlight > 0 && sessionStatus !== 'ARCHIVED' && (
+            <p className="mt-4 flex items-start gap-2 rounded-lg bg-warning-soft p-3 text-sm font-medium text-warning">
+              <AlertTriangle size={15} strokeWidth={2.5} className="mt-0.5 shrink-0" />
+              {inFlight} clip{inFlight === 1 ? '' : 's'} still being processed. This session cannot
+              be archived or handed off until every clip is blurred.
             </p>
           )}
 
           <ul className="mt-4 flex flex-col gap-3">
             {videos.map((video) => {
               const finished = isFinished(video)
-              const note = describe(video)
+              const note = describe(video, sessionStatus)
               return (
                 <li key={video.id} className="rounded-lg border border-line p-3">
                   <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
@@ -265,7 +303,7 @@ export default function SessionVideoPanel({ sessionId, canCapture, sessionStatus
                       </span>
                     </p>
                     <StatusPill tone={STATUS_TONE[video.status] ?? 'neutral'}>
-                      {STATUS_LABEL[video.status] ?? video.status}
+                      {labelFor(video, sessionStatus)}
                     </StatusPill>
                   </div>
 

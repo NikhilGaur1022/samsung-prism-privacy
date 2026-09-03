@@ -1,5 +1,27 @@
+import { Agent } from 'undici'
 import { logger } from './logger.js'
 import { ApiError } from '../middleware/errorHandler.js'
+
+// One Agent per distinct deadline, built once and reused.
+//
+// A new Agent per request would open a fresh connection pool per call and leak
+// sockets under load, which is worse than the timeout bug this exists to fix.
+const agents = new Map()
+
+function dispatcherFor(deadlineMs) {
+  let agent = agents.get(deadlineMs)
+  if (!agent) {
+    agent = new Agent({
+      // Both must be raised together: headersTimeout covers "the worker is
+      // thinking and has not replied yet", bodyTimeout covers a slow or stalled
+      // response stream — a redacted video can be hundreds of megabytes.
+      headersTimeout: deadlineMs,
+      bodyTimeout: deadlineMs,
+    })
+    agents.set(deadlineMs, agent)
+  }
+  return agent
+}
 
 // Every HTTP call this API makes to a Python worker goes through here.
 //
@@ -182,6 +204,20 @@ export async function workerFetch(service, url, { body, method = 'POST', headers
         ...(headers && { headers }),
         ...(body && { body: typeof body === 'function' ? body() : body }),
         signal: AbortSignal.timeout(deadline),
+        // AbortSignal is NOT sufficient on its own, and the gap is invisible
+        // until a call runs long.
+        //
+        // undici enforces its own `headersTimeout` (300s) and `bodyTimeout`
+        // (300s), independent of the signal. A worker that does all its work
+        // before replying — which is exactly what /analyze does — sends no
+        // headers until it finishes, so a 6-minute analysis died with
+        // `HeadersTimeoutError` while this file said the deadline was 600s and
+        // the operator saw a clip parked DEFERRED with no usable reason.
+        //
+        // Raised to the service's own deadline so there is ONE number that
+        // decides when a call is too slow, and 0 disables undici's clock in
+        // favour of the AbortSignal above.
+        dispatcher: dispatcherFor(deadline),
       })
 
       if (response.ok) {

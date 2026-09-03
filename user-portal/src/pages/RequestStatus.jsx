@@ -25,6 +25,21 @@ const COARSE_TONE = {
   CLOSED: 'success',
 }
 
+// The same argument COARSE_LABELS makes about status, applied to type. ERASE,
+// CORRECT and WITHDRAWAL_ERASURE are column values in our schema, not words
+// anyone has a right to be shown — "ERASE request" was the heading on the screen
+// where a data principal decides whether to destroy their own data.
+const TYPE_LABELS = {
+  ACCESS: 'Access',
+  CORRECT: 'Correction',
+  ERASE: 'Erasure',
+  WITHDRAWAL_ERASURE: 'Erasure after withdrawing consent',
+  GRIEVANCE: 'Grievance',
+  NOMINATION: 'Nomination',
+}
+
+const typeLabel = (type) => TYPE_LABELS[type] ?? type
+
 const STATUS_TONE = {
   RECEIVED: 'neutral',
   TRIAGE: 'neutral',
@@ -82,7 +97,7 @@ function RequestList() {
                 <Card className="flex items-center gap-3">
                   <IconChip icon={FileText} tone="brand" size="sm" />
                   <div className="min-w-0 flex-1">
-                    <p className="text-sm font-semibold text-ink">{r.type}</p>
+                    <p className="text-sm font-semibold text-ink">{typeLabel(r.type)}</p>
                     <SlaCountdown sla={r.sla} />
                   </div>
                   <Badge tone={COARSE_TONE[r.coarseStatus] ?? 'neutral'}>
@@ -154,7 +169,9 @@ function RequestDetail({ id }) {
           </Badge>
           <Badge tone={STATUS_TONE[request.status] ?? 'neutral'}>{request.status}</Badge>
         </div>
-        <h1 className="mt-3 text-2xl font-extrabold tracking-tight text-ink">{request.type} request</h1>
+        <h1 className="mt-3 text-2xl font-extrabold tracking-tight text-ink">
+          {typeLabel(request.type)} request
+        </h1>
         {request.description && (
           <p className="mt-2 text-sm font-medium leading-relaxed text-ink-muted">{request.description}</p>
         )}

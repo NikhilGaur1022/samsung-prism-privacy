@@ -115,7 +115,7 @@ function EnrollmentBanner({ status }) {
           <p className="text-sm font-bold text-brand">Finish setting up face matching</p>
           <p className="text-xs font-medium text-brand/80">
             {status.biometricConsent
-              ? `${status.poses.length} of 5 angles captured — takes about a minute.`
+              ? `${status.poses.length} of ${status.required ?? 3} angles captured — takes about a minute.`
               : 'Not set up yet. Pictures of you have to be tagged by hand until it is.'}
           </p>
         </div>

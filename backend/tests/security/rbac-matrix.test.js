@@ -112,6 +112,13 @@ const MATRIX = {
   'GET /api/v1/projects/:projectId/exports/:id/download': A('dataOwner', 'super_admin'),
 
   // --- consent templates ---
+  // The data-type picker's controlled vocabulary. Every admin role: the DPO
+  // authors it onto a notice, the data owner picks a subset onto a project, and
+  // the others read it back on a screen. It is a word list, not anyone's data —
+  // it names no principal and returns no record. Admin-only all the same,
+  // because the portals are the only consumers and requireAdminAuth is the
+  // cheapest way to keep it off the open internet.
+  'GET /api/v1/data-types': A('dpo', 'dataOwner', 'collectionAgent', 'dataAdmin', 'super_admin'),
   'GET /api/v1/consent-templates': A('dpo', 'dataOwner', 'collectionAgent', 'super_admin'),
   'GET /api/v1/consent-templates/:templateId': A('dpo', 'dataOwner', 'collectionAgent', 'super_admin'),
   'POST /api/v1/consent-templates': A('dpo', 'super_admin'),
@@ -268,6 +275,17 @@ const MATRIX = {
     'dataAdmin',
     'super_admin',
   ),
+  // The detection overlay: boxes drawn over UNMASKED frames, so every face in it
+  // is legible. captureRoles, not readRoles — it follows the ORIGINAL's access
+  // rules, not the redacted derivative's, which is why dataOwner and dataAdmin
+  // are absent here while present on the row above. The agent needs it to catch
+  // a track that merged two people before tagging locks that mistake in; nobody
+  // else has business seeing an unblurred face without break-glass. Reads are
+  // logged as DETECTED_VIDEO precisely so a DPO can ask who has seen one.
+  'GET /api/v1/sessions/:sessionId/videos/:videoId/detected': A(
+    'collectionAgent',
+    'super_admin',
+  ),
   'GET /api/v1/sessions/:sessionId/video-tracks/:trackId/crop': A(
     'collectionAgent',
     'dataOwner',
@@ -343,6 +361,20 @@ const MATRIX = {
   'GET /api/v1/me/dsar/:requestId/package': A('subject'),
   'POST /api/v1/me/dsar/:requestId/package-token': A('subject'),
   'GET /api/v1/me/dsar/:requestId/certificate': A('subject'),
+  // The erasure review package: the frames a principal is shown, their own face
+  // visible and every other face blurred, before they authorise the destruction.
+  // Subject-only by construction — the service loads the request by
+  // (id, subjectId off the verified token) and 404s anything belonging to
+  // somebody else, and it refuses any request that has not been through
+  // discovery, so it is never a read over the corpus at large. No admin role
+  // reaches it: an operator inspecting a principal's frames goes through the
+  // DSAR item grid and break-glass, which is separately justified and logged.
+  'GET /api/v1/me/dsar/:requestId/erasure-package': A('subject'),
+  'GET /api/v1/me/dsar/:requestId/erasure-package/photos/:photoId': A('subject'),
+  'GET /api/v1/me/dsar/:requestId/erasure-package.zip': A('subject'),
+  // The authorisation itself. Nothing is destroyed until this is called, and
+  // only the principal can call it — that is the entire point of the gate.
+  'POST /api/v1/me/dsar/:requestId/confirm-erasure': A('subject'),
   'GET /api/v1/consent/projects': A('subject'),
   'POST /api/v1/consent/projects/:projectId/grant': A('subject'),
   'POST /api/v1/consent/projects/:projectId/revoke': A('subject'),

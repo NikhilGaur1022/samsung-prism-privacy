@@ -337,9 +337,15 @@ export default function TextDocumentEditor({
                 {doc.status}
               </span>
             </div>
+            {/* `piiEntities` is only populated by pressing Auto-Detect in THIS
+                browser session, so a document already analysed and redacted —
+                ten stored PII spans, Aadhaar and PAN among them — reported "0
+                PII entities found" to whoever opened it. On a REDACTED document
+                that reads as "this document is clean", which is the opposite of
+                what the spans say. Fall back to the PII spans actually stored. */}
             <p className="text-xs text-ink-faint">
               {rawText.length.toLocaleString()} characters · {spans.length} tagged spans ·{' '}
-              {piiEntities.length} PII entities found
+              {piiEntities.length || spans.filter((s) => s.piiType).length} PII entities found
             </p>
           </div>
         </div>

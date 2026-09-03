@@ -111,7 +111,16 @@ export function createApp() {
     }),
   )
 
-  app.use(cors({ origin: corsOrigins, credentials: true }))
+  // Content-Disposition has to be named explicitly: CORS exposes only the six
+  // safelisted response headers by default, so a cross-origin reader sees null
+  // for everything else. Both portals sit on a different origin from the API and
+  // both parse the filename out of this header when saving a package — the DSAR
+  // export, the erasure review ZIP, the project export. Without it every
+  // download the server carefully named `prism-erasure-review-<id>.zip` landed
+  // on the client's generic fallback name instead.
+  app.use(
+    cors({ origin: corsOrigins, credentials: true, exposedHeaders: ['Content-Disposition'] }),
+  )
 
   // JSON list responses are the only thing worth compressing here. Media is
   // already-compressed JPEG and export archives are already deflated, so both

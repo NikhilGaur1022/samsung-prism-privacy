@@ -8,6 +8,10 @@ import * as consentService from '../../src/modules/consent/consent.service.js'
 import { runDiscovery } from '../../src/modules/dsar/discovery.service.js'
 import { verifyCertificate } from '../../src/modules/dsar/certificate.service.js'
 import {
+  confirmErasure,
+  listErasurePackage,
+} from '../../src/modules/dsar/erasurePackage.service.js'
+import {
   buildWorld,
   checkPreconditions,
   closeResources,
@@ -95,6 +99,23 @@ test('erasure runs to completion and issues a signed certificate', async () => {
     world.admins.dpo,
   )
   await dsarService.runDiscoveryForRequest(request.id, world.admins.dataAdmin)
+
+  // The principal authorises their own erasure. assertSubjectConfirmed() refuses
+  // execute() until this has happened, which is the whole point of the review
+  // gate — an operator's approval says the request is lawful, not that the
+  // person still wants it having seen what it covers.
+  //
+  // This test predates the gate and drove execute() straight off discovery, so
+  // it has been failing (and taking the four assertions below with it) since the
+  // gate shipped. Walking the real path is also the stronger test: the manifest
+  // the principal is shown is built from the same scoping query the purge
+  // re-derives from, so a drift between them now fails here.
+  const review = await listErasurePackage(request.id, world.subjects.a.masterUserId)
+  assert.ok(
+    review.counts.total > 0,
+    'the review package was empty — the principal would be asked to authorise nothing',
+  )
+  await confirmErasure(request.id, world.subjects.a.masterUserId)
 
   const result = await dsarService.execute(request.id, world.admins.dataAdmin)
 

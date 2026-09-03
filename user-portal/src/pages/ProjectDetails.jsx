@@ -1,17 +1,41 @@
 import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
-import { Fingerprint, Clock, Database, ScanFace, User, ShieldCheck, ShieldOff } from 'lucide-react'
+import {
+  AudioLines,
+  Fingerprint,
+  Clock,
+  Database,
+  FileText,
+  ScanFace,
+  User,
+  ShieldCheck,
+  ShieldOff,
+} from 'lucide-react'
 import TopBar from '../components/TopBar'
 import Card from '../components/Card'
 import Badge from '../components/Badge'
 import IconChip from '../components/IconChip'
 import { grantConsent, listConsentProjects, revokeConsent } from '../lib/api'
 
-const COLLECTED = [
-  { label: 'Photographs of you', icon: ScanFace },
-  { label: 'Biometric face data', icon: Fingerprint },
-  { label: 'Full Name', icon: User },
-]
+// Icons only. WHAT is collected comes from the project's own declared data types
+// (`dataTypeLabels`, resolved server-side against lib/dataTypes.js) — this list
+// used to be hardcoded to photographs / face data / full name, which meant a
+// project collecting Face, Voice and Written text showed the principal no
+// mention of voice or text on the screen where they consent to it.
+const TYPE_ICONS = {
+  Face: ScanFace,
+  'Face embedding': Fingerprint,
+  Voice: AudioLines,
+  'Voice embedding': Fingerprint,
+  'Written text': FileText,
+  Name: User,
+}
+
+const iconFor = (label) => TYPE_ICONS[label] ?? Database
+
+// Only for a legacy project that declared nothing. A blank list would read as
+// "we collect nothing", which is the one thing it cannot mean.
+const UNDECLARED = 'Not itemised on this notice'
 
 export default function ProjectDetails() {
   const { projectId } = useParams()
@@ -101,12 +125,17 @@ export default function ProjectDetails() {
         <div className="mt-6 md:col-span-2 md:mt-0">
           <h2 className="text-base font-bold text-ink">Collected Data</h2>
           <div className="mt-3 space-y-2.5">
-            {COLLECTED.map(({ label, icon: Icon }) => (
-              <Card key={label} className="flex items-center gap-3 py-3">
-                <IconChip icon={Icon} tone="brand" size="sm" />
-                <span className="flex-1 text-sm font-semibold text-ink">{label}</span>
-              </Card>
-            ))}
+            {(project.dataTypeLabels?.length ? project.dataTypeLabels : [UNDECLARED]).map(
+              (label) => {
+                const Icon = iconFor(label)
+                return (
+                  <Card key={label} className="flex items-center gap-3 py-3">
+                    <IconChip icon={Icon} tone="brand" size="sm" />
+                    <span className="flex-1 text-sm font-semibold text-ink">{label}</span>
+                  </Card>
+                )
+              },
+            )}
           </div>
 
           {error && <p className="mt-4 text-sm font-semibold text-danger">{error.message}</p>}

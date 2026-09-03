@@ -18,12 +18,41 @@ class Settings(BaseSettings):
     ENV: str = Field(default="development")
     PROJECT_NAME: str = "Samsung-Prism-Privacy-Video-Worker"
 
-    # Detection stride, in frames. 3 at 30fps = detect ~10x/sec, and the tracker
-    # fills the two frames in between. The cost is linear in 1/stride, so this
-    # is the single biggest performance knob; the risk of raising it is that a
-    # fast head turn moves further between detections than the box dilation
-    # covers. Tuned with VIDEO_HOLD_SEC, not alone.
+    # Detection stride, in frames. Kept as the floor and as the value /health
+    # reports; DETECT_FPS below is what actually decides the sampling rate.
     DETECT_STRIDE: int = Field(default=3)
+
+    # How many times a SECOND to run the detector, independent of the clip's
+    # frame rate.
+    #
+    # The stride above is a frame count, which silently made the work scale with
+    # fps: 3 on a 30fps clip is 10 detections/sec, and the same 3 on a phone's
+    # 60fps recording is 20 — twice the CPU for the same footage and no extra
+    # information, because HOLD_SEC already carries a track across half a second.
+    # A 40-second 1080p60 clip took over five minutes and was killed by the
+    # caller's timeout, which the operator saw as "no faces detected".
+    #
+    # 10/sec reproduces the old behaviour exactly at 30fps and halves it at 60.
+    DETECT_FPS: float = Field(default=10.0)
+
+    # Longest edge, in pixels, of the frame handed to the detector.
+    #
+    # buffalo_l runs at det_size 640x640 and resizes whatever it is given, so a
+    # 1920x1080 frame is scaled down INSIDE insightface anyway — passing full HD
+    # buys no accuracy and costs a large resize per detected frame. Boxes are
+    # scaled back to original coordinates immediately, so everything downstream
+    # (quality, crops, the redaction schedule) still works in full-resolution
+    # space. 0 disables the downscale.
+    DETECT_MAX_SIDE: int = Field(default=960)
+
+    # How many full frames may be held for cutting representative crops.
+    #
+    # This used to be unbounded: one `frame.copy()` per frame that had any
+    # detection. At 1080p that is 6MB each, and a 40-second clip with a face
+    # throughout kept ~400 of them — about 2.5GB, which is where the encode
+    # failures and the 503s came from. The cache keeps the highest-quality
+    # frames, which are the ones a representative crop is ever taken from.
+    BEST_FRAME_CACHE: int = Field(default=48)
 
     # How long a track's last known box keeps being blurred after the detector
     # stops finding it. This is the temporal half of failing closed: a detector

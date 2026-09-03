@@ -36,7 +36,12 @@ function FaceEnrollmentCard({ onBiometricChange }) {
         ? 'Not set up. Photos of you have to be tagged by hand until it is.'
         : complete
           ? `${status.count} photo${status.count === 1 ? '' : 's'} on file, covering ${status.poses.length} angles.`
-          : `${status.poses.length} of 5 angles captured — a few more makes matching far more reliable.`
+          : // `status.required` (3), never `allPoses.length` (5). The API lists five
+            // poses it will ACCEPT; the capture stepper offers three, and three with
+            // a front shot is what `complete` needs. Hardcoding five told people to
+            // reach a target that does not exist, on the same card as a stepper
+            // reading "1 of 3".
+            `${status.poses.length} of ${status.required ?? 3} angles captured — a few more makes matching far more reliable.`
 
   return (
     <Card className="mt-5">

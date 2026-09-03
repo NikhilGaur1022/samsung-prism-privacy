@@ -1474,13 +1474,36 @@ export async function promoteIfRedacted(sessionId) {
         }
       }
 
-      const [photoCount, linkRows] = await Promise.all([
+      // Clips count too. VideoSubject is the consent link for a clip exactly as
+      // PhotoSubject is for a frame — same erasure key, same lawful basis — but
+      // this path only ever read PhotoSubject, so a VIDEO session handed off as
+      // `0 photos · 0 subjects · 0 consent links` no matter how many people were
+      // tagged in it. The Discovery Workspace showed those batches as empty, and
+      // linkCount is what the downstream consumer reconciles the batch against,
+      // so ingest was reconciling video against a zero it should never have
+      // been given. The audio and text finalize paths already count their own
+      // links this way; video was the one that never got it.
+      //
+      // photoCount stays a count of PHOTOS. It names one medium and a clip is
+      // not a frame — the clip count is carried by the session's own video rows,
+      // and inflating this would make a stills figure that no longer means
+      // anything.
+      const [photoCount, linkRows, videoLinkRows] = await Promise.all([
         prisma.photo.count({ where: { sessionId } }),
         prisma.photoSubject.findMany({
           where: { photo: { sessionId } },
           select: { subjectId: true },
         }),
+        prisma.videoSubject.findMany({
+          where: { video: { sessionId } },
+          select: { subjectId: true },
+        }),
       ])
+
+      const subjectCount = new Set(
+        [...linkRows, ...videoLinkRows].map((l) => l.subjectId),
+      ).size
+      const linkCount = linkRows.length + videoLinkRows.length
 
       await prisma.$transaction(async (tx) => {
         await tx.session.update({
@@ -1493,13 +1516,13 @@ export async function promoteIfRedacted(sessionId) {
             sessionId,
             projectId: session.projectId,
             photoCount,
-            subjectCount: new Set(linkRows.map((l) => l.subjectId)).size,
-            linkCount: linkRows.length,
+            subjectCount,
+            linkCount,
           },
           update: {
             photoCount,
-            subjectCount: new Set(linkRows.map((l) => l.subjectId)).size,
-            linkCount: linkRows.length,
+            subjectCount,
+            linkCount,
           },
         })
       })
@@ -1508,7 +1531,7 @@ export async function promoteIfRedacted(sessionId) {
         entityType: 'Session',
         entityId: sessionId,
         action: 'SESSION_ARCHIVED',
-        payload: { photoCount, linkCount: linkRows.length },
+        payload: { photoCount, linkCount, videoLinkCount: videoLinkRows.length },
       })
 
       logger.info({ sessionId, photoCount }, 'session promoted to ARCHIVED — redaction complete')

@@ -274,6 +274,29 @@ export default function ReviewPhotos() {
   // blurring a still, and a clip whose analysis failed will not be blurred at
   // all. Saying so here means the agent knows before they press the button,
   // rather than discovering it as a session that never leaves REDACTING.
+  // The header counted stills only, so a clip-only session opened on "0 photos ·
+  // 0 faces detected · 0 tagged across 0 people" directly above a clip with a
+  // detected, named track in it. The numbers were true and the sentence was a
+  // lie: it reads as "nothing was found", which is the one thing the agent must
+  // not believe right before pressing an irreversible Finalize.
+  const clipCount = videos?.length ?? 0
+  const trackCount = (videos ?? []).reduce((sum, v) => sum + (v._count?.tracks ?? 0), 0)
+  const hasStills = data.photos.length > 0
+  const reviewTitle =
+    clipCount > 0 && !hasStills
+      ? 'Review tagged clips'
+      : clipCount > 0
+        ? 'Review tagged capture'
+        : 'Review tagged photos'
+  const stillsSummary = `${data.photos.length} photo${data.photos.length === 1 ? '' : 's'} · ${totalFaces} face${totalFaces === 1 ? '' : 's'} detected · ${taggedFaces} tagged across ${uniquePeople} ${uniquePeople === 1 ? 'person' : 'people'}`
+  const clipsSummary = `${clipCount} clip${clipCount === 1 ? '' : 's'} · ${trackCount} face track${trackCount === 1 ? '' : 's'}`
+  const reviewSummary =
+    clipCount > 0 && !hasStills
+      ? clipsSummary
+      : clipCount > 0
+        ? `${stillsSummary} · ${clipsSummary}`
+        : stillsSummary
+
   const videoNotice = (() => {
     if (videos === null) return null
     if (videos.length === 0) return null
@@ -290,8 +313,8 @@ export default function ReviewPhotos() {
 
       <main className="flex-1 px-10 py-8">
         <PageHeader
-          title="Review tagged photos"
-          subtitle={`${data.photos.length} photo${data.photos.length === 1 ? '' : 's'} · ${totalFaces} face${totalFaces === 1 ? '' : 's'} detected · ${taggedFaces} tagged across ${uniquePeople} ${uniquePeople === 1 ? 'person' : 'people'}`}
+          title={reviewTitle}
+          subtitle={reviewSummary}
           action={
             <div className="flex items-center gap-3">
               <Link
@@ -372,14 +395,95 @@ export default function ReviewPhotos() {
           ))}
         </div>
 
-        {data.photos.length === 0 ? (
-          <div className="mt-6 rounded-card bg-surface p-6 shadow-card">
-            <EmptyState
-              icon={Eye}
-              title="No photos"
-              message="This session has no photos to review."
-            />
+        {/* Clips, shown BEFORE the stills.
+            This screen is the last look before finalize blurs everything, and it
+            used to describe the clips in a sentence and show none of them: a
+            video-only session landed on "No photos — this session has no photos
+            to review", which reads as the upload having been lost.
+
+            What is offered is the DETECTION OVERLAY, not the original — the same
+            derivative the capture panel shows, with every detected face boxed and
+            labelled. That is the thing worth checking here: whether a track
+            follows one person, because a merged track tagged to a consenting
+            subject leaves both of them unblurred in the release. Once a blurred
+            copy exists it is shown alongside, so the agent can see the result of
+            the decision they just made. */}
+        {videos && videos.length > 0 && (
+          <div className="mt-6">
+            <h2 className="text-sm font-bold text-ink">
+              {videos.length} clip{videos.length === 1 ? '' : 's'} in this session
+            </h2>
+            <div className="mt-3 grid gap-6 lg:grid-cols-2">
+              {videos.map((video) => (
+                <div key={video.id} className="rounded-card bg-surface p-3 shadow-card">
+                  {video.hasDetected ? (
+                    <>
+                      <video
+                        controls
+                        preload="metadata"
+                        className="w-full rounded-lg bg-canvas"
+                        src={mediaUrl.detectedVideo(sessionId, video.id)}
+                      />
+                      <p className="mt-2 flex items-start gap-1.5 text-xs font-semibold text-warning">
+                        <Eye size={13} strokeWidth={2.5} className="mt-0.5 shrink-0" />
+                        <span>
+                          Detected faces, <strong>not blurred</strong>. Check each box follows one
+                          person before finalizing.
+                        </span>
+                      </p>
+                    </>
+                  ) : video.status === 'DEFERRED' ? (
+                    <p className="p-4 text-xs font-semibold text-danger">
+                      This clip could not be analysed, so nothing in it will be blurred and the
+                      session stays open until the video worker succeeds.
+                    </p>
+                  ) : (
+                    <p className="p-4 text-xs font-medium text-ink-faint">
+                      Still being analysed — the preview appears here when it finishes.
+                    </p>
+                  )}
+
+                  {video.hasRedacted && (
+                    <>
+                      <video
+                        controls
+                        preload="metadata"
+                        className="mt-3 w-full rounded-lg bg-canvas"
+                        src={mediaUrl.redactedVideo(sessionId, video.id)}
+                      />
+                      <p className="mt-1.5 flex items-center gap-1.5 text-xs font-semibold text-success">
+                        <EyeOff size={13} strokeWidth={2.5} />
+                        Blurred copy — this is what leaves the session.
+                      </p>
+                    </>
+                  )}
+
+                  <p className="mt-2 text-center text-xs font-semibold text-ink-faint">
+                    {video.durationSec ? `${video.durationSec.toFixed(1)}s` : 'Clip'}
+                    {video.width && video.height ? ` · ${video.width}×${video.height}` : ''}
+                    {typeof video._count?.tracks === 'number'
+                      ? ` · ${video._count.tracks} track${video._count.tracks === 1 ? '' : 's'}`
+                      : ''}
+                  </p>
+                </div>
+              ))}
+            </div>
           </div>
+        )}
+
+        {data.photos.length === 0 ? (
+          // Only an empty state when the session really is empty. A video session
+          // has its clips rendered above and does not need to be told it has no
+          // photos.
+          videos && videos.length > 0 ? null : (
+            <div className="mt-6 rounded-card bg-surface p-6 shadow-card">
+              <EmptyState
+                icon={Eye}
+                title="Nothing to review"
+                message="This session has no photos or clips."
+              />
+            </div>
+          )
         ) : (
           <div className="mt-6 grid gap-6 lg:grid-cols-2">
             {data.photos.map((photo, index) => {

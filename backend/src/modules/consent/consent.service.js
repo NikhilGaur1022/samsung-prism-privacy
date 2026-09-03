@@ -3,6 +3,7 @@ import { ApiError } from '../../middleware/errorHandler.js'
 import { writeAuditLog } from '../../lib/auditLog.js'
 import { signConsent } from '../../lib/consent.js'
 import { deleteAllEnrollments } from '../enrollment/enrollment.service.js'
+import { labelForDataType } from '../../lib/dataTypes.js'
 import { logger } from '../../lib/logger.js'
 
 // Subject-facing. The subject grants consent to a whole project from the
@@ -23,6 +24,21 @@ export async function listProjectsForSubject(subjectId) {
     const consent = consents[0] ?? null
     return {
       ...project,
+      // Resolved here rather than in the portal, because lib/dataTypes.js is the
+      // one place the vocabulary lives and its own header argues against a
+      // second copy — "the copy that drifts is the one that makes a lawful
+      // project unapprovable". The consent screen was rendering a hardcoded list
+      // (photographs, face data, full name) that had no relationship to what the
+      // project declares: a project collecting FACE, VOICE and TEXT showed the
+      // principal no mention of voice or text, and offered them a name field the
+      // notice never claimed. That is the §5 notice being wrong on the screen
+      // where consent is actually given.
+      //
+      // /api/v1/data-types cannot serve this — it is behind requireAdminAuth,
+      // and rightly so.
+      dataTypeLabels: Array.isArray(project.dataTypes)
+        ? project.dataTypes.map((code) => labelForDataType(code)).filter(Boolean)
+        : [],
       consent: consent && {
         consentId: consent.consentId,
         status: consent.status,

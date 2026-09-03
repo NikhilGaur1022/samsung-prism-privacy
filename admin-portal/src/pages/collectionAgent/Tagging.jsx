@@ -277,6 +277,11 @@ export default function Tagging() {
   // auto-tag is already TAGGED, and stays overridable right up to finalize.
   const pending = suggested.length + unidentified.length
 
+  // What this session actually holds, from the cluster counts already loaded.
+  const hasStills = data.clusters.some((c) => (c.faceCount ?? 0) > 0)
+  const hasClips = data.clusters.some((c) => (c.videoTrackCount ?? 0) > 0)
+  const reviewNoun = hasClips && !hasStills ? 'Review clips' : hasClips ? 'Review capture' : 'Review photos'
+
   const handleAcceptAll = () =>
     run(() => acceptSuggestions(sessionId, suggested.map((c) => c.id)))
 
@@ -302,7 +307,13 @@ export default function Tagging() {
                 className="flex items-center gap-2 rounded-lg bg-brand px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-dark"
               >
                 <CheckCircle2 size={16} strokeWidth={2} />
-                {pending > 0 ? `${pending} left to tag` : 'Review photos →'}
+                {/* The label follows what the session actually holds. It said
+                    "Review photos" unconditionally, so a video session sent the
+                    agent to a screen headed "No photos — this session has no
+                    photos to review", which reads as the clip having been lost.
+                    The clusters already carry both counts; nothing extra is
+                    fetched to work this out. */}
+                {pending > 0 ? `${pending} left to tag` : `${reviewNoun} →`}
               </button>
             </div>
           }

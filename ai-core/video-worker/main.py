@@ -39,6 +39,11 @@ def health():
         "gpu": GPU_ENABLED,
         "encoder": ENCODER,
         "detect_stride": settings.DETECT_STRIDE,
+        # The stride is a floor; DETECT_FPS is what actually sets the sampling
+        # rate, and DETECT_MAX_SIDE what the detector is fed. Reported so an
+        # operator diagnosing a slow clip can see the knobs that matter.
+        "detect_fps": settings.DETECT_FPS,
+        "detect_max_side": settings.DETECT_MAX_SIDE,
         "hold_sec": settings.HOLD_SEC,
     }
 
@@ -69,8 +74,20 @@ def _spool(upload: UploadFile) -> str:
     return handle.name
 
 
+# Every endpoint below is a plain `def`, deliberately, and must stay one.
+#
+# FastAPI runs an `async def` handler ON the event loop and a plain `def` handler
+# in a threadpool. Every operation in this service — probe, analyze, mute,
+# annotate, redact — is synchronous, CPU-bound and measured in minutes for a long
+# clip. As `async def` they held the loop for the whole run, so a single analysis
+# made the worker unreachable: an agent uploading the next clip saw /probe and
+# /mute hang, and the upload appeared to do nothing until the earlier analysis
+# finished. Nothing in the logs said so, because from the server's side the
+# request simply had not been read yet.
+
+
 @app.post("/probe", response_model=ProbeResponse)
-async def probe_endpoint(file: UploadFile = File(...)):
+def probe_endpoint(file: UploadFile = File(...)):
     """Container facts only — what the upload route needs to accept or reject a
     file, without paying for a detection pass."""
     path = _spool(file)
@@ -83,7 +100,7 @@ async def probe_endpoint(file: UploadFile = File(...)):
 
 
 @app.post("/analyze", response_model=AnalyzeResponse)
-async def analyze_endpoint(
+def analyze_endpoint(
     file: UploadFile = File(...),
     scan_pii: bool = Form(True),
 ):
@@ -105,7 +122,7 @@ async def analyze_endpoint(
 
 
 @app.post("/mute")
-async def mute_endpoint(file: UploadFile = File(...)):
+def mute_endpoint(file: UploadFile = File(...)):
     """Return the clip with every audio stream removed.
 
     Called at INGEST, before the backend stores anything. It is a separate call
@@ -136,7 +153,7 @@ async def mute_endpoint(file: UploadFile = File(...)):
 
 
 @app.post("/annotate")
-async def annotate_endpoint(
+def annotate_endpoint(
     file: UploadFile = File(...),
     tracks: str = Form(...),
 ):
@@ -184,7 +201,7 @@ async def annotate_endpoint(
 
 
 @app.post("/redact")
-async def redact_endpoint(
+def redact_endpoint(
     file: UploadFile = File(...),
     schedule: str = Form(...),
 ):

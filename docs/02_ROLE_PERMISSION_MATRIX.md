@@ -34,6 +34,9 @@ Enforcement contract: **every rule below is enforced server-side in `requireRole
 | `POST /projects/:id/assignments` † | ✗ | ✗ | ✓ own | ✗ | ✗ | ✓ |
 | `GET /auth/admin/users?role=` | ✗ | ✗ | ✓ (agent picker) | ✗ | ✗ | ✓ |
 | `GET/POST /consent-templates` † | read rendered | ✓ CRUD | ✓ read | ✓ read | ✗ | ✓ |
+| `GET /data-types` (picker vocabulary — names no principal) | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `GET /sessions/:id/videos/:videoId/redacted` (blurred) | ✗ | ✗ | ✓ own | ✓ assigned | ✓ | ✓ |
+| `GET /sessions/:id/videos/:videoId/detected` (**unmasked** overlay) | ✗ | ✗ | ✗ | ✓ assigned | ✗ | ✓ |
 | `GET /projects/:id/sessions` | ✗ | ✓ | ✓ own | ✗ | ✓ | ✓ |
 | `GET /projects/:id/handoffs` | ✗ | ✓ | ✓ own | ✗ | ✓ | ✓ |
 | `GET /projects/:id/report` | ✗ | ✓ | ✓ own | ✗ | ✓ | ✓ |
@@ -176,6 +179,10 @@ A voice print is §2 sensitive personal data on the same footing as a face embed
 | `GET /me/dsar/:id` | ✓ own | ✗ | ✗ | ✗ | ✗ | ✗ |
 | `POST /me/dsar/:id/package-token` | ✓ own | ✗ | ✗ | ✗ | ✗ | ✗ |
 | `GET /me/dsar/:id/timeline` (own milestones) | ✓ own | ✗ | ✗ | ✗ | ✗ | ✗ |
+| `GET /me/dsar/:id/erasure-package` (review manifest) | ✓ own | ✗ | ✗ | ✗ | ✗ | ✗ |
+| `GET /me/dsar/:id/erasure-package/photos/:photoId` | ✓ own | ✗ | ✗ | ✗ | ✗ | ✗ |
+| `GET /me/dsar/:id/erasure-package.zip` | ✓ own | ✗ | ✗ | ✗ | ✗ | ✗ |
+| `POST /me/dsar/:id/confirm-erasure` (the authorisation) | ✓ own | ✗ | ✗ | ✗ | ✗ | ✗ |
 | `GET /dsar/evidence` (vault) | ✗ | ✓ all | ◐ assigned | ✗ | ✓ all | ✓ |
 | `GET /dsar/:id/media` (break-glass targets) | ✗ | ✓ | ✗ | ✗ | ✓ | ✓ |
 | `GET /dsar/subjects/search` (identity lookup) | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ |

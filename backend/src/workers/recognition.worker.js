@@ -32,7 +32,13 @@ export const recognitionWorker = new Worker(
   FACE_QUEUE_NAME,
   async (job) =>
     processSession(job.data.sessionId, job.data.jobId, {
-      onProgress: async ({ done, total }) => {
+      // Called from two places with two different shapes: `{done, total, faces}`
+      // after each photo, and `{videoId, phase}` on a timer while a clip is being
+      // analysed — a clip is one await that can run for minutes, so it cannot
+      // heartbeat per unit of work the way the photo loop does. Both mean the
+      // same thing to the queue, so the payload is passed through to the log
+      // rather than destructured into fields only one caller supplies.
+      onProgress: async (progress) => {
         try {
           await job.extendLock(job.token, LOCK_DURATION_MS)
         } catch (err) {
@@ -40,7 +46,7 @@ export const recognitionWorker = new Worker(
           // advisory lock will stop the duplicate from corrupting anything, but
           // it has to be visible — a silently-lost lock is how the partial
           // detection sets happened.
-          logger.error({ err, jobId: job.id, done, total }, 'lost the job lock mid-session')
+          logger.error({ err, jobId: job.id, ...progress }, 'lost the job lock mid-session')
         }
       },
     }),

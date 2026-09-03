@@ -237,6 +237,12 @@ export async function getEnrollmentStatus(subjectId) {
     max: MAX_PER_SUBJECT,
     poses,
     allPoses: ENROLLMENT_POSES,
+    // How many angles actually make this complete, which is NOT allPoses.length
+    // and NOT `max`. The portal used to hardcode 5 from allPoses and told people
+    // "1 of 5 angles captured" on the same screen as a capture stepper that
+    // offers three — a target they could never reach. REQUIRED_POSES is the only
+    // number that answers "how many more do I need", so it is the one sent.
+    required: REQUIRED_POSES,
     complete: poses.includes('FRONT') && poses.length >= REQUIRED_POSES,
   }
 }

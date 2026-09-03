@@ -98,7 +98,7 @@ export default function Enroll() {
             </h1>
             <p className="mt-1 text-sm font-medium text-ink-muted">
               {status.biometricConsent
-                ? 'Five quick photos so we can find pictures of you automatically.'
+                ? `${status.required ?? 3} quick photos so we can find pictures of you automatically.`
                 : 'One last step, and it is entirely up to you.'}
             </p>
           </div>
