@@ -57,6 +57,9 @@ venv/
 *.mp4
 *.mov
 *.webm
+# Pics/ holds app screenshots, a screen recording and public press photos used
+# as demo inputs. Nothing in it is private footage, so it is deliberately kept.
+!Pics/**
 .huggingface/
 .gitnexus
 
